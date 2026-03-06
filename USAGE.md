@@ -29,6 +29,10 @@ cp target/release/paperbridge ~/.local/bin/paperbridge
 paperbridge config init --interactive
 ```
 
+Interactive init now asks `Zotero source (cloud/local)`.
+- `cloud` keeps normal Zotero Web API flow.
+- `local` configures desktop API defaults (`api_base=http://127.0.0.1:23119/api`, `library_type=user`, `user_id=0`, `api_key=<unset>`).
+
 2. Validate config:
 
 ```bash
@@ -67,6 +71,14 @@ Optional:
 - `PAPERBRIDGE_TIMEOUT_SECS=20`
 - `PAPERBRIDGE_LOG_LEVEL=info`
 
+### Local Zotero Desktop API mode
+
+If Zotero Desktop is running with local API enabled:
+
+```bash
+paperbridge config set api_base http://127.0.0.1:23119/api
+```
+
 ### Config commands
 
 ```bash
@@ -75,7 +87,7 @@ paperbridge config get
 paperbridge config get library_type
 paperbridge config set library_type user
 paperbridge config set user_id 123456
-paperbridge config resolve-user-id --login nottrevon
+paperbridge config resolve-user-id --login username
 paperbridge config validate
 ```
 

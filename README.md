@@ -11,6 +11,12 @@ paperbridge config validate
 paperbridge query --q "machine learning" --limit 3
 ```
 
+For Zotero Desktop local API mode, use:
+
+```bash
+paperbridge config set api_base http://127.0.0.1:23119/api
+```
+
 ## Documentation
 
 - Full usage and command reference: `USAGE.md`
