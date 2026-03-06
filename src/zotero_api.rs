@@ -109,7 +109,20 @@ impl ZoteroApiClient {
                 req = req.header("Zotero-API-Key", key);
             }
 
-            let response = req.send().await?;
+            let response = match req.send().await {
+                Ok(resp) => resp,
+                Err(err) => {
+                    if attempt < MAX_RETRIES {
+                        attempt += 1;
+                        sleep(retry_delay_for_attempt(attempt)).await;
+                        continue;
+                    }
+
+                    return Err(ZoteroMcpError::Http(format!(
+                        "request failed after retries: {err}"
+                    )));
+                }
+            };
             let status = response.status();
 
             if is_retryable(status)
@@ -219,6 +232,12 @@ fn retry_delay(headers: &HeaderMap, attempt: u32) -> Option<Duration> {
     }
     let base = 1u64.checked_shl(attempt).unwrap_or(1);
     Some(Duration::from_secs(base.max(1)))
+}
+
+fn retry_delay_for_attempt(attempt: u32) -> Duration {
+    let clamped = attempt.min(8);
+    let secs = 1u64.checked_shl(clamped).unwrap_or(1).max(1);
+    Duration::from_secs(secs)
 }
 
 fn parse_retry_after_secs(headers: &HeaderMap) -> Option<u64> {
