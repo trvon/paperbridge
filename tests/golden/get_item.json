@@ -1,0 +1,25 @@
+{
+  "key": "ITEMA",
+  "item_type": "journalArticle",
+  "title": "Graph Learning at Scale",
+  "creators": [
+    "Grace Hopper"
+  ],
+  "year": "2024",
+  "abstract_note": "A practical systems paper.",
+  "url": "https://example.org/graph",
+  "attachments": [
+    {
+      "key": "NOTE1",
+      "title": "Notes",
+      "content_type": "text/plain",
+      "path": null
+    },
+    {
+      "key": "PDFA",
+      "title": "Paper PDF",
+      "content_type": "application/pdf",
+      "path": "storage:paper.pdf"
+    }
+  ]
+}

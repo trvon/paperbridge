@@ -1,0 +1,12 @@
+[
+  {
+    "key": "ITEMA",
+    "item_type": "journalArticle",
+    "title": "Graph Learning at Scale",
+    "creators": [
+      "Grace Hopper"
+    ],
+    "year": "2024",
+    "url": "https://example.org/graph"
+  }
+]

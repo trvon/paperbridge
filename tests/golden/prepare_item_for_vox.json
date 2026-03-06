@@ -1,0 +1,23 @@
+{
+  "item_key": "ITEMA",
+  "item_title": "Graph Learning at Scale",
+  "attachment": {
+    "key": "PDFA",
+    "title": "Paper PDF",
+    "content_type": "application/pdf",
+    "path": "storage:paper.pdf"
+  },
+  "indexed_pages": 3,
+  "total_pages": 3,
+  "indexed_chars": 42,
+  "total_chars": 42,
+  "vox": {
+    "source": "item:ITEMA/attachment:PDFA",
+    "chunk_count": 3,
+    "chunks": [
+      "First sentence.",
+      "Second sentence.",
+      "Third sentence."
+    ]
+  }
+}
