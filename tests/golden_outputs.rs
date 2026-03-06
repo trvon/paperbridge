@@ -3,7 +3,7 @@ use paperbridge::models::{ListCollectionsQuery, SearchItemsQuery};
 use paperbridge::service::{
     PaperbridgeService, PrepareItemForVoxRequest, PrepareSearchResultForVoxRequest,
 };
-use paperbridge::zotero_api::ZoteroApiClient;
+use paperbridge::zotero_api::build_backend;
 use serde::Serialize;
 use std::path::PathBuf;
 use wiremock::matchers::{method, path};
@@ -143,8 +143,8 @@ async fn build_service_with_mocks() -> PaperbridgeService {
         .mount(&server)
         .await;
 
-    let client = ZoteroApiClient::new(test_config(server.uri())).unwrap();
-    PaperbridgeService::new(client)
+    let backend = build_backend(test_config(server.uri())).unwrap();
+    PaperbridgeService::new(backend)
 }
 
 #[tokio::test]

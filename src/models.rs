@@ -1,5 +1,81 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+pub struct CreatorInput {
+    pub creator_type: String,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+pub struct TagInput {
+    pub tag: String,
+    pub tag_type: Option<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+pub struct CollectionWriteRequest {
+    pub name: String,
+    pub parent_collection: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+pub struct CollectionUpdateRequest {
+    pub key: String,
+    pub version: Option<u64>,
+    pub name: Option<String>,
+    pub parent_collection: Option<String>,
+    pub clear_parent: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+pub struct DeleteCollectionRequest {
+    pub key: String,
+    pub version: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+pub struct ItemWriteRequest {
+    pub item_type: String,
+    pub title: Option<String>,
+    pub creators: Vec<CreatorInput>,
+    pub abstract_note: Option<String>,
+    pub date: Option<String>,
+    pub url: Option<String>,
+    pub doi: Option<String>,
+    pub isbn: Option<String>,
+    pub tags: Vec<TagInput>,
+    pub collections: Vec<String>,
+    pub extra: Option<String>,
+    pub parent_item: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+pub struct ItemUpdateRequest {
+    pub key: String,
+    pub version: Option<u64>,
+    pub item_type: Option<String>,
+    pub title: Option<String>,
+    pub creators: Option<Vec<CreatorInput>>,
+    pub abstract_note: Option<String>,
+    pub date: Option<String>,
+    pub url: Option<String>,
+    pub doi: Option<String>,
+    pub isbn: Option<String>,
+    pub tags: Option<Vec<TagInput>>,
+    pub collections: Option<Vec<String>>,
+    pub extra: Option<String>,
+    pub parent_item: Option<String>,
+    pub clear_parent: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+pub struct DeleteItemRequest {
+    pub key: String,
+    pub version: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct SearchItemsQuery {
     pub q: Option<String>,
@@ -52,6 +128,34 @@ impl ListCollectionsQuery {
         self.limit = self.limit.clamp(1, 100);
         self
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub enum ValidationIssueLevel {
+    Error,
+    Warning,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct ValidationIssue {
+    pub level: ValidationIssueLevel,
+    pub field: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct ValidationReport {
+    pub valid: bool,
+    pub issues: Vec<ValidationIssue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct BackendInfo {
+    pub mode: String,
+    pub read_library: bool,
+    pub write_basic: bool,
+    pub file_upload: bool,
+    pub group_libraries: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]

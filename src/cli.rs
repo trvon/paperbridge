@@ -84,6 +84,53 @@ pub enum Command {
         #[arg(long)]
         max_chars_per_chunk: Option<usize>,
     },
+    /// Create a collection and print JSON
+    CreateCollection {
+        /// Collection name
+        #[arg(long)]
+        name: String,
+        /// Optional parent collection key
+        #[arg(long)]
+        parent_collection: Option<String>,
+    },
+    /// Validate an item payload JSON file
+    ValidateItem {
+        /// Path to JSON file matching ItemWriteRequest
+        #[arg(long)]
+        file: String,
+    },
+    /// Create an item from a JSON payload file and print JSON
+    CreateItem {
+        /// Path to JSON file matching ItemWriteRequest
+        #[arg(long)]
+        file: String,
+    },
+    /// Update a collection from a JSON payload file and print JSON
+    UpdateCollection {
+        /// Path to JSON file matching CollectionUpdateRequest
+        #[arg(long)]
+        file: String,
+    },
+    /// Update an item from a JSON payload file and print JSON
+    UpdateItem {
+        /// Path to JSON file matching ItemUpdateRequest
+        #[arg(long)]
+        file: String,
+    },
+    /// Delete a collection from a JSON payload file
+    DeleteCollection {
+        /// Path to JSON file matching DeleteCollectionRequest
+        #[arg(long)]
+        file: String,
+    },
+    /// Delete an item from a JSON payload file
+    DeleteItem {
+        /// Path to JSON file matching DeleteItemRequest
+        #[arg(long)]
+        file: String,
+    },
+    /// Show active backend mode and capabilities
+    BackendInfo,
     /// Config helper commands
     Config {
         #[command(subcommand)]
@@ -295,5 +342,79 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn parse_create_collection_command() {
+        let cli = Cli::try_parse_from(["paperbridge", "create-collection", "--name", "P4 Papers"])
+            .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::CreateCollection { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_validate_item_command() {
+        let cli =
+            Cli::try_parse_from(["paperbridge", "validate-item", "--file", "item.json"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::ValidateItem { .. })));
+    }
+
+    #[test]
+    fn parse_create_item_command() {
+        let cli =
+            Cli::try_parse_from(["paperbridge", "create-item", "--file", "item.json"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::CreateItem { .. })));
+    }
+
+    #[test]
+    fn parse_update_collection_command() {
+        let cli = Cli::try_parse_from([
+            "paperbridge",
+            "update-collection",
+            "--file",
+            "collection.json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::UpdateCollection { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_update_item_command() {
+        let cli =
+            Cli::try_parse_from(["paperbridge", "update-item", "--file", "item.json"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::UpdateItem { .. })));
+    }
+
+    #[test]
+    fn parse_delete_collection_command() {
+        let cli = Cli::try_parse_from([
+            "paperbridge",
+            "delete-collection",
+            "--file",
+            "collection.json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::DeleteCollection { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_delete_item_command() {
+        let cli =
+            Cli::try_parse_from(["paperbridge", "delete-item", "--file", "item.json"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::DeleteItem { .. })));
+    }
+
+    #[test]
+    fn parse_backend_info_command() {
+        let cli = Cli::try_parse_from(["paperbridge", "backend-info"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::BackendInfo)));
     }
 }

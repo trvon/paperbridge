@@ -1,4 +1,7 @@
-use crate::models::{ListCollectionsQuery, SearchItemsQuery};
+use crate::models::{
+    CollectionUpdateRequest, CollectionWriteRequest, DeleteCollectionRequest, DeleteItemRequest,
+    ItemUpdateRequest, ItemWriteRequest, ListCollectionsQuery, SearchItemsQuery,
+};
 use crate::service::{
     DEFAULT_CHUNK_SIZE, DEFAULT_PIPELINE_SEARCH_LIMIT, PaperbridgeService,
     PrepareItemForVoxRequest, PrepareSearchResultForVoxRequest, PrepareVoxTextRequest,
@@ -107,6 +110,54 @@ pub struct PrepareSearchResultForVoxParams {
 
     #[schemars(description = "Maximum characters per chunk (default 1200)")]
     pub max_chars_per_chunk: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct CreateCollectionParams {
+    #[schemars(description = "Collection name")]
+    pub name: String,
+
+    #[schemars(description = "Optional parent collection key")]
+    pub parent_collection: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ValidateItemParams {
+    #[schemars(description = "Item payload to validate")]
+    pub item: ItemWriteRequest,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct CreateItemParams {
+    #[schemars(description = "Item payload to create")]
+    pub item: ItemWriteRequest,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct UpdateCollectionParams {
+    #[schemars(description = "Collection payload to update")]
+    pub collection: CollectionUpdateRequest,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct UpdateItemParams {
+    #[schemars(description = "Item payload to update")]
+    pub item: ItemUpdateRequest,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct BackendInfoParams {}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct DeleteCollectionParams {
+    #[schemars(description = "Collection deletion payload")]
+    pub collection: DeleteCollectionRequest,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct DeleteItemParams {
+    #[schemars(description = "Item deletion payload")]
+    pub item: DeleteItemRequest,
 }
 
 #[derive(Clone)]
@@ -297,6 +348,126 @@ impl PaperbridgeServer {
             .map_err(Self::map_error)?;
 
         Self::ok_json(&payload)
+    }
+
+    #[tool(
+        name = "create_collection",
+        description = "Create a Zotero collection when backend write support is available"
+    )]
+    async fn create_collection(
+        &self,
+        Parameters(params): Parameters<CreateCollectionParams>,
+    ) -> std::result::Result<CallToolResult, McpError> {
+        let created = self
+            .service
+            .create_collection(CollectionWriteRequest {
+                name: params.name,
+                parent_collection: params.parent_collection,
+            })
+            .await
+            .map_err(Self::map_error)?;
+        Self::ok_json(&created)
+    }
+
+    #[tool(
+        name = "validate_item",
+        description = "Validate a Zotero item payload before attempting a write"
+    )]
+    async fn validate_item(
+        &self,
+        Parameters(params): Parameters<ValidateItemParams>,
+    ) -> std::result::Result<CallToolResult, McpError> {
+        let report = self.service.validate_item_request(&params.item);
+        Self::ok_json(&report)
+    }
+
+    #[tool(
+        name = "create_item",
+        description = "Create a Zotero item when backend write support is available"
+    )]
+    async fn create_item(
+        &self,
+        Parameters(params): Parameters<CreateItemParams>,
+    ) -> std::result::Result<CallToolResult, McpError> {
+        let created = self
+            .service
+            .create_item(params.item)
+            .await
+            .map_err(Self::map_error)?;
+        Self::ok_json(&created)
+    }
+
+    #[tool(
+        name = "update_collection",
+        description = "Update a Zotero collection when backend write support is available"
+    )]
+    async fn update_collection(
+        &self,
+        Parameters(params): Parameters<UpdateCollectionParams>,
+    ) -> std::result::Result<CallToolResult, McpError> {
+        let updated = self
+            .service
+            .update_collection(params.collection)
+            .await
+            .map_err(Self::map_error)?;
+        Self::ok_json(&updated)
+    }
+
+    #[tool(
+        name = "update_item",
+        description = "Update a Zotero item when backend write support is available"
+    )]
+    async fn update_item(
+        &self,
+        Parameters(params): Parameters<UpdateItemParams>,
+    ) -> std::result::Result<CallToolResult, McpError> {
+        let updated = self
+            .service
+            .update_item(params.item)
+            .await
+            .map_err(Self::map_error)?;
+        Self::ok_json(&updated)
+    }
+
+    #[tool(
+        name = "backend_info",
+        description = "Show active backend mode and current capability flags"
+    )]
+    async fn backend_info(
+        &self,
+        Parameters(_params): Parameters<BackendInfoParams>,
+    ) -> std::result::Result<CallToolResult, McpError> {
+        Self::ok_json(&self.service.backend_info())
+    }
+
+    #[tool(
+        name = "delete_collection",
+        description = "Delete a Zotero collection when backend write support is available"
+    )]
+    async fn delete_collection(
+        &self,
+        Parameters(params): Parameters<DeleteCollectionParams>,
+    ) -> std::result::Result<CallToolResult, McpError> {
+        self.service
+            .delete_collection(params.collection)
+            .await
+            .map_err(Self::map_error)?;
+        Self::ok_json(&serde_json::json!({"deleted": true}))
+    }
+
+    #[tool(
+        name = "delete_item",
+        description = "Delete a Zotero item when backend write support is available"
+    )]
+    async fn delete_item(
+        &self,
+        Parameters(params): Parameters<DeleteItemParams>,
+    ) -> std::result::Result<CallToolResult, McpError> {
+        self.service
+            .delete_item(params.item)
+            .await
+            .map_err(Self::map_error)?;
+        Self::ok_json(&serde_json::json!({"deleted": true}))
     }
 }
 

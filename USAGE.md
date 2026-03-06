@@ -122,4 +122,51 @@ paperbridge query --q "graph learning" --limit 5
 paperbridge collections --top-only
 paperbridge read --item-key ITEMA --max-chars-per-chunk 1200
 paperbridge read-search --q "graph learning" --result-index 0
+paperbridge backend-info
+```
+
+## Validation and create flows
+
+Note: write operations currently work in cloud Web API mode. Local Zotero desktop mode remains read-focused for now.
+
+Validate an item payload before writing:
+
+```bash
+paperbridge validate-item --file item.json
+```
+
+Create a collection:
+
+```bash
+paperbridge create-collection --name "P4 Papers"
+```
+
+Create an item from JSON:
+
+```bash
+paperbridge create-item --file item.json
+```
+
+Update a collection from JSON:
+
+```bash
+paperbridge update-collection --file collection-update.json
+```
+
+Update an item from JSON:
+
+```bash
+paperbridge update-item --file item-update.json
+```
+
+Delete a collection from JSON:
+
+```bash
+paperbridge delete-collection --file delete-collection.example.json
+```
+
+Delete an item from JSON:
+
+```bash
+paperbridge delete-item --file delete-item.example.json
 ```

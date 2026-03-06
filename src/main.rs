@@ -1,12 +1,15 @@
 use clap::Parser;
 use paperbridge::cli::{Cli, Command, ConfigAction, SnippetTarget};
 use paperbridge::config::Config;
-use paperbridge::models::{ListCollectionsQuery, SearchItemsQuery};
+use paperbridge::models::{
+    CollectionUpdateRequest, CollectionWriteRequest, DeleteCollectionRequest, DeleteItemRequest,
+    ItemUpdateRequest, ItemWriteRequest, ListCollectionsQuery, SearchItemsQuery,
+};
 use paperbridge::server::PaperbridgeServer;
 use paperbridge::service::{
     PaperbridgeService, PrepareItemForVoxRequest, PrepareSearchResultForVoxRequest,
 };
-use paperbridge::zotero_api::ZoteroApiClient;
+use paperbridge::zotero_api::build_backend;
 use rmcp::ServiceExt;
 use serde::Serialize;
 use std::io::{self, Write};
@@ -150,6 +153,89 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
                 .await?;
             print_json(&payload)?;
         }
+        Some(Command::CreateCollection {
+            name,
+            parent_collection,
+        }) => {
+            let service = build_service(config)?;
+            let payload = service
+                .create_collection(CollectionWriteRequest {
+                    name,
+                    parent_collection,
+                })
+                .await?;
+            print_json(&payload)?;
+        }
+        Some(Command::ValidateItem { file }) => {
+            let service = build_service(config)?;
+            let text = std::fs::read_to_string(&file).map_err(|e| {
+                paperbridge::ZoteroMcpError::Config(format!("Failed to read {file}: {e}"))
+            })?;
+            let payload: ItemWriteRequest = serde_json::from_str(&text).map_err(|e| {
+                paperbridge::ZoteroMcpError::Serde(format!("Invalid JSON in {file}: {e}"))
+            })?;
+            let report = service.validate_item_request(&payload);
+            print_json(&report)?;
+        }
+        Some(Command::CreateItem { file }) => {
+            let service = build_service(config)?;
+            let text = std::fs::read_to_string(&file).map_err(|e| {
+                paperbridge::ZoteroMcpError::Config(format!("Failed to read {file}: {e}"))
+            })?;
+            let payload: ItemWriteRequest = serde_json::from_str(&text).map_err(|e| {
+                paperbridge::ZoteroMcpError::Serde(format!("Invalid JSON in {file}: {e}"))
+            })?;
+            let created = service.create_item(payload).await?;
+            print_json(&created)?;
+        }
+        Some(Command::UpdateCollection { file }) => {
+            let service = build_service(config)?;
+            let text = std::fs::read_to_string(&file).map_err(|e| {
+                paperbridge::ZoteroMcpError::Config(format!("Failed to read {file}: {e}"))
+            })?;
+            let payload: CollectionUpdateRequest = serde_json::from_str(&text).map_err(|e| {
+                paperbridge::ZoteroMcpError::Serde(format!("Invalid JSON in {file}: {e}"))
+            })?;
+            let updated = service.update_collection(payload).await?;
+            print_json(&updated)?;
+        }
+        Some(Command::UpdateItem { file }) => {
+            let service = build_service(config)?;
+            let text = std::fs::read_to_string(&file).map_err(|e| {
+                paperbridge::ZoteroMcpError::Config(format!("Failed to read {file}: {e}"))
+            })?;
+            let payload: ItemUpdateRequest = serde_json::from_str(&text).map_err(|e| {
+                paperbridge::ZoteroMcpError::Serde(format!("Invalid JSON in {file}: {e}"))
+            })?;
+            let updated = service.update_item(payload).await?;
+            print_json(&updated)?;
+        }
+        Some(Command::DeleteCollection { file }) => {
+            let service = build_service(config)?;
+            let text = std::fs::read_to_string(&file).map_err(|e| {
+                paperbridge::ZoteroMcpError::Config(format!("Failed to read {file}: {e}"))
+            })?;
+            let payload: DeleteCollectionRequest = serde_json::from_str(&text).map_err(|e| {
+                paperbridge::ZoteroMcpError::Serde(format!("Invalid JSON in {file}: {e}"))
+            })?;
+            service.delete_collection(payload).await?;
+            print_json(&serde_json::json!({"deleted": true}))?;
+        }
+        Some(Command::DeleteItem { file }) => {
+            let service = build_service(config)?;
+            let text = std::fs::read_to_string(&file).map_err(|e| {
+                paperbridge::ZoteroMcpError::Config(format!("Failed to read {file}: {e}"))
+            })?;
+            let payload: DeleteItemRequest = serde_json::from_str(&text).map_err(|e| {
+                paperbridge::ZoteroMcpError::Serde(format!("Invalid JSON in {file}: {e}"))
+            })?;
+            service.delete_item(payload).await?;
+            print_json(&serde_json::json!({"deleted": true}))?;
+        }
+        Some(Command::BackendInfo) => {
+            let service = build_service(config)?;
+            print_json(&service.backend_info())?;
+        }
         Some(Command::Serve) | None => {
             run_stdio(config).await?;
         }
@@ -177,8 +263,8 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
 }
 
 fn build_service(config: Config) -> paperbridge::Result<PaperbridgeService> {
-    let api = ZoteroApiClient::new(config)?;
-    Ok(PaperbridgeService::new(api))
+    let backend = build_backend(config)?;
+    Ok(PaperbridgeService::new(backend))
 }
 
 async fn run_stdio(config: Config) -> paperbridge::Result<()> {
