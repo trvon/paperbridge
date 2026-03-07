@@ -358,22 +358,19 @@ async fn handle_config_init(force: bool, interactive: bool) -> paperbridge::Resu
     } else {
         Config::default()
     };
-    let source_default = if looks_like_local_api_base(&cfg.api_base) {
-        "local"
-    } else {
-        "cloud"
+    let source_default = match cfg.backend_mode {
+        paperbridge::config::BackendModeConfig::Cloud => "cloud",
+        paperbridge::config::BackendModeConfig::Local => "local",
+        paperbridge::config::BackendModeConfig::Hybrid => "hybrid",
     };
-    let source = prompt_with_default("Zotero source (cloud/local)", source_default)?;
+    let source = prompt_with_default("Zotero source (cloud/local/hybrid)", source_default)?;
     let source = parse_zotero_source(&source)?;
 
     match source {
         ZoteroSource::Local => {
-            let local_default = if looks_like_local_api_base(&cfg.api_base) {
-                cfg.api_base.clone()
-            } else {
-                "http://127.0.0.1:23119/api".to_string()
-            };
-            cfg.api_base = prompt_with_default("Local Zotero API base", &local_default)?;
+            let local_default = cfg.local_api_base.clone();
+            cfg.backend_mode = paperbridge::config::BackendModeConfig::Local;
+            cfg.local_api_base = prompt_with_default("Local Zotero API base", &local_default)?;
             cfg.set_value("api_key", "unset")?;
             cfg.set_value("library_type", "user")?;
             cfg.set_value("user_id", "0")?;
@@ -381,7 +378,8 @@ async fn handle_config_init(force: bool, interactive: bool) -> paperbridge::Resu
             println!("Configured local mode (library_type=user, user_id=0, api_key=<unset>).",);
         }
         ZoteroSource::Cloud => {
-            cfg.api_base = prompt_with_default("Zotero API base", &cfg.api_base)?;
+            cfg.backend_mode = paperbridge::config::BackendModeConfig::Cloud;
+            cfg.cloud_api_base = prompt_with_default("Zotero API base", &cfg.cloud_api_base)?;
 
             let api_key_default = if cfg.api_key.is_some() { "<set>" } else { "" };
             let api_key =
@@ -403,7 +401,7 @@ async fn handle_config_init(force: bool, interactive: bool) -> paperbridge::Resu
                     )?;
                     let user_id = resolve_user_id_from_login_id(
                         &login_id,
-                        &cfg.api_base,
+                        &cfg.cloud_api_base,
                         cfg.api_key.as_deref(),
                     )
                     .await?;
@@ -413,6 +411,46 @@ async fn handle_config_init(force: bool, interactive: bool) -> paperbridge::Resu
                 paperbridge::config::LibraryType::Group => {
                     let default_group = cfg.group_id.map(|v| v.to_string()).unwrap_or_default();
                     let group_id = prompt_with_default("Group ID", &default_group)?;
+                    cfg.set_value("group_id", &group_id)?;
+                    cfg.set_value("user_id", "unset")?;
+                }
+            }
+        }
+        ZoteroSource::Hybrid => {
+            cfg.backend_mode = paperbridge::config::BackendModeConfig::Hybrid;
+            cfg.cloud_api_base = prompt_with_default("Cloud Zotero API base", &cfg.cloud_api_base)?;
+            cfg.local_api_base = prompt_with_default("Local Zotero API base", &cfg.local_api_base)?;
+
+            let api_key_default = if cfg.api_key.is_some() { "<set>" } else { "" };
+            let api_key =
+                prompt_with_default("Cloud API key (required for writes)", api_key_default)?;
+            if api_key != "<set>" {
+                cfg.set_value("api_key", &api_key)?;
+            }
+
+            let library_type =
+                prompt_with_default("Cloud library type (user/group)", cfg.library_type.as_str())?;
+            cfg.set_value("library_type", &library_type)?;
+
+            match cfg.library_type {
+                paperbridge::config::LibraryType::User => {
+                    let default_user = cfg.user_id.map(|v| v.to_string()).unwrap_or_default();
+                    let login_id = prompt_with_default(
+                        "Cloud login ID (username or numeric user ID)",
+                        &default_user,
+                    )?;
+                    let user_id = resolve_user_id_from_login_id(
+                        &login_id,
+                        &cfg.cloud_api_base,
+                        cfg.api_key.as_deref(),
+                    )
+                    .await?;
+                    cfg.set_value("user_id", &user_id.to_string())?;
+                    cfg.set_value("group_id", "unset")?;
+                }
+                paperbridge::config::LibraryType::Group => {
+                    let default_group = cfg.group_id.map(|v| v.to_string()).unwrap_or_default();
+                    let group_id = prompt_with_default("Cloud group ID", &default_group)?;
                     cfg.set_value("group_id", &group_id)?;
                     cfg.set_value("user_id", "unset")?;
                 }
@@ -440,7 +478,7 @@ fn handle_config_get(key: Option<&str>) -> paperbridge::Result<()> {
     if let Some(key) = key {
         let value = cfg.get_value(key).ok_or_else(|| {
             paperbridge::ZoteroMcpError::InvalidInput(format!(
-                "Unknown config key '{key}'. Valid keys: api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level"
+                "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level"
             ))
         })?;
         println!("{value}");
@@ -469,7 +507,7 @@ async fn handle_config_resolve_user_id(
     api_base_override: Option<&str>,
 ) -> paperbridge::Result<()> {
     let cfg = Config::load_file_or_default()?;
-    let api_base = api_base_override.unwrap_or(&cfg.api_base);
+    let api_base = api_base_override.unwrap_or(cfg.active_cloud_api_base());
     let api_key = api_key_override.or(cfg.api_key.as_deref());
 
     let user_id = resolve_user_id_from_login_id(login, api_base, api_key).await?;
@@ -504,21 +542,18 @@ fn prompt_with_default(prompt: &str, default: &str) -> paperbridge::Result<Strin
 enum ZoteroSource {
     Cloud,
     Local,
+    Hybrid,
 }
 
 fn parse_zotero_source(value: &str) -> paperbridge::Result<ZoteroSource> {
     match value.trim().to_ascii_lowercase().as_str() {
         "cloud" => Ok(ZoteroSource::Cloud),
         "local" => Ok(ZoteroSource::Local),
+        "hybrid" => Ok(ZoteroSource::Hybrid),
         other => Err(paperbridge::ZoteroMcpError::InvalidInput(format!(
-            "Invalid source '{other}'. Valid values: cloud, local"
+            "Invalid source '{other}'. Valid values: cloud, local, hybrid"
         ))),
     }
-}
-
-fn looks_like_local_api_base(api_base: &str) -> bool {
-    let lower = api_base.to_ascii_lowercase();
-    lower.contains("127.0.0.1:23119") || lower.contains("localhost:23119")
 }
 
 async fn resolve_user_id_from_login_id(
@@ -702,14 +737,8 @@ mod tests {
     fn parse_zotero_source_accepts_cloud_and_local() {
         assert_eq!(parse_zotero_source("cloud").unwrap(), ZoteroSource::Cloud);
         assert_eq!(parse_zotero_source("local").unwrap(), ZoteroSource::Local);
+        assert_eq!(parse_zotero_source("hybrid").unwrap(), ZoteroSource::Hybrid);
         assert!(parse_zotero_source("other").is_err());
-    }
-
-    #[test]
-    fn looks_like_local_api_base_detects_expected_hosts() {
-        assert!(looks_like_local_api_base("http://127.0.0.1:23119/api"));
-        assert!(looks_like_local_api_base("http://localhost:23119/api"));
-        assert!(!looks_like_local_api_base("https://api.zotero.org"));
     }
 
     #[test]

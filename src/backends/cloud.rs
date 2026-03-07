@@ -107,7 +107,7 @@ impl CloudZoteroBackend {
     }
 
     fn build_url(&self, suffix: &str) -> Result<String> {
-        let base = self.config.api_base.trim_end_matches('/');
+        let base = self.config.active_write_api_base().trim_end_matches('/');
         let prefix = self.config.library_prefix()?;
         Ok(format!("{base}{prefix}{suffix}"))
     }

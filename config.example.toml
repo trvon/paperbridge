@@ -1,4 +1,6 @@
-api_base = "https://api.zotero.org"
+backend_mode = "cloud" # cloud, local, or hybrid
+cloud_api_base = "https://api.zotero.org"
+local_api_base = "http://127.0.0.1:23119/api"
 library_type = "user" # or "group"
 user_id = 123456
 # group_id = 987654

@@ -8,6 +8,39 @@ const LEGACY_CONFIG_ENV_VAR: &str = "ZOTERO_MCP_CONFIG";
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, Eq, PartialEq, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
+pub enum BackendModeConfig {
+    Cloud,
+    Local,
+    Hybrid,
+}
+
+impl BackendModeConfig {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cloud => "cloud",
+            Self::Local => "local",
+            Self::Hybrid => "hybrid",
+        }
+    }
+}
+
+impl std::str::FromStr for BackendModeConfig {
+    type Err = ZoteroMcpError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "cloud" => Ok(Self::Cloud),
+            "local" => Ok(Self::Local),
+            "hybrid" => Ok(Self::Hybrid),
+            other => Err(ZoteroMcpError::InvalidInput(format!(
+                "Invalid backend_mode '{other}'. Valid values: cloud, local, hybrid"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Eq, PartialEq, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
 pub enum LibraryType {
     User,
     Group,
@@ -39,7 +72,9 @@ impl std::str::FromStr for LibraryType {
 #[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(default)]
 pub struct Config {
-    pub api_base: String,
+    pub backend_mode: BackendModeConfig,
+    pub cloud_api_base: String,
+    pub local_api_base: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
     pub library_type: LibraryType,
@@ -54,7 +89,9 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            api_base: "https://api.zotero.org".to_string(),
+            backend_mode: BackendModeConfig::Cloud,
+            cloud_api_base: "https://api.zotero.org".to_string(),
+            local_api_base: "http://127.0.0.1:23119/api".to_string(),
             api_key: None,
             library_type: LibraryType::User,
             user_id: None,
@@ -68,7 +105,10 @@ impl Default for Config {
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
 struct PartialConfig {
+    backend_mode: Option<BackendModeConfig>,
     api_base: Option<String>,
+    cloud_api_base: Option<String>,
+    local_api_base: Option<String>,
     api_key: Option<String>,
     library_type: Option<LibraryType>,
     user_id: Option<u64>,
@@ -133,10 +173,30 @@ impl Config {
         }
     }
 
+    pub fn active_read_api_base(&self) -> &str {
+        match self.backend_mode {
+            BackendModeConfig::Cloud => &self.cloud_api_base,
+            BackendModeConfig::Local | BackendModeConfig::Hybrid => &self.local_api_base,
+        }
+    }
+
+    pub fn active_write_api_base(&self) -> &str {
+        match self.backend_mode {
+            BackendModeConfig::Cloud | BackendModeConfig::Hybrid => &self.cloud_api_base,
+            BackendModeConfig::Local => &self.local_api_base,
+        }
+    }
+
+    pub fn active_cloud_api_base(&self) -> &str {
+        &self.cloud_api_base
+    }
+
     pub fn display_safe(&self) -> String {
         format!(
-            "api_base = \"{}\"\napi_key = {}\nlibrary_type = \"{}\"\nuser_id = {}\ngroup_id = {}\ntimeout_secs = {}\nlog_level = \"{}\"",
-            self.api_base,
+            "backend_mode = \"{}\"\ncloud_api_base = \"{}\"\nlocal_api_base = \"{}\"\napi_key = {}\nlibrary_type = \"{}\"\nuser_id = {}\ngroup_id = {}\ntimeout_secs = {}\nlog_level = \"{}\"",
+            self.backend_mode.as_str(),
+            self.cloud_api_base,
+            self.local_api_base,
             if self.api_key.is_some() {
                 "<set>"
             } else {
@@ -183,7 +243,9 @@ impl Config {
 
     pub fn get_value(&self, key: &str) -> Option<String> {
         match key {
-            "api_base" => Some(self.api_base.clone()),
+            "backend_mode" => Some(self.backend_mode.as_str().to_string()),
+            "api_base" | "cloud_api_base" => Some(self.cloud_api_base.clone()),
+            "local_api_base" => Some(self.local_api_base.clone()),
             "api_key" => Some(
                 self.api_key
                     .clone()
@@ -209,13 +271,24 @@ impl Config {
     pub fn set_value(&mut self, key: &str, value: &str) -> Result<()> {
         let v = value.trim();
         match key {
-            "api_base" => {
+            "backend_mode" => {
+                self.backend_mode = v.parse::<BackendModeConfig>()?;
+            }
+            "api_base" | "cloud_api_base" => {
                 if v.is_empty() {
                     return Err(ZoteroMcpError::InvalidInput(
-                        "api_base cannot be empty".to_string(),
+                        "cloud_api_base cannot be empty".to_string(),
                     ));
                 }
-                self.api_base = v.to_string();
+                self.cloud_api_base = v.to_string();
+            }
+            "local_api_base" => {
+                if v.is_empty() {
+                    return Err(ZoteroMcpError::InvalidInput(
+                        "local_api_base cannot be empty".to_string(),
+                    ));
+                }
+                self.local_api_base = v.to_string();
             }
             "api_key" => {
                 self.api_key = optional_string(v);
@@ -246,7 +319,7 @@ impl Config {
             }
             _ => {
                 return Err(ZoteroMcpError::InvalidInput(format!(
-                    "Unknown config key '{key}'. Valid keys: api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level"
+                    "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level"
                 )));
             }
         }
@@ -254,8 +327,17 @@ impl Config {
     }
 
     fn apply_partial(&mut self, partial: PartialConfig) {
+        if let Some(v) = partial.backend_mode {
+            self.backend_mode = v;
+        }
         if let Some(v) = partial.api_base {
-            self.api_base = v;
+            self.cloud_api_base = v;
+        }
+        if let Some(v) = partial.cloud_api_base {
+            self.cloud_api_base = v;
+        }
+        if let Some(v) = partial.local_api_base {
+            self.local_api_base = v;
         }
         if let Some(v) = partial.api_key {
             self.api_key = Some(v);
@@ -287,7 +369,13 @@ impl Config {
             let key = key.as_ref();
             let value = value.as_ref();
             match key {
-                "PAPERBRIDGE_API_BASE" | "ZOTERO_MCP_API_BASE" => self.api_base = value.to_string(),
+                "PAPERBRIDGE_BACKEND_MODE" => {
+                    self.backend_mode = value.parse::<BackendModeConfig>()?;
+                }
+                "PAPERBRIDGE_API_BASE" | "ZOTERO_MCP_API_BASE" | "PAPERBRIDGE_CLOUD_API_BASE" => {
+                    self.cloud_api_base = value.to_string()
+                }
+                "PAPERBRIDGE_LOCAL_API_BASE" => self.local_api_base = value.to_string(),
                 "PAPERBRIDGE_API_KEY" | "ZOTERO_MCP_API_KEY" => {
                     if value.trim().is_empty() {
                         self.api_key = None;
@@ -329,6 +417,18 @@ impl Config {
         if self.timeout_secs == 0 {
             return Err(ZoteroMcpError::Config(
                 "timeout_secs must be greater than zero".to_string(),
+            ));
+        }
+
+        if self.cloud_api_base.trim().is_empty() {
+            return Err(ZoteroMcpError::Config(
+                "cloud_api_base must not be empty".to_string(),
+            ));
+        }
+
+        if self.local_api_base.trim().is_empty() {
+            return Err(ZoteroMcpError::Config(
+                "local_api_base must not be empty".to_string(),
             ));
         }
 
@@ -410,12 +510,14 @@ mod tests {
             ..Config::default()
         };
         cfg.apply_env_overrides([
+            ("PAPERBRIDGE_BACKEND_MODE", "hybrid"),
             ("PAPERBRIDGE_LIBRARY_TYPE", "group"),
             ("PAPERBRIDGE_GROUP_ID", "777"),
             ("PAPERBRIDGE_TIMEOUT_SECS", "60"),
         ])
         .unwrap();
 
+        assert_eq!(cfg.backend_mode, BackendModeConfig::Hybrid);
         assert_eq!(cfg.library_type, LibraryType::Group);
         assert_eq!(cfg.group_id, Some(777));
         assert_eq!(cfg.timeout_secs, 60);
@@ -467,7 +569,7 @@ mod tests {
             ..PartialConfig::default()
         });
 
-        assert_eq!(cfg.api_base, "https://example.com");
+        assert_eq!(cfg.cloud_api_base, "https://example.com");
         assert_eq!(cfg.timeout_secs, 15);
         assert_eq!(cfg.user_id, Some(10));
     }
@@ -479,10 +581,33 @@ mod tests {
             user_id: Some(12),
             ..Config::default()
         };
+        assert_eq!(cfg.get_value("backend_mode").as_deref(), Some("cloud"));
         assert_eq!(cfg.get_value("library_type").as_deref(), Some("user"));
         assert_eq!(cfg.get_value("user_id").as_deref(), Some("12"));
         assert_eq!(cfg.get_value("api_key").as_deref(), Some("secret"));
         assert!(cfg.get_value("unknown").is_none());
+    }
+
+    #[test]
+    fn active_api_bases_follow_backend_mode() {
+        let mut cfg = Config {
+            cloud_api_base: "https://api.zotero.org".to_string(),
+            local_api_base: "http://127.0.0.1:23119/api".to_string(),
+            user_id: Some(1),
+            ..Config::default()
+        };
+
+        cfg.backend_mode = BackendModeConfig::Cloud;
+        assert_eq!(cfg.active_read_api_base(), "https://api.zotero.org");
+        assert_eq!(cfg.active_write_api_base(), "https://api.zotero.org");
+
+        cfg.backend_mode = BackendModeConfig::Local;
+        assert_eq!(cfg.active_read_api_base(), "http://127.0.0.1:23119/api");
+        assert_eq!(cfg.active_write_api_base(), "http://127.0.0.1:23119/api");
+
+        cfg.backend_mode = BackendModeConfig::Hybrid;
+        assert_eq!(cfg.active_read_api_base(), "http://127.0.0.1:23119/api");
+        assert_eq!(cfg.active_write_api_base(), "https://api.zotero.org");
     }
 
     #[test]

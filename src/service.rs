@@ -63,6 +63,7 @@ impl PaperbridgeService {
             mode: match self.backend.mode() {
                 BackendMode::Cloud => "cloud",
                 BackendMode::Local => "local",
+                BackendMode::Hybrid => "hybrid",
             }
             .to_string(),
             read_library: caps.read_library,
@@ -80,6 +81,7 @@ impl PaperbridgeService {
         let mode = match self.backend.mode() {
             BackendMode::Cloud => "cloud",
             BackendMode::Local => "local",
+            BackendMode::Hybrid => "hybrid",
         };
         Err(ZoteroMcpError::InvalidInput(format!(
             "'{operation}' is not available for the active {mode} backend. Switch to a cloud Zotero Web API configuration to use write operations."

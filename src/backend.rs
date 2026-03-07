@@ -9,6 +9,7 @@ use crate::models::{
 pub enum BackendMode {
     Cloud,
     Local,
+    Hybrid,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

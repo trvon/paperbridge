@@ -1,4 +1,4 @@
-use paperbridge::config::{Config, LibraryType};
+use paperbridge::config::{BackendModeConfig, Config, LibraryType};
 use paperbridge::models::{ListCollectionsQuery, SearchItemsQuery};
 use paperbridge::service::{
     PaperbridgeService, PrepareItemForVoxRequest, PrepareSearchResultForVoxRequest,
@@ -47,7 +47,9 @@ fn assert_golden<T: Serialize>(fixture_name: &str, value: &T) {
 
 fn test_config(api_base: String) -> Config {
     Config {
-        api_base,
+        backend_mode: BackendModeConfig::Cloud,
+        cloud_api_base: api_base,
+        local_api_base: "http://127.0.0.1:23119/api".to_string(),
         user_id: Some(123),
         library_type: LibraryType::User,
         ..Config::default()
