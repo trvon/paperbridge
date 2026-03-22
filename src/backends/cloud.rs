@@ -12,9 +12,10 @@ use reqwest::header::{HeaderMap, HeaderName, RETRY_AFTER};
 use serde::Deserialize;
 use std::time::Duration;
 use tokio::time::sleep;
+use tracing::debug;
 
 const ZOTERO_API_VERSION: &str = "3";
-const MAX_RETRIES: u32 = 2;
+const MAX_RETRIES: u32 = 5;
 
 #[derive(Clone)]
 pub struct CloudZoteroBackend {
@@ -26,6 +27,8 @@ impl CloudZoteroBackend {
     pub fn new(config: Config) -> Result<Self> {
         let timeout = Duration::from_secs(config.timeout_secs);
         let http = reqwest::Client::builder()
+            // Fail fast on bad DNS targets; we'll retry.
+            .connect_timeout(Duration::from_secs(8))
             .timeout(timeout)
             .build()
             .map_err(|e| ZoteroMcpError::Http(format!("Failed to build HTTP client: {e}")))?;
@@ -41,6 +44,7 @@ impl CloudZoteroBackend {
 
         loop {
             let url = self.build_url(suffix)?;
+            debug!(attempt, %url, "zotero request start");
             let mut req = self
                 .http
                 .get(url)
@@ -54,6 +58,16 @@ impl CloudZoteroBackend {
             let response = match req.send().await {
                 Ok(resp) => resp,
                 Err(err) => {
+                    debug!(
+                        attempt,
+                        has_api_key = self.config.api_key.is_some(),
+                        error = %err,
+                        error_dbg = ?err,
+                        is_timeout = err.is_timeout(),
+                        is_connect = err.is_connect(),
+                        status = ?err.status(),
+                        "zotero request send failed"
+                    );
                     if attempt < MAX_RETRIES {
                         attempt += 1;
                         sleep(retry_delay_for_attempt(attempt)).await;
@@ -66,6 +80,7 @@ impl CloudZoteroBackend {
                 }
             };
             let status = response.status();
+            debug!(attempt, status=%status, "zotero response received");
 
             if is_retryable(status)
                 && attempt < MAX_RETRIES
@@ -81,6 +96,7 @@ impl CloudZoteroBackend {
                     .text()
                     .await
                     .unwrap_or_else(|_| "<failed to read error body>".to_string());
+                debug!(attempt, status=%status, body_preview=%body.chars().take(200).collect::<String>(), "zotero error response");
                 return Err(ZoteroMcpError::Api {
                     status: status.as_u16(),
                     message: body,
@@ -352,6 +368,7 @@ impl LibraryBackend for CloudZoteroBackend {
 fn item_detail_from_saved(saved: RawSavedObject) -> ItemDetail {
     ItemDetail {
         key: saved.key,
+        version: saved.version,
         item_type: saved
             .data
             .get("itemType")
@@ -379,6 +396,31 @@ fn item_detail_from_saved(saved: RawSavedObject) -> ItemDetail {
         url: saved
             .data
             .get("url")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        date: saved
+            .data
+            .get("date")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        tags: saved
+            .data
+            .get("tags")
+            .and_then(|v| serde_json::from_value::<Vec<TagInput>>(v.clone()).ok())
+            .unwrap_or_default(),
+        collections: saved
+            .data
+            .get("collections")
+            .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
+            .unwrap_or_default(),
+        extra: saved
+            .data
+            .get("extra")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        parent_item: saved
+            .data
+            .get("parentItem")
             .and_then(|v| v.as_str())
             .map(str::to_string),
         attachments: Vec::new(),
@@ -612,6 +654,8 @@ fn parse_u64_header(headers: &HeaderMap, name: reqwest::header::HeaderName) -> O
 #[derive(Debug, Deserialize)]
 struct RawItemRecord {
     key: String,
+    #[serde(default)]
+    version: Option<u64>,
     data: RawItemData,
 }
 
@@ -630,6 +674,14 @@ struct RawItemData {
     abstract_note: Option<String>,
     #[serde(default)]
     creators: Vec<RawCreator>,
+    #[serde(default)]
+    tags: Vec<TagInput>,
+    #[serde(default)]
+    collections: Vec<String>,
+    #[serde(default)]
+    extra: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_string_or_false")]
+    parent_item: Option<String>,
     #[serde(default)]
     content_type: Option<String>,
     #[serde(default)]
@@ -689,11 +741,20 @@ struct RawCollectionMeta {
 struct MultiWriteResponse {
     #[serde(default)]
     successful: std::collections::HashMap<String, RawSavedObject>,
+    // Zotero has historically returned either `successful` (documented) or `success` depending on
+    // endpoint/version. Accept both so create/update flows are resilient.
+    #[serde(default)]
+    success: std::collections::HashMap<String, RawSavedObject>,
 }
 
 impl MultiWriteResponse {
     fn first_successful(self) -> Option<RawSavedObject> {
-        let mut entries = self.successful.into_iter().collect::<Vec<_>>();
+        let map = if !self.successful.is_empty() {
+            self.successful
+        } else {
+            self.success
+        };
+        let mut entries = map.into_iter().collect::<Vec<_>>();
         entries.sort_by_key(|(idx, _)| idx.parse::<usize>().unwrap_or(usize::MAX));
         entries.into_iter().map(|(_, value)| value).next()
     }
@@ -702,6 +763,8 @@ impl MultiWriteResponse {
 #[derive(Debug, Deserialize)]
 struct RawSavedObject {
     key: String,
+    #[serde(default)]
+    version: Option<u64>,
     data: serde_json::Value,
 }
 
@@ -746,6 +809,7 @@ impl From<RawItemRecord> for ItemDetail {
     fn from(value: RawItemRecord) -> Self {
         Self {
             key: value.key,
+            version: value.version,
             item_type: value
                 .data
                 .item_type
@@ -759,6 +823,11 @@ impl From<RawItemRecord> for ItemDetail {
             year: extract_year(value.data.date.as_deref()),
             abstract_note: value.data.abstract_note,
             url: value.data.url,
+            date: value.data.date,
+            tags: value.data.tags,
+            collections: value.data.collections,
+            extra: value.data.extra,
+            parent_item: value.data.parent_item,
             attachments: Vec::new(),
         }
     }

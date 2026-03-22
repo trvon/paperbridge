@@ -11,6 +11,7 @@ pub struct CreatorInput {
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
 pub struct TagInput {
     pub tag: String,
+    #[serde(rename = "type", alias = "tag_type")]
     pub tag_type: Option<u8>,
 }
 
@@ -179,12 +180,18 @@ pub struct AttachmentSummary {
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct ItemDetail {
     pub key: String,
+    pub version: Option<u64>,
     pub item_type: String,
     pub title: String,
     pub creators: Vec<String>,
     pub year: Option<String>,
     pub abstract_note: Option<String>,
     pub url: Option<String>,
+    pub date: Option<String>,
+    pub tags: Vec<TagInput>,
+    pub collections: Vec<String>,
+    pub extra: Option<String>,
+    pub parent_item: Option<String>,
     pub attachments: Vec<AttachmentSummary>,
 }
 
