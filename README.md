@@ -4,6 +4,12 @@
 
 ## Install
 
+### npm
+
+```bash
+npm install -g paperbridge
+```
+
 ### Homebrew (macOS / Linux)
 
 ```bash

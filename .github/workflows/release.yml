@@ -28,12 +28,16 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             os: macos-latest
+            npm_pkg: darwin-arm64
           - target: x86_64-apple-darwin
             os: macos-latest
+            npm_pkg: darwin-x64
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            npm_pkg: linux-x64
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+            npm_pkg: win32-x64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -64,10 +68,24 @@ jobs:
           Compress-Archive -Path "target/${{ matrix.target }}/release/paperbridge.exe" -DestinationPath $archive
           echo "ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+      - name: Stage npm binary (unix)
+        if: runner.os != 'Windows'
+        run: cp target/${{ matrix.target }}/release/paperbridge npm/${{ matrix.npm_pkg }}/
+
+      - name: Stage npm binary (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Copy-Item "target/${{ matrix.target }}/release/paperbridge.exe" "npm/${{ matrix.npm_pkg }}/"
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
           path: ${{ env.ARCHIVE }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-${{ matrix.npm_pkg }}
+          path: npm/${{ matrix.npm_pkg }}/
 
   upload:
     needs: [release-please, build]
@@ -76,6 +94,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
+          pattern: "!npm-*"
 
       - uses: softprops/action-gh-release@v2
         with:
@@ -83,3 +102,58 @@ jobs:
           files: |
             *.tar.gz
             *.zip
+
+  npm-publish:
+    needs: [release-please, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Set version
+        run: |
+          VERSION="${{ needs.release-please.outputs.tag_name }}"
+          VERSION="${VERSION#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Download platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: npm-*
+          path: npm-artifacts
+
+      - name: Prepare and publish platform packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for pkg_dir in npm-artifacts/npm-*/; do
+            pkg_name=$(basename "$pkg_dir" | sed 's/^npm-//')
+            # Copy binary into the source npm package dir
+            cp "$pkg_dir"paperbridge* "npm/$pkg_name/" 2>/dev/null || true
+            # Update version
+            cd "npm/$pkg_name"
+            npm version "$VERSION" --no-git-tag-version --allow-same-version
+            npm publish --access public
+            cd ../..
+          done
+
+      - name: Publish root package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd npm/paperbridge
+          # Update version and optional dep versions
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          node -e "
+            const pkg = require('./package.json');
+            for (const dep of Object.keys(pkg.optionalDependencies || {})) {
+              pkg.optionalDependencies[dep] = '${{ env.VERSION }}';
+            }
+            require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          npm publish --access public
+          cd ../..

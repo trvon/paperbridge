@@ -1,0 +1,19 @@
+{
+  "name": "paperbridge",
+  "version": "0.1.0",
+  "description": "MCP and CLI bridge for Zotero search and PDF/full-text retrieval",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/trvon/paperbridge"
+  },
+  "bin": {
+    "paperbridge": "bin/paperbridge"
+  },
+  "optionalDependencies": {
+    "@trevonistrevon/paperbridge-darwin-arm64": "0.1.0",
+    "@trevonistrevon/paperbridge-darwin-x64": "0.1.0",
+    "@trevonistrevon/paperbridge-linux-x64": "0.1.0",
+    "@trevonistrevon/paperbridge-win32-x64": "0.1.0"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "@trevonistrevon/paperbridge-darwin-arm64",
+  "version": "0.1.0",
+  "description": "paperbridge binary for macOS ARM64",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/trvon/paperbridge"
+  },
+  "os": ["darwin"],
+  "cpu": ["arm64"]
+}

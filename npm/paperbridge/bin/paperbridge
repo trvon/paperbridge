@@ -1,0 +1,39 @@
+#!/usr/bin/env node
+
+const { execFileSync } = require("child_process");
+const path = require("path");
+const os = require("os");
+
+const PLATFORMS = {
+  "darwin-arm64": "@trevonistrevon/paperbridge-darwin-arm64",
+  "darwin-x64": "@trevonistrevon/paperbridge-darwin-x64",
+  "linux-x64": "@trevonistrevon/paperbridge-linux-x64",
+  "win32-x64": "@trevonistrevon/paperbridge-win32-x64",
+};
+
+const key = `${os.platform()}-${os.arch()}`;
+const pkg = PLATFORMS[key];
+
+if (!pkg) {
+  console.error(`Unsupported platform: ${key}`);
+  process.exit(1);
+}
+
+let binPath;
+try {
+  const pkgDir = path.dirname(require.resolve(`${pkg}/package.json`));
+  const ext = os.platform() === "win32" ? ".exe" : "";
+  binPath = path.join(pkgDir, `paperbridge${ext}`);
+} catch {
+  console.error(
+    `Could not find ${pkg}. Make sure optional dependencies are installed.`
+  );
+  console.error("Try: npm install --include=optional");
+  process.exit(1);
+}
+
+const result = require("child_process").spawnSync(binPath, process.argv.slice(2), {
+  stdio: "inherit",
+});
+
+process.exit(result.status ?? 1);
