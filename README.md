@@ -2,10 +2,28 @@
 
 `paperbridge` is a Rust MCP + CLI bridge for Zotero search, collections, PDF/full-text retrieval, and DOI/Crossref resolution.
 
-## Get Started
+## Install
+
+### Homebrew (macOS / Linux)
+
+```bash
+brew tap trvon/paperbridge
+brew install paperbridge
+```
+
+### GitHub Releases
+
+Download a pre-built binary from [Releases](https://github.com/trvon/paperbridge/releases) for your platform (macOS arm64, macOS x86_64, Linux x86_64, Windows x86_64).
+
+### From Source
 
 ```bash
 ./setup.sh
+```
+
+## Get Started
+
+```bash
 paperbridge config init --interactive
 paperbridge config validate
 paperbridge query --q "machine learning" --limit 3
