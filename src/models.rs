@@ -241,6 +241,19 @@ pub struct SearchVoxPayload {
     pub prepared: ItemVoxPayload,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+pub struct CrossrefWork {
+    pub doi: String,
+    pub title: Option<String>,
+    pub authors: Vec<String>,
+    pub year: Option<String>,
+    pub journal: Option<String>,
+    pub abstract_note: Option<String>,
+    pub url: Option<String>,
+    pub publisher: Option<String>,
+    pub item_type: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -166,7 +166,12 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
                 .await?;
             print_json(&payload)?;
         }
-        Some(Command::ValidateItem { file }) => {
+        Some(Command::ResolveDoi { doi }) => {
+            let service = build_service(config)?;
+            let work = service.resolve_doi(&doi).await?;
+            print_json(&work)?;
+        }
+        Some(Command::ValidateItem { file, online }) => {
             let service = build_service(config)?;
             let text = std::fs::read_to_string(&file).map_err(|e| {
                 paperbridge::ZoteroMcpError::Config(format!("Failed to read {file}: {e}"))
@@ -174,7 +179,11 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
             let payload: ItemWriteRequest = serde_json::from_str(&text).map_err(|e| {
                 paperbridge::ZoteroMcpError::Serde(format!("Invalid JSON in {file}: {e}"))
             })?;
-            let report = service.validate_item_request(&payload);
+            let report = if online {
+                service.validate_item_online(&payload).await?
+            } else {
+                service.validate_item_request(&payload)
+            };
             print_json(&report)?;
         }
         Some(Command::CreateItem { file }) => {

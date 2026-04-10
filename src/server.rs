@@ -122,9 +122,20 @@ pub struct CreateCollectionParams {
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ResolveDoiParams {
+    #[schemars(description = "DOI string to resolve (e.g. 10.1038/nature12373)")]
+    pub doi: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ValidateItemParams {
     #[schemars(description = "Item payload to validate")]
     pub item: ItemWriteRequest,
+
+    #[schemars(
+        description = "If true, also validate DOI against Crossref (slower, requires network)"
+    )]
+    pub online: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -370,14 +381,37 @@ impl PaperbridgeServer {
     }
 
     #[tool(
+        name = "resolve_doi",
+        description = "Resolve a DOI via Crossref and return structured citation metadata (title, authors, year, journal, abstract)"
+    )]
+    async fn resolve_doi(
+        &self,
+        Parameters(params): Parameters<ResolveDoiParams>,
+    ) -> std::result::Result<CallToolResult, McpError> {
+        let work = self
+            .service
+            .resolve_doi(&params.doi)
+            .await
+            .map_err(Self::map_error)?;
+        Self::ok_json(&work)
+    }
+
+    #[tool(
         name = "validate_item",
-        description = "Validate a Zotero item payload before attempting a write"
+        description = "Validate a Zotero item payload before attempting a write. Set online=true to also cross-check DOI metadata against Crossref."
     )]
     async fn validate_item(
         &self,
         Parameters(params): Parameters<ValidateItemParams>,
     ) -> std::result::Result<CallToolResult, McpError> {
-        let report = self.service.validate_item_request(&params.item);
+        let report = if params.online.unwrap_or(false) {
+            self.service
+                .validate_item_online(&params.item)
+                .await
+                .map_err(Self::map_error)?
+        } else {
+            self.service.validate_item_request(&params.item)
+        };
         Self::ok_json(&report)
     }
 

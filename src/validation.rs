@@ -210,7 +210,7 @@ fn validate_creator(creator: &CreatorInput, idx: usize, issues: &mut Vec<Validat
     }
 }
 
-fn looks_like_doi(value: &str) -> bool {
+pub(crate) fn looks_like_doi(value: &str) -> bool {
     let trimmed = value.trim();
     let lower = trimmed.to_ascii_lowercase();
     lower.starts_with("10.") && lower.contains('/')

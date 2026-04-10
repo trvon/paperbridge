@@ -1,10 +1,12 @@
 use crate::backend::{BackendCapabilities, BackendMode, LibraryBackend};
+use crate::crossref::CrossrefClient;
 use crate::error::{Result, ZoteroMcpError};
 use crate::models::{
     BackendInfo, CollectionSummary, CollectionUpdateRequest, CollectionWriteRequest,
-    DeleteCollectionRequest, DeleteItemRequest, FulltextContent, ItemDetail, ItemSummary,
-    ItemUpdateRequest, ItemVoxPayload, ItemWriteRequest, ListCollectionsQuery, SearchItemsQuery,
-    SearchVoxPayload, ValidationReport, VoxTextPayload,
+    CrossrefWork, DeleteCollectionRequest, DeleteItemRequest, FulltextContent, ItemDetail,
+    ItemSummary, ItemUpdateRequest, ItemVoxPayload, ItemWriteRequest, ListCollectionsQuery,
+    SearchItemsQuery, SearchVoxPayload, ValidationIssue, ValidationIssueLevel, ValidationReport,
+    VoxTextPayload,
 };
 use crate::pdf;
 use crate::validation;
@@ -42,11 +44,15 @@ pub struct PrepareSearchResultForVoxRequest {
 #[derive(Clone)]
 pub struct PaperbridgeService {
     backend: Arc<dyn LibraryBackend>,
+    crossref: CrossrefClient,
 }
 
 impl PaperbridgeService {
     pub fn new(backend: Arc<dyn LibraryBackend>) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            crossref: CrossrefClient::new(None),
+        }
     }
 
     pub fn backend_mode(&self) -> BackendMode {
@@ -219,6 +225,74 @@ impl PaperbridgeService {
         self.backend.delete_item(req).await
     }
 
+    pub async fn resolve_doi(&self, doi: &str) -> Result<CrossrefWork> {
+        self.crossref.resolve_doi(doi).await
+    }
+
+    pub async fn validate_item_online(
+        &self,
+        req: &ItemWriteRequest,
+    ) -> Result<ValidationReport> {
+        let mut report = validation::validate_item_request(req);
+
+        let doi = match req.doi.as_deref() {
+            Some(d) if !d.trim().is_empty() && validation::looks_like_doi(d) => d.trim(),
+            _ => return Ok(report),
+        };
+
+        let work = match self.crossref.resolve_doi(doi).await {
+            Ok(w) => w,
+            Err(ZoteroMcpError::Api { status: 404, .. }) => {
+                report.issues.push(ValidationIssue {
+                    level: ValidationIssueLevel::Warning,
+                    field: "doi".to_string(),
+                    message: format!("DOI '{doi}' not found in Crossref"),
+                });
+                return Ok(report);
+            }
+            Err(e) => {
+                report.issues.push(ValidationIssue {
+                    level: ValidationIssueLevel::Warning,
+                    field: "doi".to_string(),
+                    message: format!("Crossref lookup failed: {e}"),
+                });
+                return Ok(report);
+            }
+        };
+
+        if let Some(req_title) = req.title.as_deref() {
+            if let Some(cr_title) = work.title.as_deref() {
+                if !titles_match(req_title, cr_title) {
+                    report.issues.push(ValidationIssue {
+                        level: ValidationIssueLevel::Warning,
+                        field: "title".to_string(),
+                        message: format!(
+                            "Title mismatch: provided '{}', Crossref has '{}'",
+                            req_title, cr_title
+                        ),
+                    });
+                }
+            }
+        }
+
+        if let Some(req_date) = req.date.as_deref() {
+            if let Some(cr_year) = work.year.as_deref() {
+                if !req_date.contains(cr_year) {
+                    report.issues.push(ValidationIssue {
+                        level: ValidationIssueLevel::Warning,
+                        field: "date".to_string(),
+                        message: format!(
+                            "Year mismatch: provided date '{}', Crossref year is '{}'",
+                            req_date, cr_year
+                        ),
+                    });
+                }
+            }
+        }
+
+        Ok(report)
+    }
+
     pub async fn prepare_vox_text(&self, req: PrepareVoxTextRequest) -> Result<VoxTextPayload> {
         let max_chars = req.max_chars_per_chunk.unwrap_or(DEFAULT_CHUNK_SIZE);
 
@@ -332,6 +406,17 @@ impl PaperbridgeService {
             prepared,
         })
     }
+}
+
+fn titles_match(a: &str, b: &str) -> bool {
+    let norm = |s: &str| {
+        s.trim()
+            .to_ascii_lowercase()
+            .chars()
+            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+            .collect::<String>()
+    };
+    norm(a) == norm(b)
 }
 
 fn summarize_validation_report(report: &ValidationReport) -> String {

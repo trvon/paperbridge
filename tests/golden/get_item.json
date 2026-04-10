@@ -1,5 +1,6 @@
 {
   "key": "ITEMA",
+  "version": null,
   "item_type": "journalArticle",
   "title": "Graph Learning at Scale",
   "creators": [
@@ -8,6 +9,11 @@
   "year": "2024",
   "abstract_note": "A practical systems paper.",
   "url": "https://example.org/graph",
+  "date": "2024-08-01",
+  "tags": [],
+  "collections": [],
+  "extra": null,
+  "parent_item": null,
   "attachments": [
     {
       "key": "NOTE1",

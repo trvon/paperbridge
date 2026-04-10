@@ -93,11 +93,20 @@ pub enum Command {
         #[arg(long)]
         parent_collection: Option<String>,
     },
+    /// Resolve a DOI via Crossref and print structured metadata
+    ResolveDoi {
+        /// DOI to resolve (e.g. 10.1038/nature12373)
+        #[arg(long)]
+        doi: String,
+    },
     /// Validate an item payload JSON file
     ValidateItem {
         /// Path to JSON file matching ItemWriteRequest
         #[arg(long)]
         file: String,
+        /// Also validate DOI against Crossref (slower, requires network)
+        #[arg(long)]
+        online: bool,
     },
     /// Create an item from a JSON payload file and print JSON
     CreateItem {
@@ -355,10 +364,41 @@ mod tests {
     }
 
     #[test]
+    fn parse_resolve_doi_command() {
+        let cli = Cli::try_parse_from([
+            "paperbridge",
+            "resolve-doi",
+            "--doi",
+            "10.1038/nature12373",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Some(Command::ResolveDoi { .. })));
+    }
+
+    #[test]
     fn parse_validate_item_command() {
         let cli =
             Cli::try_parse_from(["paperbridge", "validate-item", "--file", "item.json"]).unwrap();
-        assert!(matches!(cli.command, Some(Command::ValidateItem { .. })));
+        assert!(matches!(
+            cli.command,
+            Some(Command::ValidateItem { online: false, .. })
+        ));
+    }
+
+    #[test]
+    fn parse_validate_item_online_command() {
+        let cli = Cli::try_parse_from([
+            "paperbridge",
+            "validate-item",
+            "--file",
+            "item.json",
+            "--online",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::ValidateItem { online: true, .. })
+        ));
     }
 
     #[test]

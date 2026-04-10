@@ -3,6 +3,7 @@ pub mod backends;
 pub mod chunking;
 pub mod cli;
 pub mod config;
+pub mod crossref;
 pub mod error;
 pub mod models;
 pub mod pdf;
