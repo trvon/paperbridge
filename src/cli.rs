@@ -365,13 +365,9 @@ mod tests {
 
     #[test]
     fn parse_resolve_doi_command() {
-        let cli = Cli::try_parse_from([
-            "paperbridge",
-            "resolve-doi",
-            "--doi",
-            "10.1038/nature12373",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["paperbridge", "resolve-doi", "--doi", "10.1038/nature12373"])
+                .unwrap();
         assert!(matches!(cli.command, Some(Command::ResolveDoi { .. })));
     }
 

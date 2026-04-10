@@ -2,11 +2,10 @@ use crate::backend::{BackendCapabilities, BackendMode, LibraryBackend};
 use crate::crossref::CrossrefClient;
 use crate::error::{Result, ZoteroMcpError};
 use crate::models::{
-    BackendInfo, CollectionSummary, CollectionUpdateRequest, CollectionWriteRequest,
-    CrossrefWork, DeleteCollectionRequest, DeleteItemRequest, FulltextContent, ItemDetail,
-    ItemSummary, ItemUpdateRequest, ItemVoxPayload, ItemWriteRequest, ListCollectionsQuery,
-    SearchItemsQuery, SearchVoxPayload, ValidationIssue, ValidationIssueLevel, ValidationReport,
-    VoxTextPayload,
+    BackendInfo, CollectionSummary, CollectionUpdateRequest, CollectionWriteRequest, CrossrefWork,
+    DeleteCollectionRequest, DeleteItemRequest, FulltextContent, ItemDetail, ItemSummary,
+    ItemUpdateRequest, ItemVoxPayload, ItemWriteRequest, ListCollectionsQuery, SearchItemsQuery,
+    SearchVoxPayload, ValidationIssue, ValidationIssueLevel, ValidationReport, VoxTextPayload,
 };
 use crate::pdf;
 use crate::validation;
@@ -229,10 +228,7 @@ impl PaperbridgeService {
         self.crossref.resolve_doi(doi).await
     }
 
-    pub async fn validate_item_online(
-        &self,
-        req: &ItemWriteRequest,
-    ) -> Result<ValidationReport> {
+    pub async fn validate_item_online(&self, req: &ItemWriteRequest) -> Result<ValidationReport> {
         let mut report = validation::validate_item_request(req);
 
         let doi = match req.doi.as_deref() {
