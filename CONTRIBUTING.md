@@ -15,11 +15,21 @@ paperbridge config init --interactive
 paperbridge config validate
 ```
 
+## Git hooks
+
+The repo ships pre-commit hooks in `.githooks/`. Activate them with:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+This runs automatically during `./setup.sh`. The pre-commit hook checks formatting, clippy, cargo-deny, and tests before each commit.
+
 ## Development workflow
 
 1. Create a branch for your change.
 2. Implement changes with tests.
-3. Run all required checks locally.
+3. Run all required checks locally (or rely on the pre-commit hook).
 4. Open a pull request with a clear summary and rationale.
 
 ## Required checks

@@ -26,6 +26,9 @@ info "Installing binary to ${INSTALL_DIR}/"
 mkdir -p "${INSTALL_DIR}"
 cp "target/release/paperbridge" "${INSTALL_DIR}/paperbridge"
 
+info "Configuring git hooks..."
+git config core.hooksPath .githooks
+
 info "Ensuring config directory exists at ${CONFIG_DIR}/"
 mkdir -p "${CONFIG_DIR}"
 

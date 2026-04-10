@@ -256,34 +256,32 @@ impl PaperbridgeService {
             }
         };
 
-        if let Some(req_title) = req.title.as_deref() {
-            if let Some(cr_title) = work.title.as_deref() {
-                if !titles_match(req_title, cr_title) {
-                    report.issues.push(ValidationIssue {
-                        level: ValidationIssueLevel::Warning,
-                        field: "title".to_string(),
-                        message: format!(
-                            "Title mismatch: provided '{}', Crossref has '{}'",
-                            req_title, cr_title
-                        ),
-                    });
-                }
-            }
+        if let Some(req_title) = req.title.as_deref()
+            && let Some(cr_title) = work.title.as_deref()
+            && !titles_match(req_title, cr_title)
+        {
+            report.issues.push(ValidationIssue {
+                level: ValidationIssueLevel::Warning,
+                field: "title".to_string(),
+                message: format!(
+                    "Title mismatch: provided '{}', Crossref has '{}'",
+                    req_title, cr_title
+                ),
+            });
         }
 
-        if let Some(req_date) = req.date.as_deref() {
-            if let Some(cr_year) = work.year.as_deref() {
-                if !req_date.contains(cr_year) {
-                    report.issues.push(ValidationIssue {
-                        level: ValidationIssueLevel::Warning,
-                        field: "date".to_string(),
-                        message: format!(
-                            "Year mismatch: provided date '{}', Crossref year is '{}'",
-                            req_date, cr_year
-                        ),
-                    });
-                }
-            }
+        if let Some(req_date) = req.date.as_deref()
+            && let Some(cr_year) = work.year.as_deref()
+            && !req_date.contains(cr_year)
+        {
+            report.issues.push(ValidationIssue {
+                level: ValidationIssueLevel::Warning,
+                field: "date".to_string(),
+                message: format!(
+                    "Year mismatch: provided date '{}', Crossref year is '{}'",
+                    req_date, cr_year
+                ),
+            });
         }
 
         Ok(report)
