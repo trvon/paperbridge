@@ -140,6 +140,21 @@ pub enum Command {
     },
     /// Show active backend mode and capabilities
     BackendInfo,
+    /// Search external paper sources (arXiv, HuggingFace, Semantic Scholar, Crossref)
+    SearchPapers {
+        /// Free-text search query
+        #[arg(long)]
+        q: String,
+        /// Max hits per source (default 10)
+        #[arg(long)]
+        limit: Option<u32>,
+        /// Comma-separated subset: arxiv,hugging_face,semantic_scholar,crossref
+        #[arg(long)]
+        sources: Option<String>,
+        /// Per-source timeout in milliseconds (default 8000)
+        #[arg(long)]
+        timeout_ms: Option<u64>,
+    },
     /// Config helper commands
     Config {
         #[command(subcommand)]
@@ -452,5 +467,28 @@ mod tests {
     fn parse_backend_info_command() {
         let cli = Cli::try_parse_from(["paperbridge", "backend-info"]).unwrap();
         assert!(matches!(cli.command, Some(Command::BackendInfo)));
+    }
+
+    #[test]
+    fn parse_search_papers_command() {
+        let cli = Cli::try_parse_from([
+            "paperbridge",
+            "search-papers",
+            "--q",
+            "vision transformers",
+            "--limit",
+            "5",
+            "--sources",
+            "arxiv,crossref",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::SearchPapers {
+                limit: Some(5),
+                sources: Some(_),
+                ..
+            })
+        ));
     }
 }

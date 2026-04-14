@@ -5,6 +5,7 @@ pub mod cli;
 pub mod config;
 pub mod crossref;
 pub mod error;
+pub mod external;
 pub mod models;
 pub mod pdf;
 pub mod server;

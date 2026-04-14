@@ -84,6 +84,10 @@ pub struct Config {
     pub group_id: Option<u64>,
     pub timeout_secs: u64,
     pub log_level: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hf_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic_scholar_api_key: Option<String>,
 }
 
 impl Default for Config {
@@ -98,6 +102,8 @@ impl Default for Config {
             group_id: None,
             timeout_secs: 20,
             log_level: "info".to_string(),
+            hf_token: None,
+            semantic_scholar_api_key: None,
         }
     }
 }
@@ -115,6 +121,8 @@ struct PartialConfig {
     group_id: Option<u64>,
     timeout_secs: Option<u64>,
     log_level: Option<String>,
+    hf_token: Option<String>,
+    semantic_scholar_api_key: Option<String>,
 }
 
 impl Config {
@@ -192,16 +200,15 @@ impl Config {
     }
 
     pub fn display_safe(&self) -> String {
+        let mask = |opt: &Option<String>| {
+            if opt.is_some() { "<set>" } else { "<unset>" }
+        };
         format!(
-            "backend_mode = \"{}\"\ncloud_api_base = \"{}\"\nlocal_api_base = \"{}\"\napi_key = {}\nlibrary_type = \"{}\"\nuser_id = {}\ngroup_id = {}\ntimeout_secs = {}\nlog_level = \"{}\"",
+            "backend_mode = \"{}\"\ncloud_api_base = \"{}\"\nlocal_api_base = \"{}\"\napi_key = {}\nlibrary_type = \"{}\"\nuser_id = {}\ngroup_id = {}\ntimeout_secs = {}\nlog_level = \"{}\"\nhf_token = {}\nsemantic_scholar_api_key = {}",
             self.backend_mode.as_str(),
             self.cloud_api_base,
             self.local_api_base,
-            if self.api_key.is_some() {
-                "<set>"
-            } else {
-                "<unset>"
-            },
+            mask(&self.api_key),
             self.library_type.as_str(),
             self.user_id
                 .map(|v| v.to_string())
@@ -210,7 +217,9 @@ impl Config {
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "<unset>".to_string()),
             self.timeout_secs,
-            self.log_level
+            self.log_level,
+            mask(&self.hf_token),
+            mask(&self.semantic_scholar_api_key),
         )
     }
 
@@ -264,6 +273,16 @@ impl Config {
             ),
             "timeout_secs" => Some(self.timeout_secs.to_string()),
             "log_level" => Some(self.log_level.clone()),
+            "hf_token" => Some(
+                self.hf_token
+                    .clone()
+                    .unwrap_or_else(|| "<unset>".to_string()),
+            ),
+            "semantic_scholar_api_key" => Some(
+                self.semantic_scholar_api_key
+                    .clone()
+                    .unwrap_or_else(|| "<unset>".to_string()),
+            ),
             _ => None,
         }
     }
@@ -317,9 +336,15 @@ impl Config {
                 }
                 self.log_level = v.to_string();
             }
+            "hf_token" => {
+                self.hf_token = optional_string(v);
+            }
+            "semantic_scholar_api_key" => {
+                self.semantic_scholar_api_key = optional_string(v);
+            }
             _ => {
                 return Err(ZoteroMcpError::InvalidInput(format!(
-                    "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level"
+                    "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key"
                 )));
             }
         }
@@ -356,6 +381,12 @@ impl Config {
         }
         if let Some(v) = partial.log_level {
             self.log_level = v;
+        }
+        if let Some(v) = partial.hf_token {
+            self.hf_token = Some(v);
+        }
+        if let Some(v) = partial.semantic_scholar_api_key {
+            self.semantic_scholar_api_key = Some(v);
         }
     }
 
@@ -405,6 +436,20 @@ impl Config {
                 }
                 "PAPERBRIDGE_LOG_LEVEL" | "ZOTERO_MCP_LOG_LEVEL" => {
                     self.log_level = value.to_string()
+                }
+                "PAPERBRIDGE_HF_TOKEN" | "HF_TOKEN" => {
+                    if value.trim().is_empty() {
+                        self.hf_token = None;
+                    } else {
+                        self.hf_token = Some(value.to_string());
+                    }
+                }
+                "PAPERBRIDGE_SEMANTIC_SCHOLAR_API_KEY" | "SEMANTIC_SCHOLAR_API_KEY" => {
+                    if value.trim().is_empty() {
+                        self.semantic_scholar_api_key = None;
+                    } else {
+                        self.semantic_scholar_api_key = Some(value.to_string());
+                    }
                 }
                 _ => {}
             }

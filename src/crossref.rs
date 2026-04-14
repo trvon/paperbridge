@@ -1,5 +1,5 @@
 use crate::error::{Result, ZoteroMcpError};
-use crate::models::CrossrefWork;
+use crate::models::{CrossrefWork, PaperHit, PaperSource};
 use crate::validation::looks_like_doi;
 use reqwest::Client;
 use serde::Deserialize;
@@ -65,6 +65,35 @@ impl CrossrefClient {
         let raw: RawCrossrefResponse = response.json().await?;
         Ok(convert_message(trimmed, raw.message))
     }
+
+    pub async fn search(&self, query: &str, limit: u32) -> Result<Vec<PaperHit>> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Err(ZoteroMcpError::InvalidInput(
+                "Crossref search query must not be empty".to_string(),
+            ));
+        }
+
+        let encoded = urlencoding::encode(trimmed);
+        let url = format!("{}/works?query={encoded}&rows={limit}", self.base_url);
+
+        let response = self.client.get(&url).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| String::from("<no body>"));
+            return Err(ZoteroMcpError::Api {
+                status: status.as_u16(),
+                message: format!("Crossref search error: {body}"),
+            });
+        }
+
+        let raw: RawCrossrefSearchResponse = response.json().await?;
+        let items = raw.message.items.unwrap_or_default();
+        Ok(items.into_iter().map(convert_message_to_hit).collect())
+    }
 }
 
 impl std::fmt::Debug for CrossrefClient {
@@ -103,7 +132,7 @@ struct RawCrossrefMessage {
     work_type: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct RawAuthor {
     given: Option<String>,
     family: Option<String>,
@@ -114,6 +143,16 @@ struct RawAuthor {
 struct RawDateField {
     #[serde(rename = "date-parts")]
     date_parts: Option<Vec<Vec<Option<u32>>>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawCrossrefSearchResponse {
+    message: RawCrossrefSearchMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawCrossrefSearchMessage {
+    items: Option<Vec<RawCrossrefMessage>>,
 }
 
 // --- Conversion ---
@@ -147,6 +186,40 @@ fn convert_message(doi_input: &str, msg: RawCrossrefMessage) -> CrossrefWork {
         url: msg.url,
         publisher: msg.publisher,
         item_type: msg.work_type,
+    }
+}
+
+fn convert_message_to_hit(msg: RawCrossrefMessage) -> PaperHit {
+    let year = extract_year(msg.published_print.as_ref())
+        .or_else(|| extract_year(msg.published_online.as_ref()));
+
+    let title = msg
+        .title
+        .and_then(|v| v.into_iter().next())
+        .unwrap_or_default();
+
+    let authors = msg
+        .author
+        .unwrap_or_default()
+        .into_iter()
+        .map(format_author)
+        .collect();
+
+    let venue = msg.container_title.and_then(|v| v.into_iter().next());
+    let abstract_note = msg.abstract_text.as_deref().map(strip_xml_tags);
+
+    PaperHit {
+        source: PaperSource::Crossref,
+        title,
+        authors,
+        year,
+        doi: msg.doi,
+        arxiv_id: None,
+        abstract_note,
+        url: msg.url,
+        pdf_url: None,
+        venue,
+        citation_count: None,
     }
 }
 
@@ -339,5 +412,95 @@ mod tests {
         let raw: RawCrossrefResponse = serde_json::from_value(json).unwrap();
         let work = convert_message("10.1234/online-only", raw.message);
         assert_eq!(work.year.as_deref(), Some("2024"));
+    }
+
+    #[test]
+    fn convert_message_to_hit_extracts_fields() {
+        let json = serde_json::json!({
+            "DOI": "10.1038/nature12373",
+            "title": ["Sample Title"],
+            "author": [{"given": "Alice", "family": "Smith"}],
+            "container-title": ["Nature"],
+            "published-print": {"date-parts": [[2013]]},
+            "abstract": "<jats:p>Body.</jats:p>",
+            "URL": "http://dx.doi.org/10.1038/nature12373"
+        });
+        let raw: RawCrossrefMessage = serde_json::from_value(json).unwrap();
+        let hit = convert_message_to_hit(raw);
+
+        assert_eq!(hit.source, PaperSource::Crossref);
+        assert_eq!(hit.title, "Sample Title");
+        assert_eq!(hit.authors, vec!["Smith, Alice"]);
+        assert_eq!(hit.year.as_deref(), Some("2013"));
+        assert_eq!(hit.doi.as_deref(), Some("10.1038/nature12373"));
+        assert_eq!(hit.venue.as_deref(), Some("Nature"));
+        assert_eq!(hit.abstract_note.as_deref(), Some("Body."));
+        assert_eq!(
+            hit.url.as_deref(),
+            Some("http://dx.doi.org/10.1038/nature12373")
+        );
+        assert!(hit.arxiv_id.is_none());
+        assert!(hit.pdf_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn search_hits_works_endpoint_and_parses_items() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "status": "ok",
+            "message": {
+                "items": [
+                    {
+                        "DOI": "10.1/a",
+                        "title": ["Paper A"],
+                        "author": [{"given": "Al", "family": "Alpha"}],
+                        "container-title": ["Venue A"],
+                        "published-print": {"date-parts": [[2022]]}
+                    },
+                    {
+                        "DOI": "10.1/b",
+                        "title": ["Paper B"]
+                    }
+                ]
+            }
+        });
+        Mock::given(method("GET"))
+            .and(path("/works"))
+            .and(query_param("query", "quantum"))
+            .and(query_param("rows", "5"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = CrossrefClient::new(Some(&server.uri()));
+        let hits = client.search("quantum", 5).await.unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].doi.as_deref(), Some("10.1/a"));
+        assert_eq!(hits[0].venue.as_deref(), Some("Venue A"));
+        assert_eq!(hits[1].title, "Paper B");
+    }
+
+    #[tokio::test]
+    async fn search_returns_api_error_on_non_success_status() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/works"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+
+        let client = CrossrefClient::new(Some(&server.uri()));
+        let err = client.search("q", 3).await.unwrap_err();
+        match err {
+            ZoteroMcpError::Api { status, .. } => assert_eq!(status, 500),
+            other => panic!("expected Api error, got {other:?}"),
+        }
     }
 }

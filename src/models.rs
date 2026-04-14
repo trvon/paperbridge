@@ -254,6 +254,30 @@ pub struct CrossrefWork {
     pub item_type: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Hash, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PaperSource {
+    Arxiv,
+    HuggingFace,
+    SemanticScholar,
+    Crossref,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+pub struct PaperHit {
+    pub source: PaperSource,
+    pub title: String,
+    pub authors: Vec<String>,
+    pub year: Option<String>,
+    pub doi: Option<String>,
+    pub arxiv_id: Option<String>,
+    pub abstract_note: Option<String>,
+    pub url: Option<String>,
+    pub pdf_url: Option<String>,
+    pub venue: Option<String>,
+    pub citation_count: Option<u32>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

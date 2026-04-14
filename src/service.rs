@@ -1,11 +1,13 @@
 use crate::backend::{BackendCapabilities, BackendMode, LibraryBackend};
 use crate::crossref::CrossrefClient;
 use crate::error::{Result, ZoteroMcpError};
+use crate::external::{PaperSearch, SearchOptions};
 use crate::models::{
     BackendInfo, CollectionSummary, CollectionUpdateRequest, CollectionWriteRequest, CrossrefWork,
     DeleteCollectionRequest, DeleteItemRequest, FulltextContent, ItemDetail, ItemSummary,
-    ItemUpdateRequest, ItemVoxPayload, ItemWriteRequest, ListCollectionsQuery, SearchItemsQuery,
-    SearchVoxPayload, ValidationIssue, ValidationIssueLevel, ValidationReport, VoxTextPayload,
+    ItemUpdateRequest, ItemVoxPayload, ItemWriteRequest, ListCollectionsQuery, PaperHit,
+    SearchItemsQuery, SearchVoxPayload, ValidationIssue, ValidationIssueLevel, ValidationReport,
+    VoxTextPayload,
 };
 use crate::pdf;
 use crate::validation;
@@ -44,14 +46,24 @@ pub struct PrepareSearchResultForVoxRequest {
 pub struct PaperbridgeService {
     backend: Arc<dyn LibraryBackend>,
     crossref: CrossrefClient,
+    paper_search: PaperSearch,
 }
 
 impl PaperbridgeService {
     pub fn new(backend: Arc<dyn LibraryBackend>) -> Self {
+        Self::with_paper_search(backend, PaperSearch::new())
+    }
+
+    pub fn with_paper_search(backend: Arc<dyn LibraryBackend>, paper_search: PaperSearch) -> Self {
         Self {
             backend,
             crossref: CrossrefClient::new(None),
+            paper_search,
         }
+    }
+
+    pub async fn search_papers(&self, opts: SearchOptions) -> Result<Vec<PaperHit>> {
+        self.paper_search.search(opts).await
     }
 
     pub fn backend_mode(&self) -> BackendMode {

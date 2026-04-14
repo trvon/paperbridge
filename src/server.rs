@@ -1,6 +1,7 @@
+use crate::external::SearchOptions;
 use crate::models::{
     CollectionUpdateRequest, CollectionWriteRequest, DeleteCollectionRequest, DeleteItemRequest,
-    ItemUpdateRequest, ItemWriteRequest, ListCollectionsQuery, SearchItemsQuery,
+    ItemUpdateRequest, ItemWriteRequest, ListCollectionsQuery, PaperSource, SearchItemsQuery,
 };
 use crate::service::{
     DEFAULT_CHUNK_SIZE, DEFAULT_PIPELINE_SEARCH_LIMIT, PaperbridgeService,
@@ -169,6 +170,23 @@ pub struct DeleteCollectionParams {
 pub struct DeleteItemParams {
     #[schemars(description = "Item deletion payload")]
     pub item: DeleteItemRequest,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct SearchPapersParams {
+    #[schemars(description = "Free-text search query")]
+    pub query: String,
+
+    #[schemars(description = "Max hits per source (default 10)")]
+    pub limit_per_source: Option<u32>,
+
+    #[schemars(
+        description = "Optional scoping to specific sources; defaults to all (arxiv, hugging_face, semantic_scholar, crossref)"
+    )]
+    pub sources: Option<Vec<PaperSource>>,
+
+    #[schemars(description = "Per-source timeout in milliseconds (default 8000)")]
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -503,6 +521,28 @@ impl PaperbridgeServer {
             .map_err(Self::map_error)?;
         Self::ok_json(&serde_json::json!({"deleted": true}))
     }
+
+    #[tool(
+        name = "search_papers",
+        description = "Search external paper sources (arXiv, HuggingFace, Semantic Scholar, Crossref) in parallel and return merged, deduped hits"
+    )]
+    async fn search_papers(
+        &self,
+        Parameters(params): Parameters<SearchPapersParams>,
+    ) -> std::result::Result<CallToolResult, McpError> {
+        let opts = SearchOptions {
+            query: params.query,
+            limit_per_source: params.limit_per_source.unwrap_or(10),
+            sources: params.sources,
+            timeout_ms: params.timeout_ms.unwrap_or(8000),
+        };
+        let hits = self
+            .service
+            .search_papers(opts)
+            .await
+            .map_err(Self::map_error)?;
+        Self::ok_json(&hits)
+    }
 }
 
 #[tool_handler]
@@ -563,5 +603,29 @@ mod tests {
         let err = PaperbridgeServer::map_error(ZoteroMcpError::InvalidInput("bad".to_string()));
         let rendered = format!("{err}");
         assert!(rendered.contains("bad"));
+    }
+
+    #[test]
+    fn search_papers_params_deserializes() {
+        let json = serde_json::json!({"query": "transformers"});
+        let params: SearchPapersParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.query, "transformers");
+        assert!(params.limit_per_source.is_none());
+        assert!(params.sources.is_none());
+        assert!(params.timeout_ms.is_none());
+
+        let json = serde_json::json!({
+            "query": "q",
+            "limit_per_source": 3,
+            "sources": ["arxiv", "crossref"],
+            "timeout_ms": 5000
+        });
+        let params: SearchPapersParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.limit_per_source, Some(3));
+        assert_eq!(params.timeout_ms, Some(5000));
+        assert_eq!(
+            params.sources,
+            Some(vec![PaperSource::Arxiv, PaperSource::Crossref])
+        );
     }
 }

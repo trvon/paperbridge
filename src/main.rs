@@ -1,9 +1,10 @@
 use clap::Parser;
 use paperbridge::cli::{Cli, Command, ConfigAction, SnippetTarget};
 use paperbridge::config::Config;
+use paperbridge::external::SearchOptions;
 use paperbridge::models::{
     CollectionUpdateRequest, CollectionWriteRequest, DeleteCollectionRequest, DeleteItemRequest,
-    ItemUpdateRequest, ItemWriteRequest, ListCollectionsQuery, SearchItemsQuery,
+    ItemUpdateRequest, ItemWriteRequest, ListCollectionsQuery, PaperSource, SearchItemsQuery,
 };
 use paperbridge::server::PaperbridgeServer;
 use paperbridge::service::{
@@ -245,6 +246,26 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
             let service = build_service(config)?;
             print_json(&service.backend_info())?;
         }
+        Some(Command::SearchPapers {
+            q,
+            limit,
+            sources,
+            timeout_ms,
+        }) => {
+            let service = build_service(config)?;
+            let parsed_sources = match sources.as_deref() {
+                None => None,
+                Some(s) => Some(parse_source_list(s)?),
+            };
+            let opts = SearchOptions {
+                query: q,
+                limit_per_source: limit.unwrap_or(10),
+                sources: parsed_sources,
+                timeout_ms: timeout_ms.unwrap_or(8000),
+            };
+            let hits = service.search_papers(opts).await?;
+            print_json(&hits)?;
+        }
         Some(Command::Serve) | None => {
             run_stdio(config).await?;
         }
@@ -272,8 +293,12 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
 }
 
 fn build_service(config: Config) -> paperbridge::Result<PaperbridgeService> {
+    let paper_search = paperbridge::external::PaperSearch::with_keys(
+        config.hf_token.clone(),
+        config.semantic_scholar_api_key.clone(),
+    );
     let backend = build_backend(config)?;
-    Ok(PaperbridgeService::new(backend))
+    Ok(PaperbridgeService::with_paper_search(backend, paper_search))
 }
 
 async fn run_stdio(config: Config) -> paperbridge::Result<()> {
@@ -554,6 +579,29 @@ enum ZoteroSource {
     Hybrid,
 }
 
+fn parse_source_list(input: &str) -> paperbridge::Result<Vec<PaperSource>> {
+    let mut out = Vec::new();
+    for raw in input.split(',') {
+        let token = raw.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let source = match token.to_ascii_lowercase().as_str() {
+            "arxiv" => PaperSource::Arxiv,
+            "hugging_face" | "huggingface" | "hf" => PaperSource::HuggingFace,
+            "semantic_scholar" | "s2" | "semanticscholar" => PaperSource::SemanticScholar,
+            "crossref" => PaperSource::Crossref,
+            other => {
+                return Err(paperbridge::ZoteroMcpError::InvalidInput(format!(
+                    "Unknown source '{other}'. Valid: arxiv, hugging_face, semantic_scholar, crossref"
+                )));
+            }
+        };
+        out.push(source);
+    }
+    Ok(out)
+}
+
 fn parse_zotero_source(value: &str) -> paperbridge::Result<ZoteroSource> {
     match value.trim().to_ascii_lowercase().as_str() {
         "cloud" => Ok(ZoteroSource::Cloud),
@@ -754,5 +802,35 @@ mod tests {
     fn parse_user_id_from_profile_html_works() {
         let html = r#"<script>window.__DATA__ = {"userID":7141888,"foo":"bar"};</script>"#;
         assert_eq!(parse_user_id_from_profile_html(html), Some(7141888));
+    }
+
+    #[test]
+    fn parse_source_list_accepts_aliases() {
+        let parsed = parse_source_list("arxiv,hf,s2,crossref").unwrap();
+        assert_eq!(
+            parsed,
+            vec![
+                PaperSource::Arxiv,
+                PaperSource::HuggingFace,
+                PaperSource::SemanticScholar,
+                PaperSource::Crossref,
+            ]
+        );
+
+        let parsed = parse_source_list("huggingface, semanticscholar ,  arxiv").unwrap();
+        assert_eq!(
+            parsed,
+            vec![
+                PaperSource::HuggingFace,
+                PaperSource::SemanticScholar,
+                PaperSource::Arxiv,
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_source_list_rejects_unknown_token() {
+        let err = parse_source_list("arxiv,scholar").unwrap_err();
+        assert!(err.to_string().contains("Unknown source"));
     }
 }
