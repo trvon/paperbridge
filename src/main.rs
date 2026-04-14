@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use paperbridge::cli::{Cli, Command, ConfigAction, SnippetTarget};
 use paperbridge::config::Config;
 use paperbridge::external::SearchOptions;
@@ -26,6 +26,13 @@ fn main() -> paperbridge::Result<()> {
 }
 
 async fn async_main(cli: Cli) -> paperbridge::Result<()> {
+    if let Some(Command::Completions { shell }) = &cli.command {
+        let mut cmd = Cli::command();
+        let name = cmd.get_name().to_string();
+        clap_complete::generate(*shell, &mut cmd, name, &mut io::stdout());
+        return Ok(());
+    }
+
     if let Some(Command::Config { action }) = &cli.command {
         match action {
             ConfigAction::Path => {
@@ -287,6 +294,9 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
         Some(Command::Config {
             action: ConfigAction::ResolveUserId { .. },
         }) => unreachable!("resolve-user-id command handled before config load"),
+        Some(Command::Completions { .. }) => {
+            unreachable!("completions command handled before config load")
+        }
     }
 
     Ok(())

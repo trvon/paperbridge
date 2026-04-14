@@ -160,6 +160,12 @@ pub enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Generate shell completion script to stdout
+    Completions {
+        /// Target shell
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, Eq, PartialEq)]
