@@ -194,6 +194,9 @@ pub enum ConfigAction {
     Get {
         /// Optional config key
         key: Option<String>,
+        /// Print sensitive values (api_key, hf_token, semantic_scholar_api_key) verbatim instead of redacting
+        #[arg(long)]
+        show_secret: bool,
     },
     /// Set one config key/value in config.toml
     Set {
@@ -322,7 +325,7 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Config {
-                action: ConfigAction::Get { key: Some(_) }
+                action: ConfigAction::Get { key: Some(_), .. }
             })
         ));
     }

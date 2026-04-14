@@ -8,6 +8,7 @@ pub mod error;
 pub mod external;
 pub mod models;
 pub mod pdf;
+pub mod security;
 pub mod server;
 pub mod service;
 pub mod validation;

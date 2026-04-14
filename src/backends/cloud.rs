@@ -1,6 +1,7 @@
 use crate::backend::{BackendCapabilities, BackendMode, LibraryBackend};
 use crate::config::Config;
 use crate::error::{Result, ZoteroMcpError};
+use crate::security::ensure_secure_transport;
 use crate::models::{
     AttachmentSummary, CollectionSummary, CollectionUpdateRequest, CollectionWriteRequest,
     CreatorInput, DeleteCollectionRequest, DeleteItemRequest, FulltextContent, ItemDetail,
@@ -25,6 +26,11 @@ pub struct CloudZoteroBackend {
 
 impl CloudZoteroBackend {
     pub fn new(config: Config) -> Result<Self> {
+        if config.api_key.is_some() {
+            ensure_secure_transport(config.active_cloud_api_base())?;
+            ensure_secure_transport(config.active_write_api_base())?;
+        }
+
         let timeout = Duration::from_secs(config.timeout_secs);
         let http = reqwest::Client::builder()
             // Fail fast on bad DNS targets; we'll retry.

@@ -50,8 +50,8 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
                 handle_config_init(*force, *interactive).await?;
                 return Ok(());
             }
-            ConfigAction::Get { key } => {
-                handle_config_get(key.as_deref())?;
+            ConfigAction::Get { key, show_secret } => {
+                handle_config_get(key.as_deref(), *show_secret)?;
                 return Ok(());
             }
             ConfigAction::Set { key, value } => {
@@ -517,14 +517,24 @@ async fn handle_config_init(force: bool, interactive: bool) -> paperbridge::Resu
     Ok(())
 }
 
-fn handle_config_get(key: Option<&str>) -> paperbridge::Result<()> {
+const SENSITIVE_CONFIG_KEYS: &[&str] = &["api_key", "hf_token", "semantic_scholar_api_key"];
+
+fn handle_config_get(key: Option<&str>, show_secret: bool) -> paperbridge::Result<()> {
     let cfg = Config::load_file_or_default()?;
     if let Some(key) = key {
         let value = cfg.get_value(key).ok_or_else(|| {
             paperbridge::ZoteroMcpError::InvalidInput(format!(
-                "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level"
+                "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key"
             ))
         })?;
+        if SENSITIVE_CONFIG_KEYS.contains(&key) && !show_secret {
+            if value.is_empty() {
+                println!("(unset)");
+            } else {
+                println!("(set, {} chars — pass --show-secret to reveal)", value.len());
+            }
+            return Ok(());
+        }
         println!("{value}");
         return Ok(());
     }
@@ -681,9 +691,12 @@ async fn resolve_user_id_from_username_redirect(username: &str) -> paperbridge::
 
 async fn resolve_user_id_from_api_key(api_base: &str, api_key: &str) -> paperbridge::Result<u64> {
     let base = api_base.trim_end_matches('/');
+    let url = format!("{base}/keys/current");
+    paperbridge::security::ensure_secure_transport(&url)?;
     let response = reqwest::Client::new()
-        .get(format!("{base}/keys/{api_key}"))
+        .get(&url)
         .header("Zotero-API-Version", "3")
+        .header("Zotero-API-Key", api_key)
         .send()
         .await
         .map_err(|e| paperbridge::ZoteroMcpError::Http(e.to_string()))?;
