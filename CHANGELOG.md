@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.0](https://github.com/trvon/paperbridge/compare/v0.1.0...v0.2.0) (2026-04-14)
+
+
+### Features
+
+* adding paper search router that support api for huggingface and SemanticScholar ([3fdcc8b](https://github.com/trvon/paperbridge/commit/3fdcc8b34e7baa00186234d6ac3b2364a0676df2))
+* npm install path ([bbefcf3](https://github.com/trvon/paperbridge/commit/bbefcf3f9484d5704ad43dd4a557e055b1321c5f))
+
 ## 0.1.0 (2026-04-10)
 
 
