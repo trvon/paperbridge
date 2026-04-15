@@ -1,3 +1,4 @@
+use crate::models::PaperSource;
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
@@ -15,7 +16,217 @@ pub struct Cli {
 pub enum Command {
     /// Run MCP server over stdio transport
     Serve,
-    /// Query Zotero items and print JSON
+
+    /// Generate shell completion script to stdout
+    Completions {
+        /// Target shell
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+
+    /// Show active backend mode, capabilities, and config health
+    Status,
+
+    /// Config helpers: init, get, set, validate, resolve-user-id, snippet
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+
+    /// Read local Zotero library: query, collections, read, read-search
+    Library {
+        #[command(subcommand)]
+        action: LibraryAction,
+    },
+
+    /// Write Zotero items: create, update, delete, validate
+    Item {
+        #[command(subcommand)]
+        action: ItemAction,
+    },
+
+    /// Write Zotero collections: create, update, delete
+    Collection {
+        #[command(subcommand)]
+        action: CollectionAction,
+    },
+
+    /// Search external paper indexes (arXiv, HuggingFace, Semantic Scholar, Crossref) and resolve DOIs
+    Papers {
+        #[command(subcommand)]
+        action: PapersAction,
+    },
+
+    // ---------- Hidden legacy aliases (removal targeted for 0.4.0) ----------
+    #[command(
+        hide = true,
+        after_help = "Deprecated. Use 'paperbridge status' instead."
+    )]
+    BackendInfo,
+
+    #[command(
+        hide = true,
+        after_help = "Deprecated. Use 'paperbridge library query' instead."
+    )]
+    Query {
+        #[arg(long)]
+        q: Option<String>,
+        #[arg(long)]
+        qmode: Option<String>,
+        #[arg(long)]
+        item_type: Option<String>,
+        #[arg(long)]
+        tag: Option<String>,
+        #[arg(long)]
+        limit: Option<u32>,
+        #[arg(long)]
+        start: Option<u32>,
+    },
+
+    #[command(
+        hide = true,
+        after_help = "Deprecated. Use 'paperbridge library collections' instead."
+    )]
+    Collections {
+        #[arg(long)]
+        top_only: bool,
+        #[arg(long)]
+        limit: Option<u32>,
+        #[arg(long)]
+        start: Option<u32>,
+    },
+
+    #[command(
+        hide = true,
+        after_help = "Deprecated. Use 'paperbridge library read' instead."
+    )]
+    Read {
+        #[arg(long)]
+        item_key: String,
+        #[arg(long)]
+        attachment_key: Option<String>,
+        #[arg(long)]
+        max_chars_per_chunk: Option<usize>,
+    },
+
+    #[command(
+        hide = true,
+        after_help = "Deprecated. Use 'paperbridge library read-search' instead."
+    )]
+    ReadSearch {
+        #[arg(long)]
+        q: String,
+        #[arg(long)]
+        qmode: Option<String>,
+        #[arg(long)]
+        item_type: Option<String>,
+        #[arg(long)]
+        tag: Option<String>,
+        #[arg(long)]
+        result_index: Option<usize>,
+        #[arg(long)]
+        search_limit: Option<u32>,
+        #[arg(long)]
+        max_chars_per_chunk: Option<usize>,
+    },
+
+    #[command(
+        hide = true,
+        after_help = "Deprecated. Use 'paperbridge collection create' instead."
+    )]
+    CreateCollection {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        parent_collection: Option<String>,
+    },
+
+    #[command(
+        hide = true,
+        after_help = "Deprecated. Use 'paperbridge papers resolve-doi' instead."
+    )]
+    ResolveDoi {
+        #[arg(long)]
+        doi: String,
+    },
+
+    #[command(
+        hide = true,
+        after_help = "Deprecated. Use 'paperbridge item validate' instead."
+    )]
+    ValidateItem {
+        #[arg(long)]
+        file: String,
+        #[arg(long)]
+        online: bool,
+    },
+
+    #[command(
+        hide = true,
+        after_help = "Deprecated. Use 'paperbridge item create' instead."
+    )]
+    CreateItem {
+        #[arg(long)]
+        file: String,
+    },
+
+    #[command(
+        hide = true,
+        after_help = "Deprecated. Use 'paperbridge collection update' instead."
+    )]
+    UpdateCollection {
+        #[arg(long)]
+        file: String,
+    },
+
+    #[command(
+        hide = true,
+        after_help = "Deprecated. Use 'paperbridge item update' instead."
+    )]
+    UpdateItem {
+        #[arg(long)]
+        file: String,
+    },
+
+    #[command(
+        hide = true,
+        after_help = "Deprecated. Use 'paperbridge collection delete' instead."
+    )]
+    DeleteCollection {
+        #[arg(long)]
+        file: String,
+    },
+
+    #[command(
+        hide = true,
+        after_help = "Deprecated. Use 'paperbridge item delete' instead."
+    )]
+    DeleteItem {
+        #[arg(long)]
+        file: String,
+    },
+
+    #[command(
+        hide = true,
+        after_help = "Deprecated. Use 'paperbridge papers search' instead."
+    )]
+    SearchPapers {
+        #[arg(long)]
+        q: String,
+        #[arg(long)]
+        limit: Option<u32>,
+        #[arg(long, value_enum, value_delimiter = ',')]
+        sources: Option<Vec<PaperSource>>,
+        #[arg(long)]
+        timeout_ms: Option<u64>,
+    },
+}
+
+// ---------- Canonical domain subcommands ----------
+
+#[derive(Debug, Subcommand)]
+pub enum LibraryAction {
+    /// Search items in the local Zotero library and print JSON
     Query {
         /// Quick search query
         #[arg(long)]
@@ -36,7 +247,7 @@ pub enum Command {
         #[arg(long)]
         start: Option<u32>,
     },
-    /// List collections and print JSON
+    /// List Zotero collections and print JSON
     Collections {
         /// If true, list only top-level collections
         #[arg(long)]
@@ -60,7 +271,7 @@ pub enum Command {
         #[arg(long)]
         max_chars_per_chunk: Option<usize>,
     },
-    /// Search then prepare selected result for read-aloud
+    /// Search the library then prepare the selected result for read-aloud
     ReadSearch {
         /// Search query
         #[arg(long)]
@@ -84,23 +295,12 @@ pub enum Command {
         #[arg(long)]
         max_chars_per_chunk: Option<usize>,
     },
-    /// Create a collection and print JSON
-    CreateCollection {
-        /// Collection name
-        #[arg(long)]
-        name: String,
-        /// Optional parent collection key
-        #[arg(long)]
-        parent_collection: Option<String>,
-    },
-    /// Resolve a DOI via Crossref and print structured metadata
-    ResolveDoi {
-        /// DOI to resolve (e.g. 10.1038/nature12373)
-        #[arg(long)]
-        doi: String,
-    },
-    /// Validate an item payload JSON file
-    ValidateItem {
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ItemAction {
+    /// Validate an item payload JSON file (optionally cross-check DOI with Crossref)
+    Validate {
         /// Path to JSON file matching ItemWriteRequest
         #[arg(long)]
         file: String,
@@ -109,62 +309,72 @@ pub enum Command {
         online: bool,
     },
     /// Create an item from a JSON payload file and print JSON
-    CreateItem {
+    Create {
         /// Path to JSON file matching ItemWriteRequest
         #[arg(long)]
         file: String,
     },
-    /// Update a collection from a JSON payload file and print JSON
-    UpdateCollection {
-        /// Path to JSON file matching CollectionUpdateRequest
-        #[arg(long)]
-        file: String,
-    },
-    /// Update an item from a JSON payload file and print JSON
-    UpdateItem {
+    /// Update an item from a JSON payload file (requires key + version) and print JSON
+    Update {
         /// Path to JSON file matching ItemUpdateRequest
         #[arg(long)]
         file: String,
     },
-    /// Delete a collection from a JSON payload file
-    DeleteCollection {
-        /// Path to JSON file matching DeleteCollectionRequest
-        #[arg(long)]
-        file: String,
-    },
-    /// Delete an item from a JSON payload file
-    DeleteItem {
+    /// Delete an item from a JSON payload file (requires key + version)
+    Delete {
         /// Path to JSON file matching DeleteItemRequest
         #[arg(long)]
         file: String,
     },
-    /// Show active backend mode and capabilities
-    BackendInfo,
-    /// Search external paper sources (arXiv, HuggingFace, Semantic Scholar, Crossref)
-    SearchPapers {
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CollectionAction {
+    /// Create a collection and print JSON
+    Create {
+        /// Collection name
+        #[arg(long)]
+        name: String,
+        /// Optional parent collection key
+        #[arg(long)]
+        parent_collection: Option<String>,
+    },
+    /// Update a collection from a JSON payload file and print JSON
+    Update {
+        /// Path to JSON file matching CollectionUpdateRequest
+        #[arg(long)]
+        file: String,
+    },
+    /// Delete a collection from a JSON payload file
+    Delete {
+        /// Path to JSON file matching DeleteCollectionRequest
+        #[arg(long)]
+        file: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PapersAction {
+    /// Search external paper indexes (arXiv, HuggingFace Papers, Semantic Scholar, Crossref)
+    Search {
         /// Free-text search query
         #[arg(long)]
         q: String,
         /// Max hits per source (default 10)
         #[arg(long)]
         limit: Option<u32>,
-        /// Comma-separated subset: arxiv,hugging_face,semantic_scholar,crossref
-        #[arg(long)]
-        sources: Option<String>,
+        /// Subset of sources (comma-separated); default is all enabled
+        #[arg(long, value_enum, value_delimiter = ',')]
+        sources: Option<Vec<PaperSource>>,
         /// Per-source timeout in milliseconds (default 8000)
         #[arg(long)]
         timeout_ms: Option<u64>,
     },
-    /// Config helper commands
-    Config {
-        #[command(subcommand)]
-        action: ConfigAction,
-    },
-    /// Generate shell completion script to stdout
-    Completions {
-        /// Target shell
-        #[arg(value_enum)]
-        shell: clap_complete::Shell,
+    /// Resolve a DOI via Crossref and print structured metadata
+    ResolveDoi {
+        /// DOI to resolve (e.g. 10.1038/nature12373)
+        #[arg(long)]
+        doi: String,
     },
 }
 
@@ -256,9 +466,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_query_command() {
+    fn parse_canonical_library_query() {
         let cli = Cli::try_parse_from([
             "paperbridge",
+            "library",
             "query",
             "--q",
             "vision transformers",
@@ -268,12 +479,108 @@ mod tests {
         .unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Query {
-                q: Some(_),
-                limit: Some(10),
-                ..
+            Some(Command::Library {
+                action: LibraryAction::Query {
+                    limit: Some(10),
+                    ..
+                }
             })
         ));
+    }
+
+    #[test]
+    fn parse_canonical_item_create() {
+        let cli =
+            Cli::try_parse_from(["paperbridge", "item", "create", "--file", "item.json"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Item {
+                action: ItemAction::Create { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn parse_canonical_papers_search_with_value_enum() {
+        let cli = Cli::try_parse_from([
+            "paperbridge",
+            "papers",
+            "search",
+            "--q",
+            "attention",
+            "--sources",
+            "arxiv,crossref",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Papers {
+                action: PapersAction::Search { sources, .. },
+            }) => {
+                let s = sources.expect("sources parsed");
+                assert_eq!(s, vec![PaperSource::Arxiv, PaperSource::Crossref]);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_canonical_papers_search_rejects_unknown_source_at_parse_time() {
+        let err = Cli::try_parse_from([
+            "paperbridge",
+            "papers",
+            "search",
+            "--q",
+            "x",
+            "--sources",
+            "bogus",
+        ])
+        .unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("invalid value"));
+    }
+
+    #[test]
+    fn parse_canonical_status() {
+        let cli = Cli::try_parse_from(["paperbridge", "status"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Status)));
+    }
+
+    #[test]
+    fn parse_legacy_query_still_works() {
+        let cli = Cli::try_parse_from(["paperbridge", "query", "--q", "foo"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Query { .. })));
+    }
+
+    #[test]
+    fn parse_legacy_backend_info_still_works() {
+        let cli = Cli::try_parse_from(["paperbridge", "backend-info"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::BackendInfo)));
+    }
+
+    #[test]
+    fn parse_legacy_search_papers_still_works_with_value_enum() {
+        let cli = Cli::try_parse_from([
+            "paperbridge",
+            "search-papers",
+            "--q",
+            "x",
+            "--sources",
+            "arxiv,hf,s2",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::SearchPapers { sources, .. }) => {
+                let s = sources.expect("sources parsed");
+                assert_eq!(
+                    s,
+                    vec![
+                        PaperSource::Arxiv,
+                        PaperSource::HuggingFace,
+                        PaperSource::SemanticScholar
+                    ]
+                );
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 
     #[test]
@@ -344,159 +651,6 @@ mod tests {
             cli.command,
             Some(Command::Config {
                 action: ConfigAction::ResolveUserId { .. }
-            })
-        ));
-    }
-
-    #[test]
-    fn parse_collections_command() {
-        let cli = Cli::try_parse_from(["paperbridge", "collections", "--top-only"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Command::Collections { top_only: true, .. })
-        ));
-    }
-
-    #[test]
-    fn parse_read_search_command() {
-        let cli = Cli::try_parse_from([
-            "paperbridge",
-            "read-search",
-            "--q",
-            "graph learning",
-            "--result-index",
-            "0",
-        ])
-        .unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Command::ReadSearch {
-                result_index: Some(0),
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn parse_create_collection_command() {
-        let cli = Cli::try_parse_from(["paperbridge", "create-collection", "--name", "P4 Papers"])
-            .unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Command::CreateCollection { .. })
-        ));
-    }
-
-    #[test]
-    fn parse_resolve_doi_command() {
-        let cli =
-            Cli::try_parse_from(["paperbridge", "resolve-doi", "--doi", "10.1038/nature12373"])
-                .unwrap();
-        assert!(matches!(cli.command, Some(Command::ResolveDoi { .. })));
-    }
-
-    #[test]
-    fn parse_validate_item_command() {
-        let cli =
-            Cli::try_parse_from(["paperbridge", "validate-item", "--file", "item.json"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Command::ValidateItem { online: false, .. })
-        ));
-    }
-
-    #[test]
-    fn parse_validate_item_online_command() {
-        let cli = Cli::try_parse_from([
-            "paperbridge",
-            "validate-item",
-            "--file",
-            "item.json",
-            "--online",
-        ])
-        .unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Command::ValidateItem { online: true, .. })
-        ));
-    }
-
-    #[test]
-    fn parse_create_item_command() {
-        let cli =
-            Cli::try_parse_from(["paperbridge", "create-item", "--file", "item.json"]).unwrap();
-        assert!(matches!(cli.command, Some(Command::CreateItem { .. })));
-    }
-
-    #[test]
-    fn parse_update_collection_command() {
-        let cli = Cli::try_parse_from([
-            "paperbridge",
-            "update-collection",
-            "--file",
-            "collection.json",
-        ])
-        .unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Command::UpdateCollection { .. })
-        ));
-    }
-
-    #[test]
-    fn parse_update_item_command() {
-        let cli =
-            Cli::try_parse_from(["paperbridge", "update-item", "--file", "item.json"]).unwrap();
-        assert!(matches!(cli.command, Some(Command::UpdateItem { .. })));
-    }
-
-    #[test]
-    fn parse_delete_collection_command() {
-        let cli = Cli::try_parse_from([
-            "paperbridge",
-            "delete-collection",
-            "--file",
-            "collection.json",
-        ])
-        .unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Command::DeleteCollection { .. })
-        ));
-    }
-
-    #[test]
-    fn parse_delete_item_command() {
-        let cli =
-            Cli::try_parse_from(["paperbridge", "delete-item", "--file", "item.json"]).unwrap();
-        assert!(matches!(cli.command, Some(Command::DeleteItem { .. })));
-    }
-
-    #[test]
-    fn parse_backend_info_command() {
-        let cli = Cli::try_parse_from(["paperbridge", "backend-info"]).unwrap();
-        assert!(matches!(cli.command, Some(Command::BackendInfo)));
-    }
-
-    #[test]
-    fn parse_search_papers_command() {
-        let cli = Cli::try_parse_from([
-            "paperbridge",
-            "search-papers",
-            "--q",
-            "vision transformers",
-            "--limit",
-            "5",
-            "--sources",
-            "arxiv,crossref",
-        ])
-        .unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Command::SearchPapers {
-                limit: Some(5),
-                sources: Some(_),
-                ..
             })
         ));
     }

@@ -62,7 +62,8 @@ Supported shells: `bash`, `zsh`, `fish`, `powershell`, `elvish`.
 ```bash
 paperbridge config init --interactive
 paperbridge config validate
-paperbridge query --q "machine learning" --limit 3
+paperbridge status
+paperbridge library query --q "machine learning" --limit 3
 ```
 
 For Zotero Desktop local API mode, use:
@@ -76,13 +77,13 @@ paperbridge config set backend_mode local
 Resolve a DOI to structured citation metadata (title, authors, year, journal, abstract):
 
 ```bash
-paperbridge resolve-doi --doi "10.1038/nature12373"
+paperbridge papers resolve-doi --doi "10.1038/nature12373"
 ```
 
 Validate an item payload with online Crossref cross-checking:
 
 ```bash
-paperbridge validate-item --file item.json --online
+paperbridge item validate --file item.json --online
 ```
 
 ## External Paper Search
@@ -90,8 +91,8 @@ paperbridge validate-item --file item.json --online
 Search across arXiv, HuggingFace Papers, Semantic Scholar, and Crossref in one call. Sources run in parallel; failures and timeouts per source are non-fatal.
 
 ```bash
-paperbridge search-papers --q "vision transformers" --limit 5
-paperbridge search-papers --q "attention is all you need" --sources arxiv,semantic_scholar
+paperbridge papers search --q "vision transformers" --limit 5
+paperbridge papers search --q "attention is all you need" --sources arxiv,semantic_scholar
 ```
 
 Results are deduplicated by DOI → arXiv ID → normalized title+author.

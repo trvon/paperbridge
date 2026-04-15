@@ -9,13 +9,21 @@ use crate::service::{
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
+use rmcp::model::{
+    CallToolResult, Content, GetPromptRequestParams, GetPromptResult, ListPromptsResult,
+    PaginatedRequestParams, Prompt, PromptMessage, PromptMessageRole, ServerCapabilities,
+    ServerInfo,
+};
+use rmcp::service::{RequestContext, RoleServer};
 use rmcp::task_manager::OperationProcessor;
 use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
+
+const SKILL_MD: &str = include_str!("../.claude/skills/paperbridge/SKILL.md");
+const SKILL_PROMPT_NAME: &str = "paperbridge_skill";
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct SearchItemsParams {
@@ -554,13 +562,47 @@ impl ServerHandler for PaperbridgeServer {
 
         ServerInfo {
             protocol_version: rmcp::model::ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            capabilities: ServerCapabilities::builder()
+                .enable_tools()
+                .enable_prompts()
+                .build(),
             server_info: rmcp::model::Implementation::from_build_env(),
             instructions: Some(
-                "Search Zotero libraries and retrieve full-text content. Use prepare_vox_text to build read-aloud chunks for Vox."
+                "Search Zotero libraries and retrieve full-text content. Use prepare_vox_text to build read-aloud chunks for Vox. Fetch the prompt 'paperbridge_skill' for the full operating guide."
                     .to_string(),
             ),
         }
+    }
+
+    async fn list_prompts(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, McpError> {
+        Ok(ListPromptsResult::with_all_items(vec![Prompt::new(
+            SKILL_PROMPT_NAME,
+            Some(
+                "Operating guide for the paperbridge MCP server (canonical CLI recipes, config keys, gotchas)",
+            ),
+            None,
+        )]))
+    }
+
+    async fn get_prompt(
+        &self,
+        request: GetPromptRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResult, McpError> {
+        if request.name != SKILL_PROMPT_NAME {
+            return Err(McpError::invalid_params(
+                format!("unknown prompt '{}'", request.name),
+                None,
+            ));
+        }
+        Ok(GetPromptResult {
+            description: Some("paperbridge operating guide".to_string()),
+            messages: vec![PromptMessage::new_text(PromptMessageRole::User, SKILL_MD)],
+        })
     }
 }
 
@@ -603,6 +645,34 @@ mod tests {
         let err = PaperbridgeServer::map_error(ZoteroMcpError::InvalidInput("bad".to_string()));
         let rendered = format!("{err}");
         assert!(rendered.contains("bad"));
+    }
+
+    #[test]
+    fn skill_is_embedded_with_stable_sentinel() {
+        // include_str! pulls SKILL.md into the binary at compile time; this asserts the
+        // canonical opening sentence stays present so connected hosts get a usable guide.
+        assert!(
+            SKILL_MD.contains("paperbridge` is a Rust CLI + MCP server"),
+            "embedded SKILL.md missing canonical opening sentence"
+        );
+        assert!(SKILL_MD.contains("paperbridge library query"));
+        assert!(SKILL_MD.contains("paperbridge papers search"));
+    }
+
+    #[test]
+    fn skill_prompt_name_is_stable() {
+        assert_eq!(SKILL_PROMPT_NAME, "paperbridge_skill");
+    }
+
+    #[test]
+    fn skill_prompt_messages_carry_user_role_text() {
+        let msg = PromptMessage::new_text(PromptMessageRole::User, SKILL_MD);
+        match msg.content {
+            rmcp::model::PromptMessageContent::Text { text } => {
+                assert!(text.contains("paperbridge"));
+            }
+            other => panic!("expected text content, got {other:?}"),
+        }
     }
 
     #[test]

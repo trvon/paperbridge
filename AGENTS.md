@@ -67,6 +67,16 @@ Notes:
 - **Comments**: add only when needed for non-obvious logic
 - Avoid `unwrap()`/`expect()` in production paths; surface actionable errors
 
+## CLI Design Methodology
+
+CLI surface changes — new commands, renamed flags, error copy, help text,
+aliases — must be reviewed against [docs/design/cli-design.md](docs/design/cli-design.md).
+The required-review checklist in that document applies to every PR that
+touches `src/cli.rs`, user-visible error output, `.claude/skills/paperbridge/SKILL.md`,
+or the README command examples. The skill content is also embedded in the
+`paperbridge serve` MCP server as prompt `paperbridge_skill`, so changes
+to the skill reach both repo contributors and connected hosts.
+
 ## Config Precedence
 
 1. Compiled defaults (`Config::default()`)

@@ -254,11 +254,24 @@ pub struct CrossrefWork {
     pub item_type: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Hash, schemars::JsonSchema)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Serialize,
+    Deserialize,
+    Eq,
+    PartialEq,
+    Hash,
+    schemars::JsonSchema,
+    clap::ValueEnum,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum PaperSource {
     Arxiv,
+    #[value(name = "hugging_face", alias = "huggingface", alias = "hf")]
     HuggingFace,
+    #[value(name = "semantic_scholar", alias = "semanticscholar", alias = "s2")]
     SemanticScholar,
     Crossref,
 }

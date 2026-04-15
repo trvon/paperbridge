@@ -1,5 +1,8 @@
 use clap::{CommandFactory, Parser};
-use paperbridge::cli::{Cli, Command, ConfigAction, SnippetTarget};
+use paperbridge::cli::{
+    Cli, CollectionAction, Command, ConfigAction, ItemAction, LibraryAction, PapersAction,
+    SnippetTarget,
+};
 use paperbridge::config::Config;
 use paperbridge::external::SearchOptions;
 use paperbridge::models::{
@@ -14,6 +17,7 @@ use paperbridge::zotero_api::build_backend;
 use rmcp::ServiceExt;
 use serde::Serialize;
 use std::io::{self, Write};
+use tracing::warn;
 
 fn main() -> paperbridge::Result<()> {
     let cli = Cli::parse();
@@ -87,6 +91,75 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
         }) => {
             println!("Config valid.\n\n{}", config.display_safe());
         }
+        Some(Command::Status) => handle_status(config).await?,
+        Some(Command::Library { action }) => match action {
+            LibraryAction::Query {
+                q,
+                qmode,
+                item_type,
+                tag,
+                limit,
+                start,
+            } => handle_library_query(config, q, qmode, item_type, tag, limit, start).await?,
+            LibraryAction::Collections {
+                top_only,
+                limit,
+                start,
+            } => handle_library_collections(config, top_only, limit, start).await?,
+            LibraryAction::Read {
+                item_key,
+                attachment_key,
+                max_chars_per_chunk,
+            } => handle_library_read(config, item_key, attachment_key, max_chars_per_chunk).await?,
+            LibraryAction::ReadSearch {
+                q,
+                qmode,
+                item_type,
+                tag,
+                result_index,
+                search_limit,
+                max_chars_per_chunk,
+            } => {
+                handle_library_read_search(
+                    config,
+                    q,
+                    qmode,
+                    item_type,
+                    tag,
+                    result_index,
+                    search_limit,
+                    max_chars_per_chunk,
+                )
+                .await?
+            }
+        },
+        Some(Command::Item { action }) => match action {
+            ItemAction::Validate { file, online } => {
+                handle_item_validate(config, file, online).await?
+            }
+            ItemAction::Create { file } => handle_item_create(config, file).await?,
+            ItemAction::Update { file } => handle_item_update(config, file).await?,
+            ItemAction::Delete { file } => handle_item_delete(config, file).await?,
+        },
+        Some(Command::Collection { action }) => match action {
+            CollectionAction::Create {
+                name,
+                parent_collection,
+            } => handle_collection_create(config, name, parent_collection).await?,
+            CollectionAction::Update { file } => handle_collection_update(config, file).await?,
+            CollectionAction::Delete { file } => handle_collection_delete(config, file).await?,
+        },
+        Some(Command::Papers { action }) => match action {
+            PapersAction::Search {
+                q,
+                limit,
+                sources,
+                timeout_ms,
+            } => handle_papers_search(config, q, limit, sources, timeout_ms).await?,
+            PapersAction::ResolveDoi { doi } => handle_papers_resolve_doi(config, doi).await?,
+        },
+
+        // ---------- Hidden legacy aliases (delegate + deprecation warning) ----------
         Some(Command::Query {
             q,
             qmode,
@@ -95,48 +168,24 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
             limit,
             start,
         }) => {
-            let service = build_service(config)?;
-            let results = service
-                .search_items(SearchItemsQuery {
-                    q,
-                    qmode,
-                    item_type,
-                    tag,
-                    limit: limit.unwrap_or(25),
-                    start: start.unwrap_or(0),
-                })
-                .await?;
-            print_json(&results)?;
+            warn!("'query' is deprecated; use 'paperbridge library query' instead");
+            handle_library_query(config, q, qmode, item_type, tag, limit, start).await?;
         }
         Some(Command::Collections {
             top_only,
             limit,
             start,
         }) => {
-            let service = build_service(config)?;
-            let results = service
-                .list_collections(ListCollectionsQuery {
-                    top_only,
-                    limit: limit.unwrap_or(50),
-                    start: start.unwrap_or(0),
-                })
-                .await?;
-            print_json(&results)?;
+            warn!("'collections' is deprecated; use 'paperbridge library collections' instead");
+            handle_library_collections(config, top_only, limit, start).await?;
         }
         Some(Command::Read {
             item_key,
             attachment_key,
             max_chars_per_chunk,
         }) => {
-            let service = build_service(config)?;
-            let payload = service
-                .prepare_item_for_vox(PrepareItemForVoxRequest {
-                    item_key,
-                    attachment_key,
-                    max_chars_per_chunk,
-                })
-                .await?;
-            print_json(&payload)?;
+            warn!("'read' is deprecated; use 'paperbridge library read' instead");
+            handle_library_read(config, item_key, attachment_key, max_chars_per_chunk).await?;
         }
         Some(Command::ReadSearch {
             q,
@@ -147,111 +196,53 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
             search_limit,
             max_chars_per_chunk,
         }) => {
-            let service = build_service(config)?;
-            let payload = service
-                .prepare_search_result_for_vox(PrepareSearchResultForVoxRequest {
-                    q,
-                    qmode,
-                    item_type,
-                    tag,
-                    result_index,
-                    search_limit,
-                    max_chars_per_chunk,
-                })
-                .await?;
-            print_json(&payload)?;
+            warn!("'read-search' is deprecated; use 'paperbridge library read-search' instead");
+            handle_library_read_search(
+                config,
+                q,
+                qmode,
+                item_type,
+                tag,
+                result_index,
+                search_limit,
+                max_chars_per_chunk,
+            )
+            .await?;
         }
         Some(Command::CreateCollection {
             name,
             parent_collection,
         }) => {
-            let service = build_service(config)?;
-            let payload = service
-                .create_collection(CollectionWriteRequest {
-                    name,
-                    parent_collection,
-                })
-                .await?;
-            print_json(&payload)?;
-        }
-        Some(Command::ResolveDoi { doi }) => {
-            let service = build_service(config)?;
-            let work = service.resolve_doi(&doi).await?;
-            print_json(&work)?;
-        }
-        Some(Command::ValidateItem { file, online }) => {
-            let service = build_service(config)?;
-            let text = std::fs::read_to_string(&file).map_err(|e| {
-                paperbridge::ZoteroMcpError::Config(format!("Failed to read {file}: {e}"))
-            })?;
-            let payload: ItemWriteRequest = serde_json::from_str(&text).map_err(|e| {
-                paperbridge::ZoteroMcpError::Serde(format!("Invalid JSON in {file}: {e}"))
-            })?;
-            let report = if online {
-                service.validate_item_online(&payload).await?
-            } else {
-                service.validate_item_request(&payload)
-            };
-            print_json(&report)?;
-        }
-        Some(Command::CreateItem { file }) => {
-            let service = build_service(config)?;
-            let text = std::fs::read_to_string(&file).map_err(|e| {
-                paperbridge::ZoteroMcpError::Config(format!("Failed to read {file}: {e}"))
-            })?;
-            let payload: ItemWriteRequest = serde_json::from_str(&text).map_err(|e| {
-                paperbridge::ZoteroMcpError::Serde(format!("Invalid JSON in {file}: {e}"))
-            })?;
-            let created = service.create_item(payload).await?;
-            print_json(&created)?;
+            warn!("'create-collection' is deprecated; use 'paperbridge collection create' instead");
+            handle_collection_create(config, name, parent_collection).await?;
         }
         Some(Command::UpdateCollection { file }) => {
-            let service = build_service(config)?;
-            let text = std::fs::read_to_string(&file).map_err(|e| {
-                paperbridge::ZoteroMcpError::Config(format!("Failed to read {file}: {e}"))
-            })?;
-            let payload: CollectionUpdateRequest = serde_json::from_str(&text).map_err(|e| {
-                paperbridge::ZoteroMcpError::Serde(format!("Invalid JSON in {file}: {e}"))
-            })?;
-            let updated = service.update_collection(payload).await?;
-            print_json(&updated)?;
-        }
-        Some(Command::UpdateItem { file }) => {
-            let service = build_service(config)?;
-            let text = std::fs::read_to_string(&file).map_err(|e| {
-                paperbridge::ZoteroMcpError::Config(format!("Failed to read {file}: {e}"))
-            })?;
-            let payload: ItemUpdateRequest = serde_json::from_str(&text).map_err(|e| {
-                paperbridge::ZoteroMcpError::Serde(format!("Invalid JSON in {file}: {e}"))
-            })?;
-            let updated = service.update_item(payload).await?;
-            print_json(&updated)?;
+            warn!("'update-collection' is deprecated; use 'paperbridge collection update' instead");
+            handle_collection_update(config, file).await?;
         }
         Some(Command::DeleteCollection { file }) => {
-            let service = build_service(config)?;
-            let text = std::fs::read_to_string(&file).map_err(|e| {
-                paperbridge::ZoteroMcpError::Config(format!("Failed to read {file}: {e}"))
-            })?;
-            let payload: DeleteCollectionRequest = serde_json::from_str(&text).map_err(|e| {
-                paperbridge::ZoteroMcpError::Serde(format!("Invalid JSON in {file}: {e}"))
-            })?;
-            service.delete_collection(payload).await?;
-            print_json(&serde_json::json!({"deleted": true}))?;
+            warn!("'delete-collection' is deprecated; use 'paperbridge collection delete' instead");
+            handle_collection_delete(config, file).await?;
+        }
+        Some(Command::ValidateItem { file, online }) => {
+            warn!("'validate-item' is deprecated; use 'paperbridge item validate' instead");
+            handle_item_validate(config, file, online).await?;
+        }
+        Some(Command::CreateItem { file }) => {
+            warn!("'create-item' is deprecated; use 'paperbridge item create' instead");
+            handle_item_create(config, file).await?;
+        }
+        Some(Command::UpdateItem { file }) => {
+            warn!("'update-item' is deprecated; use 'paperbridge item update' instead");
+            handle_item_update(config, file).await?;
         }
         Some(Command::DeleteItem { file }) => {
-            let service = build_service(config)?;
-            let text = std::fs::read_to_string(&file).map_err(|e| {
-                paperbridge::ZoteroMcpError::Config(format!("Failed to read {file}: {e}"))
-            })?;
-            let payload: DeleteItemRequest = serde_json::from_str(&text).map_err(|e| {
-                paperbridge::ZoteroMcpError::Serde(format!("Invalid JSON in {file}: {e}"))
-            })?;
-            service.delete_item(payload).await?;
-            print_json(&serde_json::json!({"deleted": true}))?;
+            warn!("'delete-item' is deprecated; use 'paperbridge item delete' instead");
+            handle_item_delete(config, file).await?;
         }
         Some(Command::BackendInfo) => {
-            let service = build_service(config)?;
-            print_json(&service.backend_info())?;
+            warn!("'backend-info' is deprecated; use 'paperbridge status' instead");
+            handle_status(config).await?;
         }
         Some(Command::SearchPapers {
             q,
@@ -259,20 +250,14 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
             sources,
             timeout_ms,
         }) => {
-            let service = build_service(config)?;
-            let parsed_sources = match sources.as_deref() {
-                None => None,
-                Some(s) => Some(parse_source_list(s)?),
-            };
-            let opts = SearchOptions {
-                query: q,
-                limit_per_source: limit.unwrap_or(10),
-                sources: parsed_sources,
-                timeout_ms: timeout_ms.unwrap_or(8000),
-            };
-            let hits = service.search_papers(opts).await?;
-            print_json(&hits)?;
+            warn!("'search-papers' is deprecated; use 'paperbridge papers search' instead");
+            handle_papers_search(config, q, limit, sources, timeout_ms).await?;
         }
+        Some(Command::ResolveDoi { doi }) => {
+            warn!("'resolve-doi' is deprecated; use 'paperbridge papers resolve-doi' instead");
+            handle_papers_resolve_doi(config, doi).await?;
+        }
+
         Some(Command::Serve) | None => {
             run_stdio(config).await?;
         }
@@ -300,6 +285,193 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
     }
 
     Ok(())
+}
+
+// ---------- Shared handlers (used by canonical + legacy dispatch arms) ----------
+
+async fn handle_status(config: Config) -> paperbridge::Result<()> {
+    let service = build_service(config)?;
+    print_json(&service.backend_info())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_library_query(
+    config: Config,
+    q: Option<String>,
+    qmode: Option<String>,
+    item_type: Option<String>,
+    tag: Option<String>,
+    limit: Option<u32>,
+    start: Option<u32>,
+) -> paperbridge::Result<()> {
+    let service = build_service(config)?;
+    let results = service
+        .search_items(SearchItemsQuery {
+            q,
+            qmode,
+            item_type,
+            tag,
+            limit: limit.unwrap_or(25),
+            start: start.unwrap_or(0),
+        })
+        .await?;
+    print_json(&results)
+}
+
+async fn handle_library_collections(
+    config: Config,
+    top_only: bool,
+    limit: Option<u32>,
+    start: Option<u32>,
+) -> paperbridge::Result<()> {
+    let service = build_service(config)?;
+    let results = service
+        .list_collections(ListCollectionsQuery {
+            top_only,
+            limit: limit.unwrap_or(50),
+            start: start.unwrap_or(0),
+        })
+        .await?;
+    print_json(&results)
+}
+
+async fn handle_library_read(
+    config: Config,
+    item_key: String,
+    attachment_key: Option<String>,
+    max_chars_per_chunk: Option<usize>,
+) -> paperbridge::Result<()> {
+    let service = build_service(config)?;
+    let payload = service
+        .prepare_item_for_vox(PrepareItemForVoxRequest {
+            item_key,
+            attachment_key,
+            max_chars_per_chunk,
+        })
+        .await?;
+    print_json(&payload)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_library_read_search(
+    config: Config,
+    q: String,
+    qmode: Option<String>,
+    item_type: Option<String>,
+    tag: Option<String>,
+    result_index: Option<usize>,
+    search_limit: Option<u32>,
+    max_chars_per_chunk: Option<usize>,
+) -> paperbridge::Result<()> {
+    let service = build_service(config)?;
+    let payload = service
+        .prepare_search_result_for_vox(PrepareSearchResultForVoxRequest {
+            q,
+            qmode,
+            item_type,
+            tag,
+            result_index,
+            search_limit,
+            max_chars_per_chunk,
+        })
+        .await?;
+    print_json(&payload)
+}
+
+async fn handle_item_validate(
+    config: Config,
+    file: String,
+    online: bool,
+) -> paperbridge::Result<()> {
+    let service = build_service(config)?;
+    let payload: ItemWriteRequest = read_json_file(&file)?;
+    let report = if online {
+        service.validate_item_online(&payload).await?
+    } else {
+        service.validate_item_request(&payload)
+    };
+    print_json(&report)
+}
+
+async fn handle_item_create(config: Config, file: String) -> paperbridge::Result<()> {
+    let service = build_service(config)?;
+    let payload: ItemWriteRequest = read_json_file(&file)?;
+    let created = service.create_item(payload).await?;
+    print_json(&created)
+}
+
+async fn handle_item_update(config: Config, file: String) -> paperbridge::Result<()> {
+    let service = build_service(config)?;
+    let payload: ItemUpdateRequest = read_json_file(&file)?;
+    let updated = service.update_item(payload).await?;
+    print_json(&updated)
+}
+
+async fn handle_item_delete(config: Config, file: String) -> paperbridge::Result<()> {
+    let service = build_service(config)?;
+    let payload: DeleteItemRequest = read_json_file(&file)?;
+    service.delete_item(payload).await?;
+    print_json(&serde_json::json!({"deleted": true}))
+}
+
+async fn handle_collection_create(
+    config: Config,
+    name: String,
+    parent_collection: Option<String>,
+) -> paperbridge::Result<()> {
+    let service = build_service(config)?;
+    let payload = service
+        .create_collection(CollectionWriteRequest {
+            name,
+            parent_collection,
+        })
+        .await?;
+    print_json(&payload)
+}
+
+async fn handle_collection_update(config: Config, file: String) -> paperbridge::Result<()> {
+    let service = build_service(config)?;
+    let payload: CollectionUpdateRequest = read_json_file(&file)?;
+    let updated = service.update_collection(payload).await?;
+    print_json(&updated)
+}
+
+async fn handle_collection_delete(config: Config, file: String) -> paperbridge::Result<()> {
+    let service = build_service(config)?;
+    let payload: DeleteCollectionRequest = read_json_file(&file)?;
+    service.delete_collection(payload).await?;
+    print_json(&serde_json::json!({"deleted": true}))
+}
+
+async fn handle_papers_search(
+    config: Config,
+    q: String,
+    limit: Option<u32>,
+    sources: Option<Vec<PaperSource>>,
+    timeout_ms: Option<u64>,
+) -> paperbridge::Result<()> {
+    let service = build_service(config)?;
+    let opts = SearchOptions {
+        query: q,
+        limit_per_source: limit.unwrap_or(10),
+        sources,
+        timeout_ms: timeout_ms.unwrap_or(8000),
+    };
+    let hits = service.search_papers(opts).await?;
+    print_json(&hits)
+}
+
+async fn handle_papers_resolve_doi(config: Config, doi: String) -> paperbridge::Result<()> {
+    let service = build_service(config)?;
+    let work = service.resolve_doi(&doi).await?;
+    print_json(&work)
+}
+
+fn read_json_file<T: serde::de::DeserializeOwned>(file: &str) -> paperbridge::Result<T> {
+    let text = std::fs::read_to_string(file)
+        .map_err(|e| paperbridge::ZoteroMcpError::Config(format!("Failed to read {file}: {e}")))?;
+    serde_json::from_str(&text)
+        .map_err(|e| paperbridge::ZoteroMcpError::Serde(format!("Invalid JSON in {file}: {e}")))
 }
 
 fn build_service(config: Config) -> paperbridge::Result<PaperbridgeService> {
@@ -365,10 +537,10 @@ fn print_client_snippet(target: SnippetTarget, binary_path: Option<&str>) {
         SnippetTarget::Pi => serde_json::json!({
             "paperbridge": {
                 "commands": {
-                    "search": [bin, "query", "--q", "<query>", "--limit", "5"],
-                    "collections": [bin, "collections", "--top-only"],
-                    "read_item": [bin, "read", "--item-key", "<item-key>", "--max-chars-per-chunk", "1200"],
-                    "read_search_result": [bin, "read-search", "--q", "<query>", "--result-index", "0", "--max-chars-per-chunk", "1200"]
+                    "search": [bin, "library", "query", "--q", "<query>", "--limit", "5"],
+                    "collections": [bin, "library", "collections", "--top-only"],
+                    "read_item": [bin, "library", "read", "--item-key", "<item-key>", "--max-chars-per-chunk", "1200"],
+                    "read_search_result": [bin, "library", "read-search", "--q", "<query>", "--result-index", "0", "--max-chars-per-chunk", "1200"]
                 }
             }
         }),
@@ -602,29 +774,6 @@ enum ZoteroSource {
     Hybrid,
 }
 
-fn parse_source_list(input: &str) -> paperbridge::Result<Vec<PaperSource>> {
-    let mut out = Vec::new();
-    for raw in input.split(',') {
-        let token = raw.trim();
-        if token.is_empty() {
-            continue;
-        }
-        let source = match token.to_ascii_lowercase().as_str() {
-            "arxiv" => PaperSource::Arxiv,
-            "hugging_face" | "huggingface" | "hf" => PaperSource::HuggingFace,
-            "semantic_scholar" | "s2" | "semanticscholar" => PaperSource::SemanticScholar,
-            "crossref" => PaperSource::Crossref,
-            other => {
-                return Err(paperbridge::ZoteroMcpError::InvalidInput(format!(
-                    "Unknown source '{other}'. Valid: arxiv, hugging_face, semantic_scholar, crossref"
-                )));
-            }
-        };
-        out.push(source);
-    }
-    Ok(out)
-}
-
 fn parse_zotero_source(value: &str) -> paperbridge::Result<ZoteroSource> {
     match value.trim().to_ascii_lowercase().as_str() {
         "cloud" => Ok(ZoteroSource::Cloud),
@@ -828,35 +977,5 @@ mod tests {
     fn parse_user_id_from_profile_html_works() {
         let html = r#"<script>window.__DATA__ = {"userID":7141888,"foo":"bar"};</script>"#;
         assert_eq!(parse_user_id_from_profile_html(html), Some(7141888));
-    }
-
-    #[test]
-    fn parse_source_list_accepts_aliases() {
-        let parsed = parse_source_list("arxiv,hf,s2,crossref").unwrap();
-        assert_eq!(
-            parsed,
-            vec![
-                PaperSource::Arxiv,
-                PaperSource::HuggingFace,
-                PaperSource::SemanticScholar,
-                PaperSource::Crossref,
-            ]
-        );
-
-        let parsed = parse_source_list("huggingface, semanticscholar ,  arxiv").unwrap();
-        assert_eq!(
-            parsed,
-            vec![
-                PaperSource::HuggingFace,
-                PaperSource::SemanticScholar,
-                PaperSource::Arxiv,
-            ]
-        );
-    }
-
-    #[test]
-    fn parse_source_list_rejects_unknown_token() {
-        let err = parse_source_list("arxiv,scholar").unwrap_err();
-        assert!(err.to_string().contains("Unknown source"));
     }
 }

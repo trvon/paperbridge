@@ -480,12 +480,12 @@ impl Config {
         match self.library_type {
             LibraryType::User if self.user_id.is_none() => {
                 return Err(ZoteroMcpError::MissingConfig(
-                    "user_id is required when library_type=user".to_string(),
+                    "user_id is required when library_type=user.\nTry:\n  paperbridge config init --interactive\n  paperbridge config resolve-user-id --login <your-username>".to_string(),
                 ));
             }
             LibraryType::Group if self.group_id.is_none() => {
                 return Err(ZoteroMcpError::MissingConfig(
-                    "group_id is required when library_type=group".to_string(),
+                    "group_id is required when library_type=group.\nTry:\n  paperbridge config set group_id <numeric-group-id>".to_string(),
                 ));
             }
             _ => {}
