@@ -531,7 +531,10 @@ fn handle_config_get(key: Option<&str>, show_secret: bool) -> paperbridge::Resul
             if value.is_empty() {
                 println!("(unset)");
             } else {
-                println!("(set, {} chars — pass --show-secret to reveal)", value.len());
+                println!(
+                    "(set, {} chars — pass --show-secret to reveal)",
+                    value.len()
+                );
             }
             return Ok(());
         }

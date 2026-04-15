@@ -134,6 +134,13 @@ jobs:
             pkg_name=$(basename "$pkg_dir" | sed 's/^npm-//')
             # Copy binary into the source npm package dir
             cp "$pkg_dir"paperbridge* "npm/$pkg_name/" 2>/dev/null || true
+            # Restore executable bit on Unix binaries — actions/upload-artifact@v4
+            # strips Unix mode bits, so the +x from cargo build is lost by the
+            # time we get here. Without this, npm ships a 0644 binary and every
+            # `paperbridge` invocation on Linux/macOS fails silently with EACCES.
+            if [ "$pkg_name" != "win32-x64" ] && [ -f "npm/$pkg_name/paperbridge" ]; then
+              chmod +x "npm/$pkg_name/paperbridge"
+            fi
             # Update version
             cd "npm/$pkg_name"
             npm version "$VERSION" --no-git-tag-version --allow-same-version

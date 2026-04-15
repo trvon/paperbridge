@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-const { execFileSync } = require("child_process");
+const { spawnSync } = require("child_process");
+const fs = require("fs");
 const path = require("path");
 const os = require("os");
 
@@ -15,25 +16,61 @@ const key = `${os.platform()}-${os.arch()}`;
 const pkg = PLATFORMS[key];
 
 if (!pkg) {
-  console.error(`Unsupported platform: ${key}`);
+  console.error(`paperbridge: unsupported platform ${key}`);
+  console.error(
+    `Supported: ${Object.keys(PLATFORMS).join(", ")}. ` +
+      `Install from source or download a release binary from ` +
+      `https://github.com/trvon/paperbridge/releases`
+  );
   process.exit(1);
 }
 
-let binPath;
+let pkgDir;
 try {
-  const pkgDir = path.dirname(require.resolve(`${pkg}/package.json`));
-  const ext = os.platform() === "win32" ? ".exe" : "";
-  binPath = path.join(pkgDir, `paperbridge${ext}`);
+  pkgDir = path.dirname(require.resolve(`${pkg}/package.json`));
 } catch {
   console.error(
-    `Could not find ${pkg}. Make sure optional dependencies are installed.`
+    `paperbridge: platform package '${pkg}' is not installed.\n` +
+      `npm skipped it as an optionalDependency. Re-install with:\n` +
+      `  npm install -g paperbridge --include=optional\n` +
+      `(or remove 'omit=optional' from your .npmrc / NPM_CONFIG_OMIT env).`
   );
-  console.error("Try: npm install --include=optional");
   process.exit(1);
 }
 
-const result = require("child_process").spawnSync(binPath, process.argv.slice(2), {
-  stdio: "inherit",
-});
+const ext = os.platform() === "win32" ? ".exe" : "";
+const binPath = path.join(pkgDir, `paperbridge${ext}`);
+
+if (!fs.existsSync(binPath)) {
+  console.error(
+    `paperbridge: expected binary at ${binPath} but it is missing. ` +
+      `Reinstall: npm install -g paperbridge --include=optional --force`
+  );
+  process.exit(1);
+}
+
+// npm tarballs usually preserve the +x bit, but some release pipelines drop it.
+// chmod is idempotent and cheap — do it defensively on POSIX.
+if (os.platform() !== "win32") {
+  try {
+    fs.chmodSync(binPath, 0o755);
+  } catch (e) {
+    // Non-fatal: the binary may already be executable and owned by another user
+    // (e.g. root-owned global install). Fall through and let spawn surface EACCES.
+  }
+}
+
+const result = spawnSync(binPath, process.argv.slice(2), { stdio: "inherit" });
+
+if (result.error) {
+  console.error(`paperbridge: failed to launch ${binPath}`);
+  console.error(`  ${result.error.code || ""} ${result.error.message}`);
+  if (result.error.code === "EACCES") {
+    console.error(
+      `  Hint: the binary is not executable. Run: chmod +x ${binPath}`
+    );
+  }
+  process.exit(1);
+}
 
 process.exit(result.status ?? 1);

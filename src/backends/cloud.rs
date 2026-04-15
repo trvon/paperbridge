@@ -1,13 +1,13 @@
 use crate::backend::{BackendCapabilities, BackendMode, LibraryBackend};
 use crate::config::Config;
 use crate::error::{Result, ZoteroMcpError};
-use crate::security::ensure_secure_transport;
 use crate::models::{
     AttachmentSummary, CollectionSummary, CollectionUpdateRequest, CollectionWriteRequest,
     CreatorInput, DeleteCollectionRequest, DeleteItemRequest, FulltextContent, ItemDetail,
     ItemSummary, ItemUpdateRequest, ItemWriteRequest, ListCollectionsQuery, SearchItemsQuery,
     TagInput,
 };
+use crate::security::ensure_secure_transport;
 use reqwest::StatusCode;
 use reqwest::header::{HeaderMap, HeaderName, RETRY_AFTER};
 use serde::Deserialize;
