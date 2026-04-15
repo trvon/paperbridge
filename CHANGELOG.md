@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.0](https://github.com/trvon/paperbridge/compare/v0.2.0...v0.3.0) (2026-04-15)
+
+
+### Features
+
+* adding auto complete and update Cargo ([c651c7d](https://github.com/trvon/paperbridge/commit/c651c7dcfa942410e2b6f46567d6a938d4a7651e))
+* expanding to more source types, improving tests and documentation ([b26febd](https://github.com/trvon/paperbridge/commit/b26febd51e3ba60c60674d09b321b15d427dbca5))
+* improve CLI design philosphy and add embedded skill file ([5452006](https://github.com/trvon/paperbridge/commit/5452006e1d86a94a3612430a9b360ebafafc8384))
+* security fixes ([acd78f5](https://github.com/trvon/paperbridge/commit/acd78f5359be316ce35e587eacac6c9755f5f1f1))
+
+
+### Bug Fixes
+
+* ci fix for unix installs ([0e2ee79](https://github.com/trvon/paperbridge/commit/0e2ee79d06a96f6b49a2daada32e9e51d7e60e05))
+
 ## [0.2.0](https://github.com/trvon/paperbridge/compare/v0.1.0...v0.2.0) (2026-04-14)
 
 
