@@ -1,4 +1,5 @@
 use crate::error::{Result, ZoteroMcpError};
+use crate::external::send_with_retry;
 use crate::models::{PaperHit, PaperSource};
 use reqwest::Client;
 use serde::Deserialize;
@@ -48,7 +49,7 @@ impl HuggingFaceClient {
             req = req.bearer_auth(token);
         }
 
-        let response = req.send().await?;
+        let response = send_with_retry(req).await?;
         let status = response.status();
         if !status.is_success() {
             return Err(ZoteroMcpError::Api {
@@ -132,9 +133,11 @@ fn convert_entry(entry: RawHfPaperEntry) -> PaperHit {
         year,
         doi: None,
         arxiv_id: paper.id,
+        pmid: None,
         abstract_note: paper.summary,
         url,
         pdf_url,
+        oa_pdf_url: None,
         venue: Some("HuggingFace Papers".to_string()),
         citation_count: None,
     }
@@ -256,15 +259,43 @@ mod tests {
 
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(429))
+            .respond_with(ResponseTemplate::new(403))
             .mount(&server)
             .await;
 
         let client = HuggingFaceClient::new(Some(&server.uri()), None);
         let err = client.search("q", 1).await.unwrap_err();
         match err {
-            ZoteroMcpError::Api { status, .. } => assert_eq!(status, 429),
+            ZoteroMcpError::Api { status, .. } => assert_eq!(status, 403),
             other => panic!("expected Api error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn search_retries_on_429_then_succeeds() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/papers/search"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/papers/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"paper": {"id": "2401.99999", "title": "Retried HF"}}
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = HuggingFaceClient::new(Some(&server.uri()), None);
+        let hits = client.search("q", 5).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].title, "Retried HF");
     }
 }

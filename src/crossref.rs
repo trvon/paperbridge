@@ -1,4 +1,5 @@
 use crate::error::{Result, ZoteroMcpError};
+use crate::external::send_with_retry;
 use crate::models::{CrossrefWork, PaperHit, PaperSource};
 use crate::validation::looks_like_doi;
 use reqwest::Client;
@@ -42,7 +43,7 @@ impl CrossrefClient {
         let encoded = urlencoding::encode(trimmed);
         let url = format!("{}/works/{encoded}", self.base_url);
 
-        let response = self.client.get(&url).send().await?;
+        let response = send_with_retry(self.client.get(&url)).await?;
 
         let status = response.status();
         if status == reqwest::StatusCode::NOT_FOUND {
@@ -77,7 +78,7 @@ impl CrossrefClient {
         let encoded = urlencoding::encode(trimmed);
         let url = format!("{}/works?query={encoded}&rows={limit}", self.base_url);
 
-        let response = self.client.get(&url).send().await?;
+        let response = send_with_retry(self.client.get(&url)).await?;
         let status = response.status();
         if !status.is_success() {
             let body = response
@@ -186,6 +187,7 @@ fn convert_message(doi_input: &str, msg: RawCrossrefMessage) -> CrossrefWork {
         url: msg.url,
         publisher: msg.publisher,
         item_type: msg.work_type,
+        oa_pdf_url: None,
     }
 }
 
@@ -215,9 +217,11 @@ fn convert_message_to_hit(msg: RawCrossrefMessage) -> PaperHit {
         year,
         doi: msg.doi,
         arxiv_id: None,
+        pmid: None,
         abstract_note,
         url: msg.url,
         pdf_url: None,
+        oa_pdf_url: None,
         venue,
         citation_count: None,
     }
@@ -502,5 +506,34 @@ mod tests {
             ZoteroMcpError::Api { status, .. } => assert_eq!(status, 500),
             other => panic!("expected Api error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn search_retries_on_429_then_succeeds() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/works"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/works"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "message": {"items": [{"DOI": "10.1/after-retry", "title": ["Retried"]}]}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = CrossrefClient::new(Some(&server.uri()));
+        let hits = client.search("q", 5).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].doi.as_deref(), Some("10.1/after-retry"));
     }
 }

@@ -26,6 +26,14 @@ info "Installing binary to ${INSTALL_DIR}/"
 mkdir -p "${INSTALL_DIR}"
 cp "target/release/paperbridge" "${INSTALL_DIR}/paperbridge"
 
+SKILL_SRC="$(cd "$(dirname "$0")" && pwd)/docs/skill.md"
+SKILL_DEST_DIR="${HOME}/.claude/skills/paperbridge"
+if [[ -f "${SKILL_SRC}" ]]; then
+    info "Installing Claude skill to ${SKILL_DEST_DIR}/SKILL.md"
+    mkdir -p "${SKILL_DEST_DIR}"
+    cp "${SKILL_SRC}" "${SKILL_DEST_DIR}/SKILL.md"
+fi
+
 info "Configuring git hooks..."
 git config core.hooksPath .githooks
 

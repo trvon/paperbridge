@@ -252,6 +252,8 @@ pub struct CrossrefWork {
     pub url: Option<String>,
     pub publisher: Option<String>,
     pub item_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oa_pdf_url: Option<String>,
 }
 
 #[derive(
@@ -274,6 +276,20 @@ pub enum PaperSource {
     #[value(name = "semantic_scholar", alias = "semanticscholar", alias = "s2")]
     SemanticScholar,
     Crossref,
+    #[value(name = "openalex", alias = "open_alex", alias = "oa")]
+    OpenAlex,
+    #[value(name = "europe_pmc", alias = "europepmc", alias = "epmc")]
+    EuropePmc,
+    #[value(name = "dblp")]
+    Dblp,
+    #[value(name = "openreview", alias = "open_review", alias = "or")]
+    OpenReview,
+    #[value(name = "core")]
+    Core,
+    #[value(name = "ads", alias = "nasa_ads", alias = "nasaads")]
+    Ads,
+    #[value(name = "pubmed", alias = "pm")]
+    Pubmed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
@@ -284,9 +300,13 @@ pub struct PaperHit {
     pub year: Option<String>,
     pub doi: Option<String>,
     pub arxiv_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pmid: Option<String>,
     pub abstract_note: Option<String>,
     pub url: Option<String>,
     pub pdf_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oa_pdf_url: Option<String>,
     pub venue: Option<String>,
     pub citation_count: Option<u32>,
 }

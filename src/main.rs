@@ -475,12 +475,21 @@ fn read_json_file<T: serde::de::DeserializeOwned>(file: &str) -> paperbridge::Re
 }
 
 fn build_service(config: Config) -> paperbridge::Result<PaperbridgeService> {
-    let paper_search = paperbridge::external::PaperSearch::with_keys(
-        config.hf_token.clone(),
-        config.semantic_scholar_api_key.clone(),
-    );
+    let keys = paperbridge::external::PaperSearchKeys {
+        hf_token: config.hf_token.clone(),
+        s2_api_key: config.semantic_scholar_api_key.clone(),
+        core_api_key: config.core_api_key.clone(),
+        ads_api_token: config.ads_api_token.clone(),
+        ncbi_api_key: config.ncbi_api_key.clone(),
+        unpaywall_email: config.unpaywall_email.clone(),
+    };
+    let unpaywall_email = config.unpaywall_email.clone();
+    let paper_search = paperbridge::external::PaperSearch::with_keys_struct(keys);
     let backend = build_backend(config)?;
-    Ok(PaperbridgeService::with_paper_search(backend, paper_search))
+    Ok(
+        PaperbridgeService::with_paper_search(backend, paper_search)
+            .with_unpaywall(unpaywall_email),
+    )
 }
 
 async fn run_stdio(config: Config) -> paperbridge::Result<()> {
@@ -689,7 +698,14 @@ async fn handle_config_init(force: bool, interactive: bool) -> paperbridge::Resu
     Ok(())
 }
 
-const SENSITIVE_CONFIG_KEYS: &[&str] = &["api_key", "hf_token", "semantic_scholar_api_key"];
+const SENSITIVE_CONFIG_KEYS: &[&str] = &[
+    "api_key",
+    "hf_token",
+    "semantic_scholar_api_key",
+    "core_api_key",
+    "ads_api_token",
+    "ncbi_api_key",
+];
 
 fn handle_config_get(key: Option<&str>, show_secret: bool) -> paperbridge::Result<()> {
     let cfg = Config::load_file_or_default()?;

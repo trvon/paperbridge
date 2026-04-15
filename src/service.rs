@@ -1,7 +1,7 @@
 use crate::backend::{BackendCapabilities, BackendMode, LibraryBackend};
 use crate::crossref::CrossrefClient;
 use crate::error::{Result, ZoteroMcpError};
-use crate::external::{PaperSearch, SearchOptions};
+use crate::external::{PaperSearch, SearchOptions, UnpaywallClient};
 use crate::models::{
     BackendInfo, CollectionSummary, CollectionUpdateRequest, CollectionWriteRequest, CrossrefWork,
     DeleteCollectionRequest, DeleteItemRequest, FulltextContent, ItemDetail, ItemSummary,
@@ -47,6 +47,7 @@ pub struct PaperbridgeService {
     backend: Arc<dyn LibraryBackend>,
     crossref: CrossrefClient,
     paper_search: PaperSearch,
+    unpaywall: Option<UnpaywallClient>,
 }
 
 impl PaperbridgeService {
@@ -59,7 +60,13 @@ impl PaperbridgeService {
             backend,
             crossref: CrossrefClient::new(None),
             paper_search,
+            unpaywall: None,
         }
+    }
+
+    pub fn with_unpaywall(mut self, email: Option<String>) -> Self {
+        self.unpaywall = email.map(|e| UnpaywallClient::new(None, e));
+        self
     }
 
     pub async fn search_papers(&self, opts: SearchOptions) -> Result<Vec<PaperHit>> {
@@ -237,7 +244,16 @@ impl PaperbridgeService {
     }
 
     pub async fn resolve_doi(&self, doi: &str) -> Result<CrossrefWork> {
-        self.crossref.resolve_doi(doi).await
+        let mut work = self.crossref.resolve_doi(doi).await?;
+        if let Some(unpaywall) = self.unpaywall.as_ref() {
+            match unpaywall.lookup(&work.doi).await {
+                Ok(pdf) => work.oa_pdf_url = pdf,
+                Err(e) => {
+                    tracing::warn!(error = %e, doi = %work.doi, "unpaywall enrichment failed");
+                }
+            }
+        }
+        Ok(work)
     }
 
     pub async fn validate_item_online(&self, req: &ItemWriteRequest) -> Result<ValidationReport> {

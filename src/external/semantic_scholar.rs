@@ -1,4 +1,5 @@
 use crate::error::{Result, ZoteroMcpError};
+use crate::external::send_with_retry;
 use crate::models::{PaperHit, PaperSource};
 use reqwest::Client;
 use serde::Deserialize;
@@ -53,7 +54,7 @@ impl SemanticScholarClient {
             req = req.header("x-api-key", key);
         }
 
-        let response = req.send().await?;
+        let response = send_with_retry(req).await?;
         let status = response.status();
         if !status.is_success() {
             return Err(ZoteroMcpError::Api {
@@ -136,6 +137,7 @@ fn convert_paper(p: RawS2Paper) -> PaperHit {
         None => (None, None),
     };
 
+    let pdf = p.open_access_pdf.and_then(|o| o.url);
     PaperHit {
         source: PaperSource::SemanticScholar,
         title: p.title.unwrap_or_default(),
@@ -143,9 +145,11 @@ fn convert_paper(p: RawS2Paper) -> PaperHit {
         year: p.year.map(|y| y.to_string()),
         doi,
         arxiv_id,
+        pmid: None,
         abstract_note: p.abstract_text,
         url: p.url,
-        pdf_url: p.open_access_pdf.and_then(|o| o.url),
+        pdf_url: pdf.clone(),
+        oa_pdf_url: pdf,
         venue: p.venue.filter(|v| !v.is_empty()),
         citation_count: p.citation_count,
     }
@@ -267,5 +271,33 @@ mod tests {
             ZoteroMcpError::Api { status, .. } => assert_eq!(status, 403),
             other => panic!("expected Api error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn search_retries_on_429_then_succeeds() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/paper/search"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/paper/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"title": "Retried S2"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = SemanticScholarClient::new(Some(&server.uri()), None);
+        let hits = client.search("q", 5).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].title, "Retried S2");
     }
 }

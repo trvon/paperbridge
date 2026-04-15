@@ -72,7 +72,7 @@ Notes:
 CLI surface changes — new commands, renamed flags, error copy, help text,
 aliases — must be reviewed against [docs/design/cli-design.md](docs/design/cli-design.md).
 The required-review checklist in that document applies to every PR that
-touches `src/cli.rs`, user-visible error output, `.claude/skills/paperbridge/SKILL.md`,
+touches `src/cli.rs`, user-visible error output, `docs/skill.md`,
 or the README command examples. The skill content is also embedded in the
 `paperbridge serve` MCP server as prompt `paperbridge_skill`, so changes
 to the skill reach both repo contributors and connected hosts.

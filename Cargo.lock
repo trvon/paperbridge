@@ -1072,6 +1072,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "dirs",
+ "futures",
  "quick-xml",
  "reqwest",
  "rmcp",

@@ -88,6 +88,14 @@ pub struct Config {
     pub hf_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub semantic_scholar_api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub core_api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ads_api_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ncbi_api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unpaywall_email: Option<String>,
 }
 
 impl Default for Config {
@@ -104,6 +112,10 @@ impl Default for Config {
             log_level: "info".to_string(),
             hf_token: None,
             semantic_scholar_api_key: None,
+            core_api_key: None,
+            ads_api_token: None,
+            ncbi_api_key: None,
+            unpaywall_email: None,
         }
     }
 }
@@ -123,6 +135,10 @@ struct PartialConfig {
     log_level: Option<String>,
     hf_token: Option<String>,
     semantic_scholar_api_key: Option<String>,
+    core_api_key: Option<String>,
+    ads_api_token: Option<String>,
+    ncbi_api_key: Option<String>,
+    unpaywall_email: Option<String>,
 }
 
 impl Config {
@@ -203,8 +219,9 @@ impl Config {
         let mask = |opt: &Option<String>| {
             if opt.is_some() { "<set>" } else { "<unset>" }
         };
+        let plain = |opt: &Option<String>| opt.clone().unwrap_or_else(|| "<unset>".to_string());
         format!(
-            "backend_mode = \"{}\"\ncloud_api_base = \"{}\"\nlocal_api_base = \"{}\"\napi_key = {}\nlibrary_type = \"{}\"\nuser_id = {}\ngroup_id = {}\ntimeout_secs = {}\nlog_level = \"{}\"\nhf_token = {}\nsemantic_scholar_api_key = {}",
+            "backend_mode = \"{}\"\ncloud_api_base = \"{}\"\nlocal_api_base = \"{}\"\napi_key = {}\nlibrary_type = \"{}\"\nuser_id = {}\ngroup_id = {}\ntimeout_secs = {}\nlog_level = \"{}\"\nhf_token = {}\nsemantic_scholar_api_key = {}\ncore_api_key = {}\nads_api_token = {}\nncbi_api_key = {}\nunpaywall_email = {}",
             self.backend_mode.as_str(),
             self.cloud_api_base,
             self.local_api_base,
@@ -220,6 +237,10 @@ impl Config {
             self.log_level,
             mask(&self.hf_token),
             mask(&self.semantic_scholar_api_key),
+            mask(&self.core_api_key),
+            mask(&self.ads_api_token),
+            mask(&self.ncbi_api_key),
+            plain(&self.unpaywall_email),
         )
     }
 
@@ -283,6 +304,26 @@ impl Config {
                     .clone()
                     .unwrap_or_else(|| "<unset>".to_string()),
             ),
+            "core_api_key" => Some(
+                self.core_api_key
+                    .clone()
+                    .unwrap_or_else(|| "<unset>".to_string()),
+            ),
+            "ads_api_token" => Some(
+                self.ads_api_token
+                    .clone()
+                    .unwrap_or_else(|| "<unset>".to_string()),
+            ),
+            "ncbi_api_key" => Some(
+                self.ncbi_api_key
+                    .clone()
+                    .unwrap_or_else(|| "<unset>".to_string()),
+            ),
+            "unpaywall_email" => Some(
+                self.unpaywall_email
+                    .clone()
+                    .unwrap_or_else(|| "<unset>".to_string()),
+            ),
             _ => None,
         }
     }
@@ -342,9 +383,21 @@ impl Config {
             "semantic_scholar_api_key" => {
                 self.semantic_scholar_api_key = optional_string(v);
             }
+            "core_api_key" => {
+                self.core_api_key = optional_string(v);
+            }
+            "ads_api_token" => {
+                self.ads_api_token = optional_string(v);
+            }
+            "ncbi_api_key" => {
+                self.ncbi_api_key = optional_string(v);
+            }
+            "unpaywall_email" => {
+                self.unpaywall_email = optional_string(v);
+            }
             _ => {
                 return Err(ZoteroMcpError::InvalidInput(format!(
-                    "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key"
+                    "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key, core_api_key, ads_api_token, ncbi_api_key, unpaywall_email"
                 )));
             }
         }
@@ -387,6 +440,18 @@ impl Config {
         }
         if let Some(v) = partial.semantic_scholar_api_key {
             self.semantic_scholar_api_key = Some(v);
+        }
+        if let Some(v) = partial.core_api_key {
+            self.core_api_key = Some(v);
+        }
+        if let Some(v) = partial.ads_api_token {
+            self.ads_api_token = Some(v);
+        }
+        if let Some(v) = partial.ncbi_api_key {
+            self.ncbi_api_key = Some(v);
+        }
+        if let Some(v) = partial.unpaywall_email {
+            self.unpaywall_email = Some(v);
         }
     }
 
@@ -449,6 +514,34 @@ impl Config {
                         self.semantic_scholar_api_key = None;
                     } else {
                         self.semantic_scholar_api_key = Some(value.to_string());
+                    }
+                }
+                "PAPERBRIDGE_CORE_API_KEY" | "CORE_API_KEY" => {
+                    if value.trim().is_empty() {
+                        self.core_api_key = None;
+                    } else {
+                        self.core_api_key = Some(value.to_string());
+                    }
+                }
+                "PAPERBRIDGE_ADS_API_TOKEN" | "ADS_API_TOKEN" => {
+                    if value.trim().is_empty() {
+                        self.ads_api_token = None;
+                    } else {
+                        self.ads_api_token = Some(value.to_string());
+                    }
+                }
+                "PAPERBRIDGE_NCBI_API_KEY" | "NCBI_API_KEY" => {
+                    if value.trim().is_empty() {
+                        self.ncbi_api_key = None;
+                    } else {
+                        self.ncbi_api_key = Some(value.to_string());
+                    }
+                }
+                "PAPERBRIDGE_UNPAYWALL_EMAIL" | "UNPAYWALL_EMAIL" => {
+                    if value.trim().is_empty() {
+                        self.unpaywall_email = None;
+                    } else {
+                        self.unpaywall_email = Some(value.to_string());
                     }
                 }
                 _ => {}

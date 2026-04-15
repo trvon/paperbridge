@@ -254,6 +254,7 @@ impl EntryBuilder {
             })
         });
 
+        let pdf = self.pdf_url;
         Some(PaperHit {
             source: PaperSource::Arxiv,
             title,
@@ -261,9 +262,11 @@ impl EntryBuilder {
             year,
             doi: None,
             arxiv_id,
+            pmid: None,
             abstract_note: self.summary,
             url: self.abs_url.or(id),
-            pdf_url: self.pdf_url,
+            pdf_url: pdf.clone(),
+            oa_pdf_url: pdf,
             venue: Some("arXiv".to_string()),
             citation_count: None,
         })
