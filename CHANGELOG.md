@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.0](https://github.com/trvon/paperbridge/compare/v0.3.0...v0.4.0) (2026-04-16)
+
+
+### Features
+
+* adding skill command for better agent steering. Fixing format issues ([13f8662](https://github.com/trvon/paperbridge/commit/13f8662ecdd2ccf1990334eaa5eef5f2e3bdfea8))
+* clippy fixes ([a3cb12b](https://github.com/trvon/paperbridge/commit/a3cb12b889037018b794020b7413166c7cd35ab3))
+* structured paper return for llm search, documentation cleanups and expanding configuration ([50a3fcf](https://github.com/trvon/paperbridge/commit/50a3fcf7ed3647af142dc2ff120072f62814495e))
+
+
+### Bug Fixes
+
+* security fixes ([e0d3869](https://github.com/trvon/paperbridge/commit/e0d38695f2f64dfa762fc3dbfcb1a06e695bdad3))
+
 ## [0.3.0](https://github.com/trvon/paperbridge/compare/v0.2.0...v0.3.0) (2026-04-15)
 
 
