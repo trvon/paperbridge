@@ -79,6 +79,10 @@ impl LibraryBackend for HybridZoteroBackend {
         self.read_backend.get_pdf_text(attachment_key).await
     }
 
+    async fn get_attachment_bytes(&self, attachment_key: &str) -> Result<Vec<u8>> {
+        self.read_backend.get_attachment_bytes(attachment_key).await
+    }
+
     async fn create_collection(
         &self,
         req: crate::models::CollectionWriteRequest,

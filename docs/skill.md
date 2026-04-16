@@ -59,6 +59,23 @@ paperbridge library read --item-key ABCD1234 --max-chars-per-chunk 8000
 paperbridge library read-search --q "sparse attention" --result-index 0 --search-limit 5
 ```
 
+### Query structured paper content (agent-friendly)
+Return a paper as a typed JSON structure, then select into it with a dotted path:
+
+```bash
+paperbridge paper structure --key ABCD1234
+paperbridge paper query --key ABCD1234 --selector "sections[0].heading"
+paperbridge paper query --key ABCD1234 --selector "metadata.doi"
+```
+
+- MCP tools: `get_paper_structure { item_key, attachment_key? }` and `query_paper { item_key, selector, attachment_key? }`.
+- Selectors use dotted paths with bracket indexing (e.g. `sections[2].text`, `references[0].title`).
+- The response includes `source`, one of:
+  - `{ "kind": "grobid" }` — parsed via GROBID; real section / heading / reference breakdown.
+  - `{ "kind": "zotero_fulltext" }` — Zotero's stored full text only; one `sections[0]` body blob. Correct for most agent queries when GROBID isn't configured.
+  - `{ "kind": "grobid_unavailable", "reason": "..." }` — GROBID was configured but the call failed; the service fell back to Zotero full text. Check the reason.
+- **Precedence:** if `grobid_url` is set, it wins — Docker auto-spawn is never attempted. To use auto-spawn, leave `grobid_url` unset and set `grobid_auto_spawn=true`. See [docs/structured-paper.md](structured-paper.md) for the full flow, timing, and troubleshooting.
+
 ### Search external paper sources
 Sources run in parallel; failures/timeouts per source are non-fatal. Results dedupe by DOI → arXiv ID → PMID → normalized title+first-author. `--sources` is parse-validated (invalid values fail before any network call).
 
@@ -118,6 +135,10 @@ paperbridge config snippet --target opencode
 | `hf_token`, `semantic_scholar_api_key`, `core_api_key`, `ads_api_token` | gate external sources (silent skip when unset) |
 | `ncbi_api_key` | optional PubMed rate-limit upgrade (3→10 req/s); PubMed still runs without it |
 | `unpaywall_email` | enables OA-PDF enrichment on `papers resolve-doi`; also sent as OpenAlex `mailto` polite-pool hint |
+| `grobid_url` | remote or local GROBID endpoint (e.g. `http://localhost:8070`); if set, auto-spawn is disabled |
+| `grobid_auto_spawn` | when `grobid_url` is unset, launch GROBID via `docker run` on first request (default `false`) |
+| `grobid_image` | Docker image used by auto-spawn (default `lfoppiano/grobid:0.8.1`) |
+| `grobid_timeout_secs` | HTTP timeout for GROBID requests (default 120) |
 | `log_level` | `error`, `warn`, `info`, `debug`, `trace` |
 
 `paperbridge config get` masks secrets by default. Use `--show-secret` when you genuinely need the value.

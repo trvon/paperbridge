@@ -89,12 +89,14 @@ mod tests {
                 title: "text".to_string(),
                 content_type: Some("text/plain".to_string()),
                 path: None,
+                version: None,
             },
             AttachmentSummary {
                 key: "B".to_string(),
                 title: "pdf".to_string(),
                 content_type: Some("application/pdf".to_string()),
                 path: None,
+                version: None,
             },
         ];
 
@@ -110,12 +112,14 @@ mod tests {
                 title: "notes".to_string(),
                 content_type: Some("text/plain".to_string()),
                 path: None,
+                version: None,
             },
             AttachmentSummary {
                 key: "B".to_string(),
                 title: "paper".to_string(),
                 content_type: Some("application/pdf".to_string()),
                 path: None,
+                version: None,
             },
         ];
 
@@ -130,6 +134,7 @@ mod tests {
             title: "notes".to_string(),
             content_type: Some("text/plain".to_string()),
             path: None,
+            version: None,
         }];
 
         let selected = select_attachment_for_reading(&attachments, None).unwrap();

@@ -271,6 +271,39 @@ impl LibraryBackend for CloudZoteroBackend {
         self.get_item_fulltext(attachment_key).await
     }
 
+    async fn get_attachment_bytes(&self, attachment_key: &str) -> Result<Vec<u8>> {
+        let suffix = format!("/items/{attachment_key}/file");
+        let url = self.build_url(&suffix)?;
+        ensure_secure_transport(&url)?;
+        let mut req = self
+            .http
+            .get(url)
+            .header("Zotero-API-Version", ZOTERO_API_VERSION);
+        if let Some(key) = &self.config.api_key {
+            req = req.header("Zotero-API-Key", key);
+        }
+        let response = req
+            .send()
+            .await
+            .map_err(|e| ZoteroMcpError::Http(format!("attachment fetch failed: {e}")))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<failed to read error body>".to_string());
+            return Err(ZoteroMcpError::Api {
+                status: status.as_u16(),
+                message: body,
+            });
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| ZoteroMcpError::Http(format!("attachment body read failed: {e}")))?;
+        Ok(bytes.to_vec())
+    }
+
     async fn create_collection(&self, req: CollectionWriteRequest) -> Result<CollectionSummary> {
         let mut object = serde_json::Map::new();
         object.insert("name".to_string(), serde_json::Value::String(req.name));
@@ -855,6 +888,7 @@ impl From<RawItemRecord> for AttachmentSummary {
                 .unwrap_or_else(|| "(attachment)".to_string()),
             content_type: value.data.content_type,
             path: value.data.path,
+            version: value.version,
         }
     }
 }

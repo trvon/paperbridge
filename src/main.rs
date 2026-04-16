@@ -1,6 +1,7 @@
 use clap::{CommandFactory, Parser};
 use paperbridge::cli::{
-    Cli, CollectionAction, Command, ConfigAction, ItemAction, LibraryAction, PapersAction,
+    Cli, CollectionAction, Command, ConfigAction, ItemAction, LibraryAction, PaperAction,
+    PapersAction,
     SnippetTarget,
 };
 use paperbridge::config::Config;
@@ -157,6 +158,17 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
                 timeout_ms,
             } => handle_papers_search(config, q, limit, sources, timeout_ms).await?,
             PapersAction::ResolveDoi { doi } => handle_papers_resolve_doi(config, doi).await?,
+        },
+
+        Some(Command::Paper { action }) => match action {
+            PaperAction::Structure { key, attachment } => {
+                handle_paper_structure(config, key, attachment).await?
+            }
+            PaperAction::Query {
+                key,
+                selector,
+                attachment,
+            } => handle_paper_query(config, key, selector, attachment).await?,
         },
 
         // ---------- Hidden legacy aliases (delegate + deprecation warning) ----------
@@ -467,6 +479,31 @@ async fn handle_papers_resolve_doi(config: Config, doi: String) -> paperbridge::
     print_json(&work)
 }
 
+async fn handle_paper_structure(
+    config: Config,
+    key: String,
+    attachment: Option<String>,
+) -> paperbridge::Result<()> {
+    let service = build_service(config)?;
+    let structure = service
+        .get_paper_structure(&key, attachment.as_deref())
+        .await?;
+    print_json(&structure)
+}
+
+async fn handle_paper_query(
+    config: Config,
+    key: String,
+    selector: String,
+    attachment: Option<String>,
+) -> paperbridge::Result<()> {
+    let service = build_service(config)?;
+    let value = service
+        .query_paper(&key, &selector, attachment.as_deref())
+        .await?;
+    print_json(&value)
+}
+
 fn read_json_file<T: serde::de::DeserializeOwned>(file: &str) -> paperbridge::Result<T> {
     let text = std::fs::read_to_string(file)
         .map_err(|e| paperbridge::ZoteroMcpError::Config(format!("Failed to read {file}: {e}")))?;
@@ -484,11 +521,18 @@ fn build_service(config: Config) -> paperbridge::Result<PaperbridgeService> {
         unpaywall_email: config.unpaywall_email.clone(),
     };
     let unpaywall_email = config.unpaywall_email.clone();
+    let paper_config = paperbridge::service::PaperConfig {
+        grobid_url: config.grobid_url.clone(),
+        grobid_auto_spawn: config.grobid_auto_spawn,
+        grobid_image: config.grobid_image.clone(),
+        grobid_timeout_secs: config.grobid_timeout_secs,
+    };
     let paper_search = paperbridge::external::PaperSearch::with_keys_struct(keys);
     let backend = build_backend(config)?;
     Ok(
         PaperbridgeService::with_paper_search(backend, paper_search)
-            .with_unpaywall(unpaywall_email),
+            .with_unpaywall(unpaywall_email)
+            .with_paper_config(paper_config),
     )
 }
 
@@ -688,6 +732,35 @@ async fn handle_config_init(force: bool, interactive: bool) -> paperbridge::Resu
     cfg.set_value("timeout_secs", &timeout)?;
 
     cfg.log_level = prompt_with_default("Log level", &cfg.log_level)?;
+
+    println!("\nGROBID provides section-aware paper parsing. It is optional; leave blank to skip.");
+    let grobid_default = if cfg.grobid_url.is_some() { "<set>" } else { "" };
+    let grobid_url = prompt_with_default(
+        "GROBID URL (e.g. http://localhost:8070; blank to disable)",
+        grobid_default,
+    )?;
+    if grobid_url != "<set>" {
+        let trimmed = grobid_url.trim();
+        if trimmed.is_empty() {
+            cfg.grobid_url = None;
+        } else {
+            cfg.grobid_url = Some(trimmed.to_string());
+        }
+    }
+
+    if cfg.grobid_url.is_none() {
+        let auto_default = if cfg.grobid_auto_spawn { "true" } else { "false" };
+        let auto = prompt_with_default(
+            "Auto-spawn local GROBID via docker when needed? (true/false)",
+            auto_default,
+        )?;
+        cfg.set_value("grobid_auto_spawn", auto.trim())?;
+
+        if cfg.grobid_auto_spawn {
+            cfg.grobid_image =
+                prompt_with_default("GROBID docker image", &cfg.grobid_image)?;
+        }
+    }
 
     cfg.write_to_file()?;
     println!("Initialized config at {}", path.display());

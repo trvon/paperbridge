@@ -54,6 +54,10 @@ impl LibraryBackend for LocalZoteroBackend {
         self.inner.get_pdf_text(attachment_key).await
     }
 
+    async fn get_attachment_bytes(&self, attachment_key: &str) -> Result<Vec<u8>> {
+        self.inner.get_attachment_bytes(attachment_key).await
+    }
+
     async fn create_collection(&self, _req: CollectionWriteRequest) -> Result<CollectionSummary> {
         Err(ZoteroMcpError::InvalidInput(
             "local backend write support is not implemented yet".to_string(),

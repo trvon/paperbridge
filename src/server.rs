@@ -65,6 +65,31 @@ pub struct GetItemParams {
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct GetPaperStructureParams {
+    #[schemars(description = "Zotero item key for the paper")]
+    pub item_key: String,
+
+    #[schemars(
+        description = "Optional attachment key. If omitted, paperbridge picks the best PDF attachment."
+    )]
+    pub attachment_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct QueryPaperParams {
+    #[schemars(description = "Zotero item key for the paper")]
+    pub item_key: String,
+
+    #[schemars(
+        description = "Dotted-path selector against the PaperStructure JSON. Examples: 'metadata.title', 'sections[0].heading', 'references[3].doi'."
+    )]
+    pub selector: String,
+
+    #[schemars(description = "Optional attachment key override")]
+    pub attachment_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct GetItemFulltextParams {
     #[schemars(description = "Attachment item key")]
     pub attachment_key: String,
@@ -319,6 +344,42 @@ impl PaperbridgeServer {
             .await
             .map_err(Self::map_error)?;
         Self::ok_json(&text)
+    }
+
+    #[tool(
+        name = "get_paper_structure",
+        description = "Return a structured tree for a paper in the Zotero library (metadata, sections, references, figures). In this build, sections come from Zotero's indexed fulltext as a single 'Body' block; GROBID-backed section splitting ships in a follow-up."
+    )]
+    async fn get_paper_structure(
+        &self,
+        Parameters(params): Parameters<GetPaperStructureParams>,
+    ) -> std::result::Result<CallToolResult, McpError> {
+        let structure = self
+            .service
+            .get_paper_structure(&params.item_key, params.attachment_key.as_deref())
+            .await
+            .map_err(Self::map_error)?;
+        Self::ok_json(&structure)
+    }
+
+    #[tool(
+        name = "query_paper",
+        description = "Evaluate a dotted-path selector against the paper's PaperStructure and return the matching subtree. Example selectors: 'metadata.title', 'sections[0].heading', 'references[3]'."
+    )]
+    async fn query_paper(
+        &self,
+        Parameters(params): Parameters<QueryPaperParams>,
+    ) -> std::result::Result<CallToolResult, McpError> {
+        let value = self
+            .service
+            .query_paper(
+                &params.item_key,
+                &params.selector,
+                params.attachment_key.as_deref(),
+            )
+            .await
+            .map_err(Self::map_error)?;
+        Self::ok_json(&value)
     }
 
     #[tool(

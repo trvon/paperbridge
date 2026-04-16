@@ -175,6 +175,8 @@ pub struct AttachmentSummary {
     pub title: String,
     pub content_type: Option<String>,
     pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -290,6 +292,66 @@ pub enum PaperSource {
     Ads,
     #[value(name = "pubmed", alias = "pm")]
     Pubmed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+pub struct PaperMetadata {
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authors: Vec<String>,
+    pub abstract_note: Option<String>,
+    pub doi: Option<String>,
+    pub year: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+pub struct PaperSection {
+    pub id: String,
+    pub heading: String,
+    pub level: u8,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subsections: Vec<PaperSection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+pub struct PaperReference {
+    pub id: String,
+    pub raw: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authors: Vec<String>,
+    pub title: Option<String>,
+    pub year: Option<String>,
+    pub doi: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+pub struct PaperFigure {
+    pub id: String,
+    pub label: Option<String>,
+    pub caption: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PaperStructureSource {
+    Grobid,
+    ZoteroFulltext,
+    GrobidUnavailable { reason: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+pub struct PaperStructure {
+    pub item_key: String,
+    pub attachment_key: Option<String>,
+    pub metadata: PaperMetadata,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<PaperSection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<PaperReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub figures: Vec<PaperFigure>,
+    pub source: PaperStructureSource,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]

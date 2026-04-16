@@ -6,12 +6,19 @@ use crate::models::{
     BackendInfo, CollectionSummary, CollectionUpdateRequest, CollectionWriteRequest, CrossrefWork,
     DeleteCollectionRequest, DeleteItemRequest, FulltextContent, ItemDetail, ItemSummary,
     ItemUpdateRequest, ItemVoxPayload, ItemWriteRequest, ListCollectionsQuery, PaperHit,
-    SearchItemsQuery, SearchVoxPayload, ValidationIssue, ValidationIssueLevel, ValidationReport,
-    VoxTextPayload,
+    PaperStructure, SearchItemsQuery, SearchVoxPayload, ValidationIssue, ValidationIssueLevel,
+    ValidationReport, VoxTextPayload,
 };
+use crate::paper;
+use crate::paper::docker::DEFAULT_PORT as GROBID_DEFAULT_PORT;
+use crate::paper::grobid::GrobidClient;
+use crate::paper::tei;
 use crate::pdf;
 use crate::validation;
+use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::Mutex;
+use tracing::{debug, warn};
 
 pub const DEFAULT_CHUNK_SIZE: usize = 1200;
 pub const DEFAULT_PIPELINE_SEARCH_LIMIT: u32 = 5;
@@ -42,12 +49,24 @@ pub struct PrepareSearchResultForVoxRequest {
     pub max_chars_per_chunk: Option<usize>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PaperConfig {
+    pub grobid_url: Option<String>,
+    pub grobid_auto_spawn: bool,
+    pub grobid_image: String,
+    pub grobid_timeout_secs: u64,
+}
+
+type PaperCacheKey = (String, String, Option<u64>);
+
 #[derive(Clone)]
 pub struct PaperbridgeService {
     backend: Arc<dyn LibraryBackend>,
     crossref: CrossrefClient,
     paper_search: PaperSearch,
     unpaywall: Option<UnpaywallClient>,
+    paper_config: Option<PaperConfig>,
+    paper_cache: Arc<Mutex<HashMap<PaperCacheKey, PaperStructure>>>,
 }
 
 impl PaperbridgeService {
@@ -61,11 +80,18 @@ impl PaperbridgeService {
             crossref: CrossrefClient::new(None),
             paper_search,
             unpaywall: None,
+            paper_config: None,
+            paper_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub fn with_unpaywall(mut self, email: Option<String>) -> Self {
         self.unpaywall = email.map(|e| UnpaywallClient::new(None, e));
+        self
+    }
+
+    pub fn with_paper_config(mut self, cfg: PaperConfig) -> Self {
+        self.paper_config = Some(cfg);
         self
     }
 
@@ -163,6 +189,108 @@ impl PaperbridgeService {
 
     pub async fn get_pdf_text(&self, attachment_key: &str) -> Result<FulltextContent> {
         self.backend.get_pdf_text(attachment_key).await
+    }
+
+    pub async fn get_paper_structure(
+        &self,
+        item_key: &str,
+        attachment_key: Option<&str>,
+    ) -> Result<PaperStructure> {
+        let item = self.backend.get_item(item_key).await?;
+        let selected_attachment = pdf::select_attachment_for_reading(&item.attachments, attachment_key)
+            .ok_or_else(|| {
+                ZoteroMcpError::InvalidInput(format!(
+                    "no attachments available for item '{item_key}'"
+                ))
+            })?;
+
+        let cache_key: PaperCacheKey = (
+            item_key.to_string(),
+            selected_attachment.key.clone(),
+            selected_attachment.version,
+        );
+
+        {
+            let cache = self.paper_cache.lock().await;
+            if let Some(cached) = cache.get(&cache_key) {
+                debug!(item_key, attachment_key = %selected_attachment.key, "paper structure cache hit");
+                return Ok(cached.clone());
+            }
+        }
+
+        let structure = if let Some(cfg) = &self.paper_config {
+            match self
+                .try_grobid_structure(item_key, &selected_attachment.key, cfg)
+                .await
+            {
+                Ok(s) => s,
+                Err(err) => {
+                    warn!(error = %err, "GROBID path failed, falling back to Zotero fulltext");
+                    let fulltext = self
+                        .backend
+                        .get_item_fulltext(&selected_attachment.key)
+                        .await?;
+                    let mut s = paper::build_from_fulltext(&item, &fulltext);
+                    s.source = crate::models::PaperStructureSource::GrobidUnavailable {
+                        reason: err.to_string(),
+                    };
+                    s
+                }
+            }
+        } else {
+            let fulltext = self
+                .backend
+                .get_item_fulltext(&selected_attachment.key)
+                .await?;
+            paper::build_from_fulltext(&item, &fulltext)
+        };
+
+        let mut cache = self.paper_cache.lock().await;
+        cache.insert(cache_key, structure.clone());
+        Ok(structure)
+    }
+
+    async fn try_grobid_structure(
+        &self,
+        item_key: &str,
+        attachment_key: &str,
+        cfg: &PaperConfig,
+    ) -> Result<PaperStructure> {
+        let base_url = match &cfg.grobid_url {
+            Some(url) if !url.trim().is_empty() => url.trim().to_string(),
+            _ if cfg.grobid_auto_spawn => {
+                paper::docker::ensure_grobid_ready(&cfg.grobid_image, GROBID_DEFAULT_PORT).await?
+            }
+            _ => {
+                return Err(ZoteroMcpError::InvalidInput(
+                    "GROBID not configured (grobid_url unset and grobid_auto_spawn=false)".to_string(),
+                ));
+            }
+        };
+
+        let client = GrobidClient::new(&base_url, cfg.grobid_timeout_secs)?;
+        if !client.is_alive().await {
+            return Err(ZoteroMcpError::Http(format!(
+                "GROBID not responding at {base_url}/api/isalive"
+            )));
+        }
+
+        debug!(item_key, attachment_key, "fetching attachment bytes for GROBID");
+        let bytes = self.backend.get_attachment_bytes(attachment_key).await?;
+        let tei_xml = client.process_fulltext(bytes).await?;
+        tei::parse_tei(item_key, attachment_key, &tei_xml)
+    }
+
+    pub async fn query_paper(
+        &self,
+        item_key: &str,
+        selector: &str,
+        attachment_key: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let structure = self
+            .get_paper_structure(item_key, attachment_key)
+            .await?;
+        paper::query(&structure, selector)
     }
 
     pub async fn create_collection(
@@ -488,6 +616,10 @@ mod tests {
         }
 
         async fn get_pdf_text(&self, _attachment_key: &str) -> Result<FulltextContent> {
+            Err(ZoteroMcpError::InvalidInput("unused".to_string()))
+        }
+
+        async fn get_attachment_bytes(&self, _attachment_key: &str) -> Result<Vec<u8>> {
             Err(ZoteroMcpError::InvalidInput("unused".to_string()))
         }
 

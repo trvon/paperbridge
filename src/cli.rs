@@ -57,6 +57,12 @@ pub enum Command {
         action: PapersAction,
     },
 
+    /// Retrieve and query structured paper content (sections, references, figures)
+    Paper {
+        #[command(subcommand)]
+        action: PaperAction,
+    },
+
     // ---------- Hidden legacy aliases (removal targeted for 0.4.0) ----------
     #[command(
         hide = true,
@@ -375,6 +381,31 @@ pub enum PapersAction {
         /// DOI to resolve (e.g. 10.1038/nature12373)
         #[arg(long)]
         doi: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PaperAction {
+    /// Fetch the full PaperStructure JSON for a Zotero item
+    Structure {
+        /// Zotero item key
+        #[arg(long)]
+        key: String,
+        /// Optional attachment key override
+        #[arg(long)]
+        attachment: Option<String>,
+    },
+    /// Evaluate a dotted-path selector against a paper's structure
+    Query {
+        /// Zotero item key
+        #[arg(long)]
+        key: String,
+        /// Dotted-path selector (e.g. "metadata.title", "sections[0].heading")
+        #[arg(long)]
+        selector: String,
+        /// Optional attachment key override
+        #[arg(long)]
+        attachment: Option<String>,
     },
 }
 

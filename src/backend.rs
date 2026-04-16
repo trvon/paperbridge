@@ -57,6 +57,8 @@ pub trait LibraryBackend: Send + Sync {
 
     async fn get_pdf_text(&self, attachment_key: &str) -> Result<FulltextContent>;
 
+    async fn get_attachment_bytes(&self, attachment_key: &str) -> Result<Vec<u8>>;
+
     async fn create_collection(&self, req: CollectionWriteRequest) -> Result<CollectionSummary>;
 
     async fn update_collection(&self, req: CollectionUpdateRequest) -> Result<CollectionSummary>;
