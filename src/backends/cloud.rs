@@ -50,6 +50,7 @@ impl CloudZoteroBackend {
 
         loop {
             let url = self.build_url(suffix)?;
+            ensure_secure_transport(&url)?;
             debug!(attempt, %url, "zotero request start");
             let mut req = self
                 .http
@@ -141,9 +142,11 @@ impl CloudZoteroBackend {
         body: serde_json::Value,
         version: Option<u64>,
     ) -> Result<String> {
+        let url = self.build_url(suffix)?;
+        ensure_secure_transport(&url)?;
         let mut request = self
             .http
-            .request(method, self.build_url(suffix)?)
+            .request(method, url)
             .header("Zotero-API-Version", ZOTERO_API_VERSION)
             .header(reqwest::header::CONTENT_TYPE, "application/json");
 
@@ -171,9 +174,11 @@ impl CloudZoteroBackend {
     }
 
     async fn send_delete(&self, suffix: &str, version: u64) -> Result<()> {
+        let url = self.build_url(suffix)?;
+        ensure_secure_transport(&url)?;
         let mut request = self
             .http
-            .delete(self.build_url(suffix)?)
+            .delete(url)
             .header("Zotero-API-Version", ZOTERO_API_VERSION)
             .header("If-Unmodified-Since-Version", version.to_string());
 

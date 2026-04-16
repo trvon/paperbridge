@@ -834,8 +834,9 @@ async fn resolve_user_id_from_login_id(
 
 async fn resolve_user_id_from_username_redirect(username: &str) -> paperbridge::Result<u64> {
     let url = format!("https://www.zotero.org/{username}");
+    paperbridge::security::ensure_secure_transport(&url)?;
     let response = reqwest::Client::new()
-        .get(url)
+        .get(&url)
         .send()
         .await
         .map_err(|e| paperbridge::ZoteroMcpError::Http(e.to_string()))?;
