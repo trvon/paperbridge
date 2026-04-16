@@ -168,10 +168,8 @@ impl ParseState {
             "abstract" => {
                 self.abstract_capturing = true;
             }
-            "analytic" => {
-                if !self.in_back_bibl {
-                    self.in_analytic = true;
-                }
+            "analytic" if !self.in_back_bibl => {
+                self.in_analytic = true;
             }
             "listBibl" => {
                 self.in_list_bibl = true;
@@ -317,23 +315,19 @@ impl ParseState {
                 self.persname_forenames.clear();
                 self.persname_surname = None;
             }
-            "forename" => {
-                if self.forename_capturing {
-                    let v = self.forename_buf.trim().to_string();
-                    if !v.is_empty() {
-                        self.persname_forenames.push(v);
-                    }
-                    self.forename_capturing = false;
+            "forename" if self.forename_capturing => {
+                let v = self.forename_buf.trim().to_string();
+                if !v.is_empty() {
+                    self.persname_forenames.push(v);
                 }
+                self.forename_capturing = false;
             }
-            "surname" => {
-                if self.surname_capturing {
-                    let v = self.surname_buf.trim().to_string();
-                    if !v.is_empty() {
-                        self.persname_surname = Some(v);
-                    }
-                    self.surname_capturing = false;
+            "surname" if self.surname_capturing => {
+                let v = self.surname_buf.trim().to_string();
+                if !v.is_empty() {
+                    self.persname_surname = Some(v);
                 }
+                self.surname_capturing = false;
             }
             "head" => {
                 if let Some(sec) = self.current_section.as_mut()
@@ -343,7 +337,7 @@ impl ParseState {
                     sec.heading_capturing = false;
                 }
             }
-            "div" => {
+            "div"
                 if self.current_section.is_some()
                     && self.stack.iter().rev().skip(1).any(|t| t == "body")
                     && !self
@@ -352,26 +346,21 @@ impl ParseState {
                         .rev()
                         .skip(1)
                         .take_while(|t| *t != "body")
-                        .any(|t| t == "div")
-                {
-                    self.finalize_section();
-                }
+                        .any(|t| t == "div") =>
+            {
+                self.finalize_section();
             }
             "body" => {
                 self.finalize_section();
                 self.in_body = false;
             }
-            "label" => {
-                if self.figure_label_capturing {
-                    self.pending_figure_label = Some(self.figure_label_buf.trim().to_string());
-                    self.figure_label_capturing = false;
-                }
+            "label" if self.figure_label_capturing => {
+                self.pending_figure_label = Some(self.figure_label_buf.trim().to_string());
+                self.figure_label_capturing = false;
             }
-            "figDesc" => {
-                if self.figure_caption_capturing {
-                    self.pending_figure_caption = Some(self.figure_caption_buf.trim().to_string());
-                    self.figure_caption_capturing = false;
-                }
+            "figDesc" if self.figure_caption_capturing => {
+                self.pending_figure_caption = Some(self.figure_caption_buf.trim().to_string());
+                self.figure_caption_capturing = false;
             }
             "figure" => {
                 if self.in_figure {

@@ -631,10 +631,8 @@ impl Config {
                         }
                     };
                 }
-                "PAPERBRIDGE_GROBID_IMAGE" => {
-                    if !value.trim().is_empty() {
-                        self.grobid_image = value.to_string();
-                    }
+                "PAPERBRIDGE_GROBID_IMAGE" if !value.trim().is_empty() => {
+                    self.grobid_image = value.to_string();
                 }
                 _ => {}
             }
