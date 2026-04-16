@@ -1,8 +1,7 @@
 use clap::{CommandFactory, Parser};
 use paperbridge::cli::{
     Cli, CollectionAction, Command, ConfigAction, ItemAction, LibraryAction, PaperAction,
-    PapersAction,
-    SnippetTarget,
+    PapersAction, SnippetTarget,
 };
 use paperbridge::config::Config;
 use paperbridge::external::SearchOptions;
@@ -91,6 +90,9 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
             action: ConfigAction::Validate,
         }) => {
             println!("Config valid.\n\n{}", config.display_safe());
+        }
+        Some(Command::Skill) => {
+            println!("{}", paperbridge::server::SKILL_MD);
         }
         Some(Command::Status) => handle_status(config).await?,
         Some(Command::Library { action }) => match action {
@@ -529,11 +531,9 @@ fn build_service(config: Config) -> paperbridge::Result<PaperbridgeService> {
     };
     let paper_search = paperbridge::external::PaperSearch::with_keys_struct(keys);
     let backend = build_backend(config)?;
-    Ok(
-        PaperbridgeService::with_paper_search(backend, paper_search)
-            .with_unpaywall(unpaywall_email)
-            .with_paper_config(paper_config),
-    )
+    Ok(PaperbridgeService::with_paper_search(backend, paper_search)
+        .with_unpaywall(unpaywall_email)
+        .with_paper_config(paper_config))
 }
 
 async fn run_stdio(config: Config) -> paperbridge::Result<()> {
@@ -734,7 +734,11 @@ async fn handle_config_init(force: bool, interactive: bool) -> paperbridge::Resu
     cfg.log_level = prompt_with_default("Log level", &cfg.log_level)?;
 
     println!("\nGROBID provides section-aware paper parsing. It is optional; leave blank to skip.");
-    let grobid_default = if cfg.grobid_url.is_some() { "<set>" } else { "" };
+    let grobid_default = if cfg.grobid_url.is_some() {
+        "<set>"
+    } else {
+        ""
+    };
     let grobid_url = prompt_with_default(
         "GROBID URL (e.g. http://localhost:8070; blank to disable)",
         grobid_default,
@@ -749,7 +753,11 @@ async fn handle_config_init(force: bool, interactive: bool) -> paperbridge::Resu
     }
 
     if cfg.grobid_url.is_none() {
-        let auto_default = if cfg.grobid_auto_spawn { "true" } else { "false" };
+        let auto_default = if cfg.grobid_auto_spawn {
+            "true"
+        } else {
+            "false"
+        };
         let auto = prompt_with_default(
             "Auto-spawn local GROBID via docker when needed? (true/false)",
             auto_default,
@@ -757,8 +765,7 @@ async fn handle_config_init(force: bool, interactive: bool) -> paperbridge::Resu
         cfg.set_value("grobid_auto_spawn", auto.trim())?;
 
         if cfg.grobid_auto_spawn {
-            cfg.grobid_image =
-                prompt_with_default("GROBID docker image", &cfg.grobid_image)?;
+            cfg.grobid_image = prompt_with_default("GROBID docker image", &cfg.grobid_image)?;
         }
     }
 

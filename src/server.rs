@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 
-const SKILL_MD: &str = include_str!("../docs/skill.md");
+pub const SKILL_MD: &str = include_str!("../docs/skill.md");
 const SKILL_PROMPT_NAME: &str = "paperbridge_skill";
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]

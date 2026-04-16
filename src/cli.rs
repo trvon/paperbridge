@@ -63,6 +63,9 @@ pub enum Command {
         action: PaperAction,
     },
 
+    /// Print the agent operating guide (same content served over MCP as the `paperbridge_skill` prompt)
+    Skill,
+
     // ---------- Hidden legacy aliases (removal targeted for 0.4.0) ----------
     #[command(
         hide = true,

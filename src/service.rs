@@ -197,12 +197,13 @@ impl PaperbridgeService {
         attachment_key: Option<&str>,
     ) -> Result<PaperStructure> {
         let item = self.backend.get_item(item_key).await?;
-        let selected_attachment = pdf::select_attachment_for_reading(&item.attachments, attachment_key)
-            .ok_or_else(|| {
-                ZoteroMcpError::InvalidInput(format!(
-                    "no attachments available for item '{item_key}'"
-                ))
-            })?;
+        let selected_attachment = pdf::select_attachment_for_reading(
+            &item.attachments,
+            attachment_key,
+        )
+        .ok_or_else(|| {
+            ZoteroMcpError::InvalidInput(format!("no attachments available for item '{item_key}'"))
+        })?;
 
         let cache_key: PaperCacheKey = (
             item_key.to_string(),
@@ -263,7 +264,8 @@ impl PaperbridgeService {
             }
             _ => {
                 return Err(ZoteroMcpError::InvalidInput(
-                    "GROBID not configured (grobid_url unset and grobid_auto_spawn=false)".to_string(),
+                    "GROBID not configured (grobid_url unset and grobid_auto_spawn=false)"
+                        .to_string(),
                 ));
             }
         };
@@ -275,7 +277,10 @@ impl PaperbridgeService {
             )));
         }
 
-        debug!(item_key, attachment_key, "fetching attachment bytes for GROBID");
+        debug!(
+            item_key,
+            attachment_key, "fetching attachment bytes for GROBID"
+        );
         let bytes = self.backend.get_attachment_bytes(attachment_key).await?;
         let tei_xml = client.process_fulltext(bytes).await?;
         tei::parse_tei(item_key, attachment_key, &tei_xml)
@@ -287,9 +292,7 @@ impl PaperbridgeService {
         selector: &str,
         attachment_key: Option<&str>,
     ) -> Result<serde_json::Value> {
-        let structure = self
-            .get_paper_structure(item_key, attachment_key)
-            .await?;
+        let structure = self.get_paper_structure(item_key, attachment_key).await?;
         paper::query(&structure, selector)
     }
 

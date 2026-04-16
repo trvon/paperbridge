@@ -21,8 +21,13 @@ impl GrobidClient {
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(timeout_secs.max(10)))
             .build()
-            .map_err(|e| ZoteroMcpError::Http(format!("failed to build GROBID HTTP client: {e}")))?;
-        Ok(Self { base_url: base, http })
+            .map_err(|e| {
+                ZoteroMcpError::Http(format!("failed to build GROBID HTTP client: {e}"))
+            })?;
+        Ok(Self {
+            base_url: base,
+            http,
+        })
     }
 
     pub fn base_url(&self) -> &str {
@@ -31,7 +36,13 @@ impl GrobidClient {
 
     pub async fn is_alive(&self) -> bool {
         let url = format!("{}/api/isalive", self.base_url);
-        match self.http.get(&url).timeout(Duration::from_secs(3)).send().await {
+        match self
+            .http
+            .get(&url)
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await
+        {
             Ok(resp) => resp.status().is_success(),
             Err(err) => {
                 debug!(%url, %err, "grobid isalive probe failed");

@@ -3,15 +3,10 @@ use quick_xml::events::{BytesEnd, BytesStart, Event};
 
 use crate::error::{Result, ZoteroMcpError};
 use crate::models::{
-    PaperFigure, PaperMetadata, PaperReference, PaperSection, PaperStructure,
-    PaperStructureSource,
+    PaperFigure, PaperMetadata, PaperReference, PaperSection, PaperStructure, PaperStructureSource,
 };
 
-pub fn parse_tei(
-    item_key: &str,
-    attachment_key: &str,
-    xml: &str,
-) -> Result<PaperStructure> {
+pub fn parse_tei(item_key: &str, attachment_key: &str, xml: &str) -> Result<PaperStructure> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
 
@@ -128,18 +123,18 @@ impl ParseState {
         let name = local_name(e);
         match name.as_str() {
             "title" => {
-                let is_main = attr_eq(e, "type", "main")
-                    || attr_eq(e, "level", "a") && self.title.is_none();
+                let is_main =
+                    attr_eq(e, "type", "main") || attr_eq(e, "level", "a") && self.title.is_none();
                 if self.title.is_none() && is_main && !self.in_list_bibl {
                     self.title_capturing = true;
                     self.title_buf.clear();
                 }
                 // Ref title inside biblStruct
-                if let Some(pref) = self.current_ref.as_mut() {
-                    if pref.title.is_none() {
-                        pref.title_capturing = true;
-                        pref.title_buf.clear();
-                    }
+                if let Some(pref) = self.current_ref.as_mut()
+                    && pref.title.is_none()
+                {
+                    pref.title_capturing = true;
+                    pref.title_buf.clear();
                 }
             }
             "idno" => {
@@ -155,17 +150,17 @@ impl ParseState {
                 }
             }
             "date" => {
-                if attr_eq(e, "type", "published") || self.current_ref.is_some() {
-                    if let Some(when) = attr_value(e, "when") {
-                        let year = when.chars().take(4).collect::<String>();
-                        if year.len() == 4 && year.chars().all(|c| c.is_ascii_digit()) {
-                            if let Some(pref) = self.current_ref.as_mut() {
-                                if pref.year.is_none() {
-                                    pref.year = Some(year);
-                                }
-                            } else if self.year.is_none() {
-                                self.year = Some(year);
+                if (attr_eq(e, "type", "published") || self.current_ref.is_some())
+                    && let Some(when) = attr_value(e, "when")
+                {
+                    let year = when.chars().take(4).collect::<String>();
+                    if year.len() == 4 && year.chars().all(|c| c.is_ascii_digit()) {
+                        if let Some(pref) = self.current_ref.as_mut() {
+                            if pref.year.is_none() {
+                                pref.year = Some(year);
                             }
+                        } else if self.year.is_none() {
+                            self.year = Some(year);
                         }
                     }
                 }
@@ -258,11 +253,11 @@ impl ParseState {
                     self.title = Some(self.title_buf.trim().to_string());
                     self.title_capturing = false;
                 }
-                if let Some(pref) = self.current_ref.as_mut() {
-                    if pref.title_capturing {
-                        pref.title = Some(pref.title_buf.trim().to_string());
-                        pref.title_capturing = false;
-                    }
+                if let Some(pref) = self.current_ref.as_mut()
+                    && pref.title_capturing
+                {
+                    pref.title = Some(pref.title_buf.trim().to_string());
+                    pref.title_capturing = false;
                 }
             }
             "idno" => {
@@ -270,11 +265,11 @@ impl ParseState {
                     self.doi = Some(self.doi_buf.trim().to_string());
                     self.doi_capturing = false;
                 }
-                if let Some(pref) = self.current_ref.as_mut() {
-                    if pref.doi_capturing {
-                        pref.doi = Some(pref.doi_buf.trim().to_string());
-                        pref.doi_capturing = false;
-                    }
+                if let Some(pref) = self.current_ref.as_mut()
+                    && pref.doi_capturing
+                {
+                    pref.doi = Some(pref.doi_buf.trim().to_string());
+                    pref.doi_capturing = false;
                 }
             }
             "abstract" => {
@@ -341,17 +336,23 @@ impl ParseState {
                 }
             }
             "head" => {
-                if let Some(sec) = self.current_section.as_mut() {
-                    if sec.heading_capturing {
-                        sec.heading = Some(sec.heading_buf.trim().to_string());
-                        sec.heading_capturing = false;
-                    }
+                if let Some(sec) = self.current_section.as_mut()
+                    && sec.heading_capturing
+                {
+                    sec.heading = Some(sec.heading_buf.trim().to_string());
+                    sec.heading_capturing = false;
                 }
             }
             "div" => {
                 if self.current_section.is_some()
                     && self.stack.iter().rev().skip(1).any(|t| t == "body")
-                    && !self.stack.iter().rev().skip(1).take_while(|t| *t != "body").any(|t| t == "div")
+                    && !self
+                        .stack
+                        .iter()
+                        .rev()
+                        .skip(1)
+                        .take_while(|t| *t != "body")
+                        .any(|t| t == "div")
                 {
                     self.finalize_section();
                 }
@@ -368,8 +369,7 @@ impl ParseState {
             }
             "figDesc" => {
                 if self.figure_caption_capturing {
-                    self.pending_figure_caption =
-                        Some(self.figure_caption_buf.trim().to_string());
+                    self.pending_figure_caption = Some(self.figure_caption_buf.trim().to_string());
                     self.figure_caption_capturing = false;
                 }
             }
@@ -379,10 +379,7 @@ impl ParseState {
                     self.figures.push(PaperFigure {
                         id,
                         label: self.pending_figure_label.take(),
-                        caption: self
-                            .pending_figure_caption
-                            .take()
-                            .unwrap_or_default(),
+                        caption: self.pending_figure_caption.take().unwrap_or_default(),
                     });
                 }
                 self.in_figure = false;
@@ -489,18 +486,16 @@ fn attr_value(e: &BytesStart<'_>, key: &str) -> Option<String> {
 }
 
 fn attr_eq(e: &BytesStart<'_>, key: &str, value: &str) -> bool {
-    attr_value(e, key).map(|v| v.eq_ignore_ascii_case(value)).unwrap_or(false)
+    attr_value(e, key)
+        .map(|v| v.eq_ignore_ascii_case(value))
+        .unwrap_or(false)
 }
 
 fn collapse_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn build_structure(
-    item_key: &str,
-    attachment_key: &str,
-    state: ParseState,
-) -> PaperStructure {
+fn build_structure(item_key: &str, attachment_key: &str, state: ParseState) -> PaperStructure {
     let metadata = PaperMetadata {
         title: state.title.filter(|s| !s.is_empty()),
         authors: state.authors,
@@ -588,12 +583,13 @@ mod tests {
         );
         assert_eq!(s.metadata.doi.as_deref(), Some("10.1234/xyz"));
         assert_eq!(s.metadata.year.as_deref(), Some("2023"));
-        assert!(s
-            .metadata
-            .abstract_note
-            .as_deref()
-            .unwrap()
-            .contains("This is the abstract."));
+        assert!(
+            s.metadata
+                .abstract_note
+                .as_deref()
+                .unwrap()
+                .contains("This is the abstract.")
+        );
         assert_eq!(s.sections.len(), 2);
         assert_eq!(s.sections[0].heading, "Introduction");
         assert_eq!(s.sections[0].level, 1);

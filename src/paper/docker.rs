@@ -18,14 +18,7 @@ pub async fn ensure_grobid_ready(image: &str, port: u16) -> Result<String> {
 
     debug!(image, port, "spawning GROBID container");
     let output = Command::new("docker")
-        .args([
-            "run",
-            "-d",
-            "--rm",
-            "-p",
-            &format!("{port}:8070"),
-            image,
-        ])
+        .args(["run", "-d", "--rm", "-p", &format!("{port}:8070"), image])
         .output()
         .await
         .map_err(|e| {

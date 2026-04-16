@@ -1,6 +1,5 @@
 use crate::models::{
-    FulltextContent, ItemDetail, PaperMetadata, PaperSection, PaperStructure,
-    PaperStructureSource,
+    FulltextContent, ItemDetail, PaperMetadata, PaperSection, PaperStructure, PaperStructureSource,
 };
 
 pub fn build(item: &ItemDetail, fulltext: &FulltextContent) -> PaperStructure {
