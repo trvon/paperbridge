@@ -51,7 +51,7 @@ pub enum Command {
         action: CollectionAction,
     },
 
-    /// Search external paper indexes (arXiv, HuggingFace, Semantic Scholar, Crossref) and resolve DOIs
+    /// Search external paper indexes and resolve DOIs
     Papers {
         #[command(subcommand)]
         action: PapersAction,
@@ -364,7 +364,7 @@ pub enum CollectionAction {
 
 #[derive(Debug, Subcommand)]
 pub enum PapersAction {
-    /// Search external paper indexes (arXiv, HuggingFace Papers, Semantic Scholar, Crossref)
+    /// Search external paper indexes (arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed, HuggingFace Papers, Semantic Scholar, CORE, NASA ADS)
     Search {
         /// Free-text search query
         #[arg(long)]

@@ -214,7 +214,7 @@ pub struct SearchPapersParams {
     pub limit_per_source: Option<u32>,
 
     #[schemars(
-        description = "Optional scoping to specific sources; defaults to all (arxiv, hugging_face, semantic_scholar, crossref)"
+        description = "Optional scoping to specific sources; defaults to all enabled sources (arxiv, crossref, openalex, europe_pmc, dblp, openreview, pubmed, hugging_face, semantic_scholar, core, ads)"
     )]
     pub sources: Option<Vec<PaperSource>>,
 
@@ -593,7 +593,7 @@ impl PaperbridgeServer {
 
     #[tool(
         name = "search_papers",
-        description = "Search external paper sources (arXiv, HuggingFace, Semantic Scholar, Crossref) in parallel and return merged, deduped hits"
+        description = "Search external paper sources (arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed, HuggingFace, Semantic Scholar, CORE, NASA ADS) in parallel and return merged, deduped hits"
     )]
     async fn search_papers(
         &self,

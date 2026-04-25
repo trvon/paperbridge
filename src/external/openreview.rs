@@ -1,4 +1,5 @@
 use crate::error::{Result, ZoteroMcpError};
+use crate::external::send_with_retry;
 use crate::models::{PaperHit, PaperSource};
 use reqwest::Client;
 use serde::Deserialize;
@@ -51,16 +52,20 @@ impl OpenReviewClient {
 
         let encoded = urlencoding::encode(trimmed);
         let url = format!(
-            "{}/notes/search?term={encoded}&limit={limit}&type=all",
+            "{}/notes/search?term={encoded}&limit={limit}&content=all",
             self.base_url
         );
 
-        let response = self.client.get(&url).send().await?;
+        let response = send_with_retry(self.client.get(&url)).await?;
         let status = response.status();
         if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
             return Err(ZoteroMcpError::Api {
                 status: status.as_u16(),
-                message: format!("OpenReview API error at {url}"),
+                message: format!(
+                    "OpenReview API error at {url}: {}",
+                    body.trim().chars().take(300).collect::<String>()
+                ),
             });
         }
 
@@ -230,6 +235,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/notes/search"))
             .and(query_param("term", "transformers"))
+            .and(query_param("content", "all"))
             .respond_with(ResponseTemplate::new(200).set_body_json(body))
             .expect(1)
             .mount(&server)
