@@ -66,6 +66,9 @@ pub enum Command {
     /// Print the agent operating guide (same content served over MCP as the `paperbridge_skill` prompt)
     Skill,
 
+    /// Update paperbridge to the latest version via npm
+    Update,
+
     // ---------- Hidden legacy aliases (removal targeted for 0.4.0) ----------
     #[command(
         hide = true,

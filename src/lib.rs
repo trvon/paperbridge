@@ -12,6 +12,7 @@ pub mod pdf;
 pub mod security;
 pub mod server;
 pub mod service;
+pub mod update;
 pub mod validation;
 pub mod zotero_api;
 

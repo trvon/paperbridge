@@ -94,6 +94,9 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
         Some(Command::Skill) => {
             println!("{}", paperbridge::server::SKILL_MD);
         }
+        Some(Command::Update) => {
+            paperbridge::update::run_update().await?;
+        }
         Some(Command::Status) => handle_status(config).await?,
         Some(Command::Library { action }) => match action {
             LibraryAction::Query {
@@ -304,8 +307,14 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
 // ---------- Shared handlers (used by canonical + legacy dispatch arms) ----------
 
 async fn handle_status(config: Config) -> paperbridge::Result<()> {
+    let update_check_enabled = config.update_check_enabled;
     let service = build_service(config)?;
-    print_json(&service.backend_info())
+    print_json(&service.backend_info())?;
+    if update_check_enabled {
+        let info = paperbridge::update::check_for_update().await;
+        paperbridge::update::print_nag(info.as_ref());
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -101,6 +101,7 @@ pub struct Config {
     pub grobid_timeout_secs: u64,
     pub grobid_auto_spawn: bool,
     pub grobid_image: String,
+    pub update_check_enabled: bool,
 }
 
 impl Default for Config {
@@ -125,6 +126,7 @@ impl Default for Config {
             grobid_timeout_secs: 120,
             grobid_auto_spawn: false,
             grobid_image: "lfoppiano/grobid:0.8.1".to_string(),
+            update_check_enabled: true,
         }
     }
 }
@@ -152,6 +154,7 @@ struct PartialConfig {
     grobid_timeout_secs: Option<u64>,
     grobid_auto_spawn: Option<bool>,
     grobid_image: Option<String>,
+    update_check_enabled: Option<bool>,
 }
 
 impl Config {
@@ -234,7 +237,7 @@ impl Config {
         };
         let plain = |opt: &Option<String>| opt.clone().unwrap_or_else(|| "<unset>".to_string());
         format!(
-            "backend_mode = \"{}\"\ncloud_api_base = \"{}\"\nlocal_api_base = \"{}\"\napi_key = {}\nlibrary_type = \"{}\"\nuser_id = {}\ngroup_id = {}\ntimeout_secs = {}\nlog_level = \"{}\"\nhf_token = {}\nsemantic_scholar_api_key = {}\ncore_api_key = {}\nads_api_token = {}\nncbi_api_key = {}\nunpaywall_email = {}\ngrobid_url = {}\ngrobid_timeout_secs = {}\ngrobid_auto_spawn = {}\ngrobid_image = \"{}\"",
+            "backend_mode = \"{}\"\ncloud_api_base = \"{}\"\nlocal_api_base = \"{}\"\napi_key = {}\nlibrary_type = \"{}\"\nuser_id = {}\ngroup_id = {}\ntimeout_secs = {}\nlog_level = \"{}\"\nhf_token = {}\nsemantic_scholar_api_key = {}\ncore_api_key = {}\nads_api_token = {}\nncbi_api_key = {}\nunpaywall_email = {}\ngrobid_url = {}\ngrobid_timeout_secs = {}\ngrobid_auto_spawn = {}\ngrobid_image = \"{}\"\nupdate_check_enabled = {}",
             self.backend_mode.as_str(),
             self.cloud_api_base,
             self.local_api_base,
@@ -258,6 +261,7 @@ impl Config {
             self.grobid_timeout_secs,
             self.grobid_auto_spawn,
             self.grobid_image,
+            self.update_check_enabled,
         )
     }
 
@@ -349,6 +353,7 @@ impl Config {
             "grobid_timeout_secs" => Some(self.grobid_timeout_secs.to_string()),
             "grobid_auto_spawn" => Some(self.grobid_auto_spawn.to_string()),
             "grobid_image" => Some(self.grobid_image.clone()),
+            "update_check_enabled" => Some(self.update_check_enabled.to_string()),
             _ => None,
         }
     }
@@ -449,9 +454,20 @@ impl Config {
                 }
                 self.grobid_image = v.to_string();
             }
+            "update_check_enabled" => {
+                self.update_check_enabled = match v.to_ascii_lowercase().as_str() {
+                    "true" | "1" | "yes" | "on" => true,
+                    "false" | "0" | "no" | "off" => false,
+                    other => {
+                        return Err(ZoteroMcpError::InvalidInput(format!(
+                            "update_check_enabled must be a boolean, got '{other}'"
+                        )));
+                    }
+                };
+            }
             _ => {
                 return Err(ZoteroMcpError::InvalidInput(format!(
-                    "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key, core_api_key, ads_api_token, ncbi_api_key, unpaywall_email, grobid_url, grobid_timeout_secs, grobid_auto_spawn, grobid_image"
+                    "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key, core_api_key, ads_api_token, ncbi_api_key, unpaywall_email, grobid_url, grobid_timeout_secs, grobid_auto_spawn, grobid_image, update_check_enabled"
                 )));
             }
         }
@@ -518,6 +534,9 @@ impl Config {
         }
         if let Some(v) = partial.grobid_image {
             self.grobid_image = v;
+        }
+        if let Some(v) = partial.update_check_enabled {
+            self.update_check_enabled = v;
         }
     }
 
@@ -633,6 +652,17 @@ impl Config {
                 }
                 "PAPERBRIDGE_GROBID_IMAGE" if !value.trim().is_empty() => {
                     self.grobid_image = value.to_string();
+                }
+                "PAPERBRIDGE_UPDATE_CHECK" => {
+                    self.update_check_enabled = match value.trim().to_ascii_lowercase().as_str() {
+                        "true" | "1" | "yes" | "on" => true,
+                        "false" | "0" | "no" | "off" => false,
+                        other => {
+                            return Err(ZoteroMcpError::Config(format!(
+                                "Invalid PAPERBRIDGE_UPDATE_CHECK '{other}'"
+                            )));
+                        }
+                    };
                 }
                 _ => {}
             }
