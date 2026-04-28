@@ -5,5 +5,6 @@ library_type = "user" # or "group"
 user_id = 123456
 # group_id = 987654
 # api_key = "zotero-api-key"
+# scholarapi_key = "sch_xxxxxxxxx"
 timeout_secs = 20
 log_level = "info"

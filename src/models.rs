@@ -292,6 +292,13 @@ pub enum PaperSource {
     Ads,
     #[value(name = "pubmed", alias = "pm")]
     Pubmed,
+    #[value(
+        name = "scholarapi",
+        alias = "scholar_api",
+        alias = "scholar",
+        alias = "scolarapi"
+    )]
+    ScholarApi,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]

@@ -1,6 +1,6 @@
 ---
 name: paperbridge
-description: Use when a task involves Zotero (search, collections, items, PDFs, full-text), DOI/Crossref resolution, or searching external paper sources (arXiv, HuggingFace Papers, Semantic Scholar, OpenAlex, Europe PMC, DBLP, OpenReview, CORE, NASA ADS, PubMed). Provides both a CLI (`paperbridge ...`) and an MCP server (`paperbridge serve`) that expose the same capabilities. Prefer the MCP tools when available in the host; fall back to CLI invocation otherwise.
+description: Use when a task involves Zotero (search, collections, items, PDFs, full-text), DOI/Crossref resolution, or searching external paper sources (arXiv, HuggingFace Papers, Semantic Scholar, OpenAlex, Europe PMC, DBLP, OpenReview, CORE, NASA ADS, PubMed, ScholarAPI). Provides both a CLI (`paperbridge ...`) and an MCP server (`paperbridge serve`) that expose the same capabilities. Prefer the MCP tools when available in the host; fall back to CLI invocation otherwise.
 ---
 
 # paperbridge
@@ -13,7 +13,7 @@ description: Use when a task involves Zotero (search, collections, items, PDFs, 
 
 - User references Zotero library, collections, tags, attachments, or wants to pull full-text from their library.
 - User provides a DOI and needs structured metadata (title, authors, year, journal, abstract).
-- User asks to find papers on a topic across arXiv / HuggingFace / Semantic Scholar / Crossref / OpenAlex / Europe PMC / DBLP / OpenReview / CORE / NASA ADS / PubMed.
+- User asks to find papers on a topic across arXiv / HuggingFace / Semantic Scholar / Crossref / OpenAlex / Europe PMC / DBLP / OpenReview / CORE / NASA ADS / PubMed / ScholarAPI.
 - User wants to validate or create/update Zotero items from JSON payloads.
 
 ## Modes
@@ -77,7 +77,7 @@ paperbridge paper query --key ABCD1234 --selector "metadata.doi"
 - **Precedence:** if `grobid_url` is set, it wins — Docker auto-spawn is never attempted. To use auto-spawn, leave `grobid_url` unset and set `grobid_auto_spawn=true`. See [docs/structured-paper.md](structured-paper.md) for the full flow, timing, and troubleshooting.
 
 ### Search external paper sources
-Sources run in parallel; failures/timeouts per source are non-fatal. Results dedupe by DOI → arXiv ID → PMID → normalized title+first-author. `--sources` is parse-validated (invalid values fail before any network call).
+Sources run in parallel; failures/timeouts per source are non-fatal and log only at `debug` level. Results dedupe by DOI → arXiv ID → PMID → normalized title+first-author. `--sources` is parse-validated (invalid values fail before any network call).
 
 ```bash
 paperbridge papers search --q "vision transformers" --limit 5
@@ -86,20 +86,21 @@ paperbridge papers search --q "CRISPR Cas9" --sources europe_pmc,pubmed
 paperbridge papers search --q "graph neural networks" --sources dblp,openreview
 ```
 
-Available source values for `--sources`: `arxiv`, `crossref`, `openalex` (alias `oa`), `europe_pmc` (alias `epmc`), `dblp`, `openreview` (alias `or`), `pubmed` (alias `pm`), `hugging_face` (alias `hf`), `semantic_scholar` (alias `s2`), `core`, `ads` (alias `nasa_ads`).
+Available source values for `--sources`: `arxiv`, `crossref`, `openalex` (alias `oa`), `europe_pmc` (alias `epmc`), `dblp`, `openreview` (alias `or`), `pubmed` (alias `pm`), `hugging_face` (alias `hf`), `semantic_scholar` (alias `s2`), `core`, `ads` (alias `nasa_ads`), `scholarapi` (alias `scholar`).
 
 **Always on (no key needed):** arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed. PubMed and OpenAlex will upgrade rate limits / polite-pool priority if `ncbi_api_key` / `unpaywall_email` is set.
 
-**Key-gated (silently skipped when unconfigured):** HuggingFace, Semantic Scholar, CORE, NASA ADS.
+**Key-gated (silently skipped when unconfigured):** HuggingFace, Semantic Scholar, CORE, NASA ADS, ScholarAPI.
 
 ```bash
 paperbridge config set hf_token <token>
 paperbridge config set semantic_scholar_api_key <key>
 paperbridge config set core_api_key <key>
 paperbridge config set ads_api_token <token>
+paperbridge config set scholarapi_key <key>
 paperbridge config set ncbi_api_key <key>         # optional: upgrades PubMed 3→10 req/s
 paperbridge config set unpaywall_email <email>    # enables OA-PDF enrichment on resolve-doi
-# or env: HF_TOKEN, SEMANTIC_SCHOLAR_API_KEY, CORE_API_KEY, ADS_API_TOKEN, NCBI_API_KEY, UNPAYWALL_EMAIL
+# or env: HF_TOKEN, SEMANTIC_SCHOLAR_API_KEY, CORE_API_KEY, ADS_API_TOKEN, SCHOLARAPI_KEY, NCBI_API_KEY, UNPAYWALL_EMAIL
 ```
 
 ### Create / update / delete Zotero items & collections
@@ -132,7 +133,7 @@ paperbridge config snippet --target opencode
 | `group_id` | numeric group ID (optional, for group libraries) |
 | `library_type` | `user` or `group` |
 | `cloud_api_base` / `local_api_base` | override default endpoints |
-| `hf_token`, `semantic_scholar_api_key`, `core_api_key`, `ads_api_token` | gate external sources (silent skip when unset) |
+| `hf_token`, `semantic_scholar_api_key`, `core_api_key`, `ads_api_token`, `scholarapi_key` | gate external sources (silent skip when unset) |
 | `ncbi_api_key` | optional PubMed rate-limit upgrade (3→10 req/s); PubMed still runs without it |
 | `unpaywall_email` | enables OA-PDF enrichment on `papers resolve-doi`; also sent as OpenAlex `mailto` polite-pool hint |
 | `grobid_url` | remote or local GROBID endpoint (e.g. `http://localhost:8070`); if set, auto-spawn is disabled |

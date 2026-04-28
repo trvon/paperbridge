@@ -367,7 +367,7 @@ pub enum CollectionAction {
 
 #[derive(Debug, Subcommand)]
 pub enum PapersAction {
-    /// Search external paper indexes (arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed, HuggingFace Papers, Semantic Scholar, CORE, NASA ADS)
+    /// Search external paper indexes (arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed, HuggingFace Papers, Semantic Scholar, CORE, NASA ADS, ScholarAPI)
     Search {
         /// Free-text search query
         #[arg(long)]

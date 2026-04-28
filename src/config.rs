@@ -95,6 +95,8 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ncbi_api_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub scholarapi_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub unpaywall_email: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grobid_url: Option<String>,
@@ -121,6 +123,7 @@ impl Default for Config {
             core_api_key: None,
             ads_api_token: None,
             ncbi_api_key: None,
+            scholarapi_key: None,
             unpaywall_email: None,
             grobid_url: None,
             grobid_timeout_secs: 120,
@@ -149,6 +152,7 @@ struct PartialConfig {
     core_api_key: Option<String>,
     ads_api_token: Option<String>,
     ncbi_api_key: Option<String>,
+    scholarapi_key: Option<String>,
     unpaywall_email: Option<String>,
     grobid_url: Option<String>,
     grobid_timeout_secs: Option<u64>,
@@ -237,7 +241,7 @@ impl Config {
         };
         let plain = |opt: &Option<String>| opt.clone().unwrap_or_else(|| "<unset>".to_string());
         format!(
-            "backend_mode = \"{}\"\ncloud_api_base = \"{}\"\nlocal_api_base = \"{}\"\napi_key = {}\nlibrary_type = \"{}\"\nuser_id = {}\ngroup_id = {}\ntimeout_secs = {}\nlog_level = \"{}\"\nhf_token = {}\nsemantic_scholar_api_key = {}\ncore_api_key = {}\nads_api_token = {}\nncbi_api_key = {}\nunpaywall_email = {}\ngrobid_url = {}\ngrobid_timeout_secs = {}\ngrobid_auto_spawn = {}\ngrobid_image = \"{}\"\nupdate_check_enabled = {}",
+            "backend_mode = \"{}\"\ncloud_api_base = \"{}\"\nlocal_api_base = \"{}\"\napi_key = {}\nlibrary_type = \"{}\"\nuser_id = {}\ngroup_id = {}\ntimeout_secs = {}\nlog_level = \"{}\"\nhf_token = {}\nsemantic_scholar_api_key = {}\ncore_api_key = {}\nads_api_token = {}\nncbi_api_key = {}\nscholarapi_key = {}\nunpaywall_email = {}\ngrobid_url = {}\ngrobid_timeout_secs = {}\ngrobid_auto_spawn = {}\ngrobid_image = \"{}\"\nupdate_check_enabled = {}",
             self.backend_mode.as_str(),
             self.cloud_api_base,
             self.local_api_base,
@@ -256,6 +260,7 @@ impl Config {
             mask(&self.core_api_key),
             mask(&self.ads_api_token),
             mask(&self.ncbi_api_key),
+            mask(&self.scholarapi_key),
             plain(&self.unpaywall_email),
             plain(&self.grobid_url),
             self.grobid_timeout_secs,
@@ -337,6 +342,11 @@ impl Config {
             ),
             "ncbi_api_key" => Some(
                 self.ncbi_api_key
+                    .clone()
+                    .unwrap_or_else(|| "<unset>".to_string()),
+            ),
+            "scholarapi_key" => Some(
+                self.scholarapi_key
                     .clone()
                     .unwrap_or_else(|| "<unset>".to_string()),
             ),
@@ -422,6 +432,9 @@ impl Config {
             "ncbi_api_key" => {
                 self.ncbi_api_key = optional_string(v);
             }
+            "scholarapi_key" => {
+                self.scholarapi_key = optional_string(v);
+            }
             "unpaywall_email" => {
                 self.unpaywall_email = optional_string(v);
             }
@@ -467,7 +480,7 @@ impl Config {
             }
             _ => {
                 return Err(ZoteroMcpError::InvalidInput(format!(
-                    "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key, core_api_key, ads_api_token, ncbi_api_key, unpaywall_email, grobid_url, grobid_timeout_secs, grobid_auto_spawn, grobid_image, update_check_enabled"
+                    "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key, core_api_key, ads_api_token, ncbi_api_key, scholarapi_key, unpaywall_email, grobid_url, grobid_timeout_secs, grobid_auto_spawn, grobid_image, update_check_enabled"
                 )));
             }
         }
@@ -519,6 +532,9 @@ impl Config {
         }
         if let Some(v) = partial.ncbi_api_key {
             self.ncbi_api_key = Some(v);
+        }
+        if let Some(v) = partial.scholarapi_key {
+            self.scholarapi_key = Some(v);
         }
         if let Some(v) = partial.unpaywall_email {
             self.unpaywall_email = Some(v);
@@ -620,6 +636,13 @@ impl Config {
                         self.ncbi_api_key = None;
                     } else {
                         self.ncbi_api_key = Some(value.to_string());
+                    }
+                }
+                "PAPERBRIDGE_SCHOLARAPI_KEY" | "SCHOLARAPI_KEY" => {
+                    if value.trim().is_empty() {
+                        self.scholarapi_key = None;
+                    } else {
+                        self.scholarapi_key = Some(value.to_string());
                     }
                 }
                 "PAPERBRIDGE_UNPAYWALL_EMAIL" | "UNPAYWALL_EMAIL" => {

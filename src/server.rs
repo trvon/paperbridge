@@ -593,7 +593,7 @@ impl PaperbridgeServer {
 
     #[tool(
         name = "search_papers",
-        description = "Search external paper sources (arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed, HuggingFace, Semantic Scholar, CORE, NASA ADS) in parallel and return merged, deduped hits"
+        description = "Search external paper sources (arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed, HuggingFace, Semantic Scholar, CORE, NASA ADS, ScholarAPI) in parallel and return merged, deduped hits"
     )]
     async fn search_papers(
         &self,

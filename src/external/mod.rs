@@ -7,6 +7,7 @@ pub mod huggingface;
 pub mod openalex;
 pub mod openreview;
 pub mod pubmed;
+pub mod scholarapi;
 pub mod semantic_scholar;
 pub mod unpaywall;
 
@@ -19,6 +20,7 @@ pub use huggingface::HuggingFaceClient;
 pub use openalex::OpenAlexClient;
 pub use openreview::OpenReviewClient;
 pub use pubmed::PubmedClient;
+pub use scholarapi::ScholarApiClient;
 pub use semantic_scholar::SemanticScholarClient;
 pub use unpaywall::UnpaywallClient;
 
@@ -74,6 +76,7 @@ pub struct PaperSearch {
     core: Option<CoreClient>,
     ads: Option<AdsClient>,
     pubmed: PubmedClient,
+    scholarapi: Option<ScholarApiClient>,
 }
 
 #[derive(Default, Clone)]
@@ -83,6 +86,7 @@ pub struct PaperSearchKeys {
     pub core_api_key: Option<String>,
     pub ads_api_token: Option<String>,
     pub ncbi_api_key: Option<String>,
+    pub scholarapi_key: Option<String>,
     pub unpaywall_email: Option<String>,
 }
 
@@ -114,6 +118,7 @@ impl PaperSearch {
             core: keys.core_api_key.map(|k| CoreClient::new(None, k)),
             ads: keys.ads_api_token.map(|k| AdsClient::new(None, k)),
             pubmed: PubmedClient::new(None, keys.ncbi_api_key),
+            scholarapi: keys.scholarapi_key.map(|k| ScholarApiClient::new(None, k)),
         }
     }
 
@@ -135,6 +140,7 @@ impl PaperSearch {
             core: None,
             ads: None,
             pubmed: PubmedClient::new(None, None),
+            scholarapi: None,
         }
     }
 
@@ -293,6 +299,27 @@ impl PaperSearch {
             )
             .boxed(),
         );
+        futs.push(
+            run_source(
+                PaperSource::ScholarApi,
+                opts.enabled(PaperSource::ScholarApi),
+                timeout_duration,
+                async {
+                    match self.scholarapi.as_ref() {
+                        Some(c) => c.search(&query, limit).await,
+                        None => {
+                            tracing::debug!(
+                                source = ?PaperSource::ScholarApi,
+                                reason = "no scholarapi_key/SCHOLARAPI_KEY configured",
+                                "source skipped"
+                            );
+                            Ok(Vec::new())
+                        }
+                    }
+                },
+            )
+            .boxed(),
+        );
 
         let results = futures::future::join_all(futs).await;
         let merged: Vec<PaperHit> = results.into_iter().flatten().collect();
@@ -325,15 +352,15 @@ where
             status: 429,
             message,
         })) => {
-            tracing::warn!(?source, status = 429, reason = "rate_limited", %message, "source rate-limited after retry");
+            tracing::debug!(?source, status = 429, reason = "rate_limited", %message, "source rate-limited after retry");
             Vec::new()
         }
         Ok(Err(e)) => {
-            tracing::warn!(?source, error = %e, "source search failed");
+            tracing::debug!(?source, error = %e, "source search failed");
             Vec::new()
         }
         Err(_) => {
-            tracing::warn!(?source, "source search timed out");
+            tracing::debug!(?source, "source search timed out");
             Vec::new()
         }
     }

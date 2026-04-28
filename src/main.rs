@@ -529,6 +529,7 @@ fn build_service(config: Config) -> paperbridge::Result<PaperbridgeService> {
         core_api_key: config.core_api_key.clone(),
         ads_api_token: config.ads_api_token.clone(),
         ncbi_api_key: config.ncbi_api_key.clone(),
+        scholarapi_key: config.scholarapi_key.clone(),
         unpaywall_email: config.unpaywall_email.clone(),
     };
     let unpaywall_email = config.unpaywall_email.clone();
@@ -794,6 +795,7 @@ const SENSITIVE_CONFIG_KEYS: &[&str] = &[
     "core_api_key",
     "ads_api_token",
     "ncbi_api_key",
+    "scholarapi_key",
 ];
 
 fn handle_config_get(key: Option<&str>, show_secret: bool) -> paperbridge::Result<()> {
@@ -801,7 +803,7 @@ fn handle_config_get(key: Option<&str>, show_secret: bool) -> paperbridge::Resul
     if let Some(key) = key {
         let value = cfg.get_value(key).ok_or_else(|| {
             paperbridge::ZoteroMcpError::InvalidInput(format!(
-                "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key"
+                "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key, core_api_key, ads_api_token, ncbi_api_key, scholarapi_key"
             ))
         })?;
         if SENSITIVE_CONFIG_KEYS.contains(&key) && !show_secret {
