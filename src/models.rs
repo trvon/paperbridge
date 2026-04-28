@@ -274,23 +274,30 @@ pub struct CrossrefWork {
 pub enum PaperSource {
     Arxiv,
     #[value(name = "hugging_face", alias = "huggingface", alias = "hf")]
+    #[serde(alias = "huggingface", alias = "hf")]
     HuggingFace,
     #[value(name = "semantic_scholar", alias = "semanticscholar", alias = "s2")]
+    #[serde(alias = "semanticscholar", alias = "s2")]
     SemanticScholar,
     Crossref,
     #[value(name = "openalex", alias = "open_alex", alias = "oa")]
+    #[serde(alias = "openalex", alias = "oa")]
     OpenAlex,
     #[value(name = "europe_pmc", alias = "europepmc", alias = "epmc")]
+    #[serde(alias = "europepmc", alias = "epmc")]
     EuropePmc,
     #[value(name = "dblp")]
     Dblp,
     #[value(name = "openreview", alias = "open_review", alias = "or")]
+    #[serde(alias = "openreview", alias = "or")]
     OpenReview,
     #[value(name = "core")]
     Core,
     #[value(name = "ads", alias = "nasa_ads", alias = "nasaads")]
+    #[serde(alias = "nasa_ads", alias = "nasaads")]
     Ads,
     #[value(name = "pubmed", alias = "pm")]
+    #[serde(alias = "pm")]
     Pubmed,
     #[value(
         name = "scholarapi",
@@ -298,6 +305,7 @@ pub enum PaperSource {
         alias = "scholar",
         alias = "scolarapi"
     )]
+    #[serde(alias = "scholarapi", alias = "scholar", alias = "scolarapi")]
     ScholarApi,
 }
 
@@ -425,6 +433,59 @@ mod tests {
             .normalized()
             .limit,
             100
+        );
+    }
+
+    #[test]
+    fn paper_source_deserializes_advertised_aliases() {
+        fn parse(s: &str) -> PaperSource {
+            serde_json::from_str(&format!("\"{s}\"")).expect("valid PaperSource alias")
+        }
+
+        assert_eq!(parse("openalex"), PaperSource::OpenAlex);
+        assert_eq!(parse("open_alex"), PaperSource::OpenAlex);
+        assert_eq!(parse("oa"), PaperSource::OpenAlex);
+
+        assert_eq!(parse("openreview"), PaperSource::OpenReview);
+        assert_eq!(parse("open_review"), PaperSource::OpenReview);
+        assert_eq!(parse("or"), PaperSource::OpenReview);
+
+        assert_eq!(parse("scholarapi"), PaperSource::ScholarApi);
+        assert_eq!(parse("scholar_api"), PaperSource::ScholarApi);
+        assert_eq!(parse("scholar"), PaperSource::ScholarApi);
+
+        assert_eq!(parse("hugging_face"), PaperSource::HuggingFace);
+        assert_eq!(parse("huggingface"), PaperSource::HuggingFace);
+        assert_eq!(parse("hf"), PaperSource::HuggingFace);
+
+        assert_eq!(parse("semantic_scholar"), PaperSource::SemanticScholar);
+        assert_eq!(parse("semanticscholar"), PaperSource::SemanticScholar);
+        assert_eq!(parse("s2"), PaperSource::SemanticScholar);
+
+        assert_eq!(parse("europe_pmc"), PaperSource::EuropePmc);
+        assert_eq!(parse("europepmc"), PaperSource::EuropePmc);
+        assert_eq!(parse("epmc"), PaperSource::EuropePmc);
+
+        assert_eq!(parse("ads"), PaperSource::Ads);
+        assert_eq!(parse("nasa_ads"), PaperSource::Ads);
+
+        assert_eq!(parse("pubmed"), PaperSource::Pubmed);
+        assert_eq!(parse("pm"), PaperSource::Pubmed);
+    }
+
+    #[test]
+    fn paper_source_serializes_to_canonical_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&PaperSource::OpenAlex).unwrap(),
+            "\"open_alex\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PaperSource::OpenReview).unwrap(),
+            "\"open_review\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PaperSource::ScholarApi).unwrap(),
+            "\"scholar_api\""
         );
     }
 }
