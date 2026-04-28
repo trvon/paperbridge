@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.0](https://github.com/trvon/paperbridge/compare/v0.5.0...v0.6.0) (2026-04-28)
+
+
+### Features
+
+* cleaning cli commands ([f500a56](https://github.com/trvon/paperbridge/commit/f500a565ee91f542a5b881f806d3a03fe10cc9f7))
+* refinements logs in output and scholarapi add ([be3152f](https://github.com/trvon/paperbridge/commit/be3152fce2ba0c296199204b4ba5da153f7b0586))
+
+
+### Bug Fixes
+
+* fixing mcp search ([79a11f7](https://github.com/trvon/paperbridge/commit/79a11f741e8d943557a47ffc9eaab49e7a6aa8d0))
+
 ## [0.5.0](https://github.com/trvon/paperbridge/compare/v0.4.0...v0.5.0) (2026-04-25)
 
 
