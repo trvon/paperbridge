@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.0](https://github.com/trvon/paperbridge/compare/v0.4.0...v0.5.0) (2026-04-25)
+
+
+### Features
+
+* **update:** add paperbridge update and passive release nag ([8cd40f1](https://github.com/trvon/paperbridge/commit/8cd40f1972942f59082badcee01343a59c03dee7))
+
+
+### Bug Fixes
+
+* **cargo:** cargo update ([8fe8c7b](https://github.com/trvon/paperbridge/commit/8fe8c7bb5e8c50e87f1f3e7c6873bda392ac53b4))
+* **papers:** advertise all 11 sources and harden OpenReview client ([d1ffa0d](https://github.com/trvon/paperbridge/commit/d1ffa0d6039a54fd083c8e2c5bbd7d80f2b33bff))
+
 ## [0.4.0](https://github.com/trvon/paperbridge/compare/v0.3.0...v0.4.0) (2026-04-16)
 
 
