@@ -37,8 +37,8 @@ To switch: `paperbridge config set backend_mode local`.
 
 ### Search Zotero library
 ```bash
-paperbridge library query --q "diffusion models" --limit 10
-paperbridge library query --q "Karpathy" --qmode titleCreatorYear --item-type journalArticle
+paperbridge library query -q "diffusion models" --limit 10
+paperbridge library query -q "Karpathy" --qmode titleCreatorYear --item-type journalArticle
 paperbridge library collections --top-only --limit 20
 ```
 
@@ -56,7 +56,7 @@ paperbridge library read --item-key ABCD1234 --attachment-key PDF5678
 # Chunked output for context-window-aware consumers:
 paperbridge library read --item-key ABCD1234 --max-chars-per-chunk 8000
 # Or combined: search, pick a result index, then prepare it:
-paperbridge library read-search --q "sparse attention" --result-index 0 --search-limit 5
+paperbridge library read-search -q "sparse attention" --result-index 0 --search-limit 5
 ```
 
 ### Query structured paper content (agent-friendly)
@@ -80,13 +80,16 @@ paperbridge paper query --key ABCD1234 --selector "metadata.doi"
 Sources run in parallel; failures/timeouts per source are non-fatal and log only at `debug` level. Results dedupe by DOI → arXiv ID → PMID → normalized title+first-author. `--sources` is parse-validated (invalid values fail before any network call).
 
 ```bash
-paperbridge papers search --q "vision transformers" --limit 5
-paperbridge papers search --q "attention is all you need" --sources arxiv,openalex,semantic_scholar
-paperbridge papers search --q "CRISPR Cas9" --sources europe_pmc,pubmed
-paperbridge papers search --q "graph neural networks" --sources dblp,openreview
+paperbridge papers search -q "vision transformers" --limit 5
+paperbridge papers search "vision transformers" --limit 5
+paperbridge papers search -q "attention is all you need" --sources arxiv,openalex,semantic_scholar
+paperbridge papers search -q "CRISPR Cas9" --sources europe_pmc,pubmed
+paperbridge papers search -q "graph neural networks" --sources dblp,openreview
 ```
 
-Available source values for `--sources`: `arxiv`, `crossref`, `openalex` (alias `oa`), `europe_pmc` (alias `epmc`), `dblp`, `openreview` (alias `or`), `pubmed` (alias `pm`), `hugging_face` (alias `hf`), `semantic_scholar` (alias `s2`), `core`, `ads` (alias `nasa_ads`), `scholarapi` (alias `scholar`).
+`-q`, `--q`, and the positional query form are equivalent; prefer `-q` for Unix-style shorthand. `--q` remains supported for compatibility, and positional queries are convenient for quick shell/agent calls.
+
+Available source values for `--sources`: `arxiv`, `crossref`, `openalex` (alias `oa`), `europe_pmc` (alias `epmc`), `dblp`, `openreview` (alias `or`), `pubmed` (alias `pm`), `hugging_face` (alias `hf`), `semantic_scholar` (alias `s2`), `core`, `ads` (alias `nasa_ads`), `scholarapi` (aliases `scholar`, `scholar_api`, `scolarapi`).
 
 **Always on (no key needed):** arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed. PubMed and OpenAlex will upgrade rate limits / polite-pool priority if `ncbi_api_key` / `unpaywall_email` is set.
 

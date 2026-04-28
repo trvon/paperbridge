@@ -42,13 +42,13 @@ paperbridge config validate
 3. Query items:
 
 ```bash
-paperbridge query --q "machine learning" --limit 3
+paperbridge query -q "machine learning" --limit 3
 ```
 
 4. Prepare read-aloud chunks:
 
 ```bash
-paperbridge read-search --q "machine learning" --result-index 0 --max-chars-per-chunk 1200
+paperbridge read-search -q "machine learning" --result-index 0 --max-chars-per-chunk 1200
 ```
 
 ## Configuration
@@ -118,10 +118,10 @@ paperbridge config snippet --target pi
 ## CLI usage
 
 ```bash
-paperbridge query --q "graph learning" --limit 5
+paperbridge query -q "graph learning" --limit 5
 paperbridge collections --top-only
 paperbridge read --item-key ITEMA --max-chars-per-chunk 1200
-paperbridge read-search --q "graph learning" --result-index 0
+paperbridge read-search -q "graph learning" --result-index 0
 paperbridge paper structure --key ITEMA
 paperbridge paper query --key ITEMA --selector "sections[0].heading"
 paperbridge backend-info

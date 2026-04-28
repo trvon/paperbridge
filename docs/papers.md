@@ -23,13 +23,16 @@ When `unpaywall_email` is configured, `paperbridge papers resolve-doi` enriches 
 Search across arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed, HuggingFace Papers, Semantic Scholar, CORE, NASA ADS, and ScholarAPI in one call. Sources run in parallel; failures and timeouts per source are non-fatal and log only at `debug` level.
 
 ```bash
-paperbridge papers search --q "vision transformers" --limit 5
-paperbridge papers search --q "attention is all you need" --sources arxiv,openalex,semantic_scholar
-paperbridge papers search --q "CRISPR Cas9" --sources europe_pmc,pubmed
-paperbridge papers search --q "graph neural networks" --sources dblp,openreview
+paperbridge papers search -q "vision transformers" --limit 5
+paperbridge papers search "vision transformers" --limit 5
+paperbridge papers search -q "attention is all you need" --sources arxiv,openalex,semantic_scholar
+paperbridge papers search -q "CRISPR Cas9" --sources europe_pmc,pubmed
+paperbridge papers search -q "graph neural networks" --sources dblp,openreview
 ```
 
-Source values for `--sources`: `arxiv`, `crossref`, `openalex` (alias `oa`), `europe_pmc` (alias `epmc`), `dblp`, `openreview` (alias `or`), `pubmed` (alias `pm`), `hugging_face` (alias `hf`), `semantic_scholar` (alias `s2`), `core`, `ads` (alias `nasa_ads`), `scholarapi` (alias `scholar`).
+`-q`, `--q`, and the positional query form are equivalent; prefer `-q` for Unix-style shorthand. `--q` remains supported for compatibility.
+
+Source values for `--sources`: `arxiv`, `crossref`, `openalex` (alias `oa`), `europe_pmc` (alias `epmc`), `dblp`, `openreview` (alias `or`), `pubmed` (alias `pm`), `hugging_face` (alias `hf`), `semantic_scholar` (alias `s2`), `core`, `ads` (alias `nasa_ads`), `scholarapi` (aliases `scholar`, `scholar_api`, `scolarapi`).
 
 Results are deduplicated by DOI → arXiv ID → PMID → normalized title+first-author.
 

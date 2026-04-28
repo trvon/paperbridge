@@ -158,10 +158,20 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
         Some(Command::Papers { action }) => match action {
             PapersAction::Search {
                 q,
+                query,
                 limit,
                 sources,
                 timeout_ms,
-            } => handle_papers_search(config, q, limit, sources, timeout_ms).await?,
+            } => {
+                handle_papers_search(
+                    config,
+                    normalize_papers_query(q, query)?,
+                    limit,
+                    sources,
+                    timeout_ms,
+                )
+                .await?
+            }
             PapersAction::ResolveDoi { doi } => handle_papers_resolve_doi(config, doi).await?,
         },
 
@@ -263,12 +273,20 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
         }
         Some(Command::SearchPapers {
             q,
+            query,
             limit,
             sources,
             timeout_ms,
         }) => {
             warn!("'search-papers' is deprecated; use 'paperbridge papers search' instead");
-            handle_papers_search(config, q, limit, sources, timeout_ms).await?;
+            handle_papers_search(
+                config,
+                normalize_papers_query(q, query)?,
+                limit,
+                sources,
+                timeout_ms,
+            )
+            .await?;
         }
         Some(Command::ResolveDoi { doi }) => {
             warn!("'resolve-doi' is deprecated; use 'paperbridge papers resolve-doi' instead");
@@ -484,6 +502,24 @@ async fn handle_papers_search(
     print_json(&hits)
 }
 
+fn normalize_papers_query(
+    q: Option<String>,
+    positional_query: Option<String>,
+) -> paperbridge::Result<String> {
+    let query = q.or(positional_query).ok_or_else(|| {
+        paperbridge::ZoteroMcpError::InvalidInput(
+            "Missing search query. Use `paperbridge papers search -q \"...\"` or `paperbridge papers search \"...\"`.".to_string(),
+        )
+    })?;
+    let query = query.trim().to_string();
+    if query.is_empty() {
+        return Err(paperbridge::ZoteroMcpError::InvalidInput(
+            "Search query must not be empty.".to_string(),
+        ));
+    }
+    Ok(query)
+}
+
 async fn handle_papers_resolve_doi(config: Config, doi: String) -> paperbridge::Result<()> {
     let service = build_service(config)?;
     let work = service.resolve_doi(&doi).await?;
@@ -600,10 +636,10 @@ fn print_client_snippet(target: SnippetTarget, binary_path: Option<&str>) {
         SnippetTarget::Pi => serde_json::json!({
             "paperbridge": {
                 "commands": {
-                    "search": [bin, "library", "query", "--q", "<query>", "--limit", "5"],
+                    "search": [bin, "library", "query", "-q", "<query>", "--limit", "5"],
                     "collections": [bin, "library", "collections", "--top-only"],
                     "read_item": [bin, "library", "read", "--item-key", "<item-key>", "--max-chars-per-chunk", "1200"],
-                    "read_search_result": [bin, "library", "read-search", "--q", "<query>", "--result-index", "0", "--max-chars-per-chunk", "1200"]
+                    "read_search_result": [bin, "library", "read-search", "-q", "<query>", "--result-index", "0", "--max-chars-per-chunk", "1200"]
                 }
             }
         }),

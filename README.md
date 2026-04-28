@@ -27,7 +27,7 @@ Pre-built binaries (macOS arm64/x86_64, Linux x86_64, Windows x86_64) are publis
 paperbridge config init --interactive
 paperbridge config validate
 paperbridge status
-paperbridge library query --q "machine learning" --limit 3
+paperbridge library query -q "machine learning" --limit 3
 ```
 
 For Zotero Desktop local API mode: `paperbridge config set backend_mode local`.

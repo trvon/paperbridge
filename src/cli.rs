@@ -81,7 +81,7 @@ pub enum Command {
         after_help = "Deprecated. Use 'paperbridge library query' instead."
     )]
     Query {
-        #[arg(long)]
+        #[arg(short = 'q', long)]
         q: Option<String>,
         #[arg(long)]
         qmode: Option<String>,
@@ -126,7 +126,7 @@ pub enum Command {
         after_help = "Deprecated. Use 'paperbridge library read-search' instead."
     )]
     ReadSearch {
-        #[arg(long)]
+        #[arg(short = 'q', long)]
         q: String,
         #[arg(long)]
         qmode: Option<String>,
@@ -223,8 +223,10 @@ pub enum Command {
         after_help = "Deprecated. Use 'paperbridge papers search' instead."
     )]
     SearchPapers {
-        #[arg(long)]
-        q: String,
+        #[arg(short = 'q', long, value_name = "Q", required_unless_present = "query")]
+        q: Option<String>,
+        #[arg(value_name = "QUERY")]
+        query: Option<String>,
         #[arg(long)]
         limit: Option<u32>,
         #[arg(long, value_enum, value_delimiter = ',')]
@@ -241,7 +243,7 @@ pub enum LibraryAction {
     /// Search items in the local Zotero library and print JSON
     Query {
         /// Quick search query
-        #[arg(long)]
+        #[arg(short = 'q', long)]
         q: Option<String>,
         /// Query mode (e.g. titleCreatorYear, everything)
         #[arg(long)]
@@ -286,7 +288,7 @@ pub enum LibraryAction {
     /// Search the library then prepare the selected result for read-aloud
     ReadSearch {
         /// Search query
-        #[arg(long)]
+        #[arg(short = 'q', long)]
         q: String,
         /// Query mode (e.g. titleCreatorYear, everything)
         #[arg(long)]
@@ -370,8 +372,11 @@ pub enum PapersAction {
     /// Search external paper indexes (arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed, HuggingFace Papers, Semantic Scholar, CORE, NASA ADS, ScholarAPI)
     Search {
         /// Free-text search query
-        #[arg(long)]
-        q: String,
+        #[arg(short = 'q', long, value_name = "Q", required_unless_present = "query")]
+        q: Option<String>,
+        /// Free-text search query (positional shorthand for -q/--q)
+        #[arg(value_name = "QUERY")]
+        query: Option<String>,
         /// Max hits per source (default 10)
         #[arg(long)]
         limit: Option<u32>,
@@ -508,7 +513,7 @@ mod tests {
             "paperbridge",
             "library",
             "query",
-            "--q",
+            "-q",
             "vision transformers",
             "--limit",
             "10",
@@ -543,7 +548,7 @@ mod tests {
             "paperbridge",
             "papers",
             "search",
-            "--q",
+            "-q",
             "attention",
             "--sources",
             "arxiv,crossref",
@@ -551,10 +556,40 @@ mod tests {
         .unwrap();
         match cli.command {
             Some(Command::Papers {
-                action: PapersAction::Search { sources, .. },
+                action: PapersAction::Search { q, sources, .. },
             }) => {
+                assert_eq!(q.as_deref(), Some("attention"));
                 let s = sources.expect("sources parsed");
                 assert_eq!(s, vec![PaperSource::Arxiv, PaperSource::Crossref]);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_canonical_papers_search_accepts_positional_query() {
+        let cli = Cli::try_parse_from([
+            "paperbridge",
+            "papers",
+            "search",
+            "implicit feedback skip recommendation systems",
+            "--limit",
+            "5",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Papers {
+                action:
+                    PapersAction::Search {
+                        q, query, limit, ..
+                    },
+            }) => {
+                assert!(q.is_none());
+                assert_eq!(
+                    query.as_deref(),
+                    Some("implicit feedback skip recommendation systems")
+                );
+                assert_eq!(limit, Some(5));
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -566,7 +601,7 @@ mod tests {
             "paperbridge",
             "papers",
             "search",
-            "--q",
+            "-q",
             "x",
             "--sources",
             "bogus",
