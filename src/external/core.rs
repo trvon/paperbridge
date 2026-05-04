@@ -127,6 +127,7 @@ fn convert_work(w: RawCoreWork) -> PaperHit {
         oa_pdf_url: pdf,
         venue: w.publisher,
         citation_count: None,
+        cache: None,
     }
 }
 

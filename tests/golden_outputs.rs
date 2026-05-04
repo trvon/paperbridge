@@ -200,4 +200,42 @@ async fn golden_outputs_match_expected_json() {
         .await
         .unwrap();
     assert_golden("prepare_search_result_for_vox.json", &prepared_search);
+
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("cached-paper.txt");
+    std::fs::write(&source, "cached paper body for golden output").unwrap();
+    let api = paperbridge::paperseed_api::PaperseedApi::with_yams(
+        dir.path().join("corpus"),
+        None,
+        paperseed::yams::YamsConfig::disabled(),
+    );
+    let cached = api
+        .ingest_with_metadata(
+            &source,
+            paperseed::sources::PaperbridgeMetadata {
+                title: Some("Cached Golden Paper".to_string()),
+                doi: Some("10.5555/golden".to_string()),
+                authors: vec!["Grace Hopper".to_string()],
+                year: Some(2024),
+                venue: Some("Systems Journal".to_string()),
+                license: Some("cc-by".to_string()),
+                source_url: Some("https://example.org/golden".to_string()),
+            },
+            Some("cc-by".to_string()),
+        )
+        .unwrap();
+    let cached_service =
+        service
+            .clone()
+            .with_paperseed(paperbridge::service::PaperseedMirrorConfig {
+                corpus_root: Some(dir.path().join("corpus").display().to_string()),
+                unpaywall_email: None,
+                auto_download: false,
+                yams_enabled: false,
+            });
+    let cached_fulltext = cached_service
+        .get_pdf_text(&cached.metadata.id)
+        .await
+        .unwrap();
+    assert_golden("get_pdf_text_cached_paper.json", &cached_fulltext);
 }

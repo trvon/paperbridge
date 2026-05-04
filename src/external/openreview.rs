@@ -154,6 +154,7 @@ fn convert_note(n: RawOrNote, pdf_host: &str) -> PaperHit {
         oa_pdf_url: pdf_url,
         venue,
         citation_count: None,
+        cache: None,
     }
 }
 

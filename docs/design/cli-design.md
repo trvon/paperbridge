@@ -235,7 +235,7 @@ papers search → papers resolve-doi → item validate → item create
 | Local Zotero reads | `paperbridge library {query,collections,read,read-search}` | `query`, `collections`, `read`, `read-search` |
 | Item writes | `paperbridge item {create,update,delete,validate}` | `create-item`, `update-item`, `delete-item`, `validate-item` |
 | Collection writes | `paperbridge collection {create,update,delete}` | `create-collection`, `update-collection`, `delete-collection` |
-| External paper search | `paperbridge papers {search,resolve-doi}` | `search-papers`, `resolve-doi` |
+| Paper discovery and inspection | `paperbridge papers {search,resolve-doi,structure,query}` | `search-papers`, `resolve-doi`, `paper {structure,query}` |
 
 ## Current-state Audit
 
@@ -276,3 +276,21 @@ not blockers for this refactor.
 - Interactive-only selection for workflows that agents or scripts need.
 - Separate manual command category lists that can drift from the real
   parser.
+
+
+## Paperseed boundary
+
+Paperbridge remains the canonical CLI/API for paper discovery, DOI resolution,
+content retrieval, and config. Paperseed is vendored as `crates/paperseed`; its
+management commands are exposed through the Paperbridge command graph so they
+inherit Paperbridge config:
+
+```text
+paperbridge paperseed corpus {status,import,ingest,query,export}
+paperbridge paperseed seed {check,create}
+paperbridge paperseed p2p {status}
+```
+
+Do not add Paperseed root-level `search`, `fetch`, or source-discovery commands.
+Those flows belong under `paperbridge papers ...` and the Paperbridge MCP/API
+surface, with Paperseed called as a library for corpus mirroring and seeding.

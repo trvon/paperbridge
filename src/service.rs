@@ -3,16 +3,17 @@ use crate::crossref::CrossrefClient;
 use crate::error::{Result, ZoteroMcpError};
 use crate::external::{PaperSearch, SearchOptions, UnpaywallClient};
 use crate::models::{
-    BackendInfo, CollectionSummary, CollectionUpdateRequest, CollectionWriteRequest, CrossrefWork,
-    DeleteCollectionRequest, DeleteItemRequest, FulltextContent, ItemDetail, ItemSummary,
-    ItemUpdateRequest, ItemVoxPayload, ItemWriteRequest, ListCollectionsQuery, PaperHit,
-    PaperStructure, SearchItemsQuery, SearchVoxPayload, ValidationIssue, ValidationIssueLevel,
-    ValidationReport, VoxTextPayload,
+    BackendInfo, CachedPaperDetail, CachedPaperSummary, CollectionSummary, CollectionUpdateRequest,
+    CollectionWriteRequest, CrossrefWork, DeleteCollectionRequest, DeleteItemRequest,
+    FulltextContent, ItemDetail, ItemSummary, ItemUpdateRequest, ItemVoxPayload, ItemWriteRequest,
+    ListCollectionsQuery, PaperHit, PaperStructure, SearchItemsQuery, SearchVoxPayload,
+    ValidationIssue, ValidationIssueLevel, ValidationReport, VoxTextPayload,
 };
 use crate::paper;
 use crate::paper::docker::DEFAULT_PORT as GROBID_DEFAULT_PORT;
 use crate::paper::grobid::GrobidClient;
 use crate::paper::tei;
+use crate::paperseed_api::PaperseedApi;
 use crate::pdf;
 use crate::validation;
 use std::collections::HashMap;
@@ -50,6 +51,14 @@ pub struct PrepareSearchResultForVoxRequest {
 }
 
 #[derive(Debug, Clone)]
+pub struct PaperseedMirrorConfig {
+    pub corpus_root: Option<String>,
+    pub unpaywall_email: Option<String>,
+    pub auto_download: bool,
+    pub yams_enabled: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct PaperConfig {
     pub grobid_url: Option<String>,
     pub grobid_auto_spawn: bool,
@@ -67,6 +76,8 @@ pub struct PaperbridgeService {
     unpaywall: Option<UnpaywallClient>,
     paper_config: Option<PaperConfig>,
     paper_cache: Arc<Mutex<HashMap<PaperCacheKey, PaperStructure>>>,
+    paperseed: Option<PaperseedApi>,
+    paperseed_auto_download: bool,
 }
 
 impl PaperbridgeService {
@@ -82,6 +93,8 @@ impl PaperbridgeService {
             unpaywall: None,
             paper_config: None,
             paper_cache: Arc::new(Mutex::new(HashMap::new())),
+            paperseed: None,
+            paperseed_auto_download: false,
         }
     }
 
@@ -95,8 +108,87 @@ impl PaperbridgeService {
         self
     }
 
+    pub fn with_paperseed(mut self, cfg: PaperseedMirrorConfig) -> Self {
+        let yams = if cfg.yams_enabled {
+            paperseed::yams::YamsConfig::auto_detect()
+        } else {
+            paperseed::yams::YamsConfig::disabled()
+        };
+        let api = match cfg.corpus_root {
+            Some(root) => PaperseedApi::with_yams(root, cfg.unpaywall_email, yams),
+            None => PaperseedApi::default_with_yams(cfg.unpaywall_email, yams),
+        };
+        self.paperseed = Some(api);
+        self.paperseed_auto_download = cfg.auto_download;
+        self
+    }
+
     pub async fn search_papers(&self, opts: SearchOptions) -> Result<Vec<PaperHit>> {
-        self.paper_search.search(opts).await
+        let mut hits = self.paper_search.search(opts.clone()).await?;
+        if let Some(api) = &self.paperseed {
+            let mut cached_hits =
+                api.search_cached_papers(&opts.query, opts.limit_per_source as usize)?;
+            hits.append(&mut cached_hits);
+        }
+        self.annotate_cached_hits(&mut hits);
+        hits.sort_by_key(|hit| {
+            !hit.cache
+                .as_ref()
+                .map(|cache| cache.cached)
+                .unwrap_or(false)
+        });
+        self.mirror_open_access_hits(&hits);
+        Ok(hits)
+    }
+
+    fn mirror_open_access_hits(&self, hits: &[PaperHit]) {
+        if !self.paperseed_auto_download {
+            return;
+        }
+        let Some(api) = &self.paperseed else {
+            return;
+        };
+        let api = api.clone();
+        let hits: Vec<PaperHit> = hits
+            .iter()
+            .filter(|hit| hit.oa_pdf_url.is_some() && hit.cache.is_none())
+            .cloned()
+            .collect();
+        // Spawn per-paper download in detached OS threads so the main runtime can
+        // exit immediately (critical for CLI UX). Each thread builds its own
+        // one-shot runtime.
+        for hit in hits {
+            let api = api.clone();
+            std::thread::spawn(move || {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(_) => return,
+                };
+                rt.block_on(async {
+                    if let Err(error) = mirror_open_access_hit(&api, &hit).await {
+                        debug!("paperseed OA mirror skipped '{}': {}", hit.title, error);
+                    }
+                });
+            });
+        }
+    }
+
+    fn annotate_cached_hits(&self, hits: &mut [PaperHit]) {
+        let Some(api) = &self.paperseed else {
+            return;
+        };
+        for hit in hits {
+            if let Some(entry) = api.find_cached_hit(hit) {
+                hit.cache = Some(CachedPaperSummary {
+                    paper_id: entry.paper.metadata.id,
+                    cached: true,
+                    has_full_text: entry.full_text.is_some(),
+                });
+            }
+        }
     }
 
     pub fn backend_mode(&self) -> BackendMode {
@@ -188,6 +280,9 @@ impl PaperbridgeService {
     }
 
     pub async fn get_pdf_text(&self, attachment_key: &str) -> Result<FulltextContent> {
+        if let Some(fulltext) = self.try_cached_fulltext(attachment_key)? {
+            return Ok(fulltext);
+        }
         self.backend.get_pdf_text(attachment_key).await
     }
 
@@ -196,6 +291,11 @@ impl PaperbridgeService {
         item_key: &str,
         attachment_key: Option<&str>,
     ) -> Result<PaperStructure> {
+        if attachment_key.is_none()
+            && let Some(structure) = self.try_cached_paper_structure(item_key)?
+        {
+            return Ok(structure);
+        }
         let item = self.backend.get_item(item_key).await?;
         let selected_attachment = pdf::select_attachment_for_reading(
             &item.attachments,
@@ -457,6 +557,14 @@ impl PaperbridgeService {
         }
 
         if let Some(attachment_key) = req.attachment_key {
+            if let Some(fulltext) = self.try_cached_fulltext(&attachment_key)? {
+                let source = req
+                    .source_label
+                    .unwrap_or_else(|| format!("paperseed:{attachment_key}"));
+                return Ok(pdf::prepare_vox_payload_from_fulltext(
+                    &source, &fulltext, max_chars,
+                ));
+            }
             let fulltext = self.backend.get_pdf_text(&attachment_key).await?;
             let source = req
                 .source_label
@@ -475,6 +583,12 @@ impl PaperbridgeService {
         &self,
         req: PrepareItemForVoxRequest,
     ) -> Result<ItemVoxPayload> {
+        if req.attachment_key.is_none()
+            && let Some(payload) =
+                self.try_prepare_cached_item_for_vox(&req.item_key, req.max_chars_per_chunk)?
+        {
+            return Ok(payload);
+        }
         let max_chars = req.max_chars_per_chunk.unwrap_or(DEFAULT_CHUNK_SIZE);
         let item = self.backend.get_item(&req.item_key).await?;
 
@@ -517,6 +631,42 @@ impl PaperbridgeService {
             ));
         }
 
+        let paper_hits = self
+            .search_papers(SearchOptions {
+                query: query.clone(),
+                limit_per_source: req.search_limit.unwrap_or(DEFAULT_PIPELINE_SEARCH_LIMIT),
+                sources: None,
+                timeout_ms: 8_000,
+            })
+            .await?;
+        let result_index = req.result_index.unwrap_or(0);
+        if let Some(selected) = paper_hits.get(result_index)
+            && let Some(cache) = &selected.cache
+        {
+            let prepared = self
+                .try_prepare_cached_item_for_vox(&cache.paper_id, req.max_chars_per_chunk)?
+                .ok_or_else(|| {
+                    ZoteroMcpError::InvalidInput(format!(
+                        "Cached paper '{}' is not readable yet",
+                        cache.paper_id
+                    ))
+                })?;
+            return Ok(SearchVoxPayload {
+                query,
+                result_index,
+                result_count: paper_hits.len(),
+                selected_item: ItemSummary {
+                    key: cache.paper_id.clone(),
+                    item_type: "cached_paper".to_string(),
+                    title: selected.title.clone(),
+                    creators: selected.authors.clone(),
+                    year: selected.year.clone(),
+                    url: selected.url.clone().or_else(|| selected.oa_pdf_url.clone()),
+                },
+                prepared,
+            });
+        }
+
         let results = self
             .search_items(SearchItemsQuery {
                 q: Some(query.clone()),
@@ -534,7 +684,6 @@ impl PaperbridgeService {
             )));
         }
 
-        let result_index = req.result_index.unwrap_or(0);
         let selected = results.get(result_index).cloned().ok_or_else(|| {
             ZoteroMcpError::InvalidInput(format!(
                 "result_index {} is out of range for {} results",
@@ -559,6 +708,100 @@ impl PaperbridgeService {
             prepared,
         })
     }
+
+    fn try_cached_fulltext(&self, paper_id: &str) -> Result<Option<FulltextContent>> {
+        let Some(api) = &self.paperseed else {
+            return Ok(None);
+        };
+        match api.get_cached_paper_fulltext(paper_id) {
+            Ok(fulltext) => Ok(Some(fulltext)),
+            Err(ZoteroMcpError::InvalidInput(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn try_cached_paper_structure(&self, paper_id: &str) -> Result<Option<PaperStructure>> {
+        let Some(api) = &self.paperseed else {
+            return Ok(None);
+        };
+        let paper = match api.get_cached_paper(paper_id) {
+            Ok(paper) => paper,
+            Err(ZoteroMcpError::InvalidInput(_)) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let fulltext = match api.get_cached_paper_fulltext(paper_id) {
+            Ok(fulltext) => fulltext,
+            Err(ZoteroMcpError::InvalidInput(_)) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(Some(cached_paper_structure(&paper, &fulltext)))
+    }
+
+    fn try_prepare_cached_item_for_vox(
+        &self,
+        item_key: &str,
+        max_chars_per_chunk: Option<usize>,
+    ) -> Result<Option<ItemVoxPayload>> {
+        let Some(fulltext) = self.try_cached_fulltext(item_key)? else {
+            return Ok(None);
+        };
+        let Some(api) = &self.paperseed else {
+            return Ok(None);
+        };
+        let paper = match api.get_cached_paper(item_key) {
+            Ok(paper) => paper,
+            Err(ZoteroMcpError::InvalidInput(_)) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(Some(ItemVoxPayload {
+            item_key: paper.paper_id.clone(),
+            item_title: paper.title.clone(),
+            attachment: crate::models::AttachmentSummary {
+                key: paper.paper_id.clone(),
+                title: paper.title.clone(),
+                content_type: Some(paper.mime.clone()),
+                path: Some(paper.stored_path.clone()),
+                version: None,
+            },
+            indexed_pages: fulltext.indexed_pages,
+            total_pages: fulltext.total_pages,
+            indexed_chars: fulltext.indexed_chars,
+            total_chars: fulltext.total_chars,
+            vox: pdf::prepare_vox_payload_from_fulltext(
+                &format!("paperseed:{}", paper.paper_id),
+                &fulltext,
+                max_chars_per_chunk.unwrap_or(DEFAULT_CHUNK_SIZE),
+            ),
+        }))
+    }
+}
+
+fn cached_paper_structure(paper: &CachedPaperDetail, fulltext: &FulltextContent) -> PaperStructure {
+    PaperStructure {
+        item_key: paper.paper_id.clone(),
+        attachment_key: Some(paper.paper_id.clone()),
+        metadata: crate::models::PaperMetadata {
+            title: Some(paper.title.clone()),
+            authors: paper.authors.clone(),
+            abstract_note: None,
+            doi: paper.doi.clone(),
+            year: paper.year.clone(),
+        },
+        sections: if fulltext.content.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![crate::models::PaperSection {
+                id: "body".to_string(),
+                heading: "Body".to_string(),
+                level: 1,
+                text: fulltext.content.clone(),
+                subsections: Vec::new(),
+            }]
+        },
+        references: Vec::new(),
+        figures: Vec::new(),
+        source: crate::models::PaperStructureSource::ZoteroFulltext,
+    }
 }
 
 fn titles_match(a: &str, b: &str) -> bool {
@@ -581,11 +824,76 @@ fn summarize_validation_report(report: &ValidationReport) -> String {
         .join("; ")
 }
 
+async fn mirror_open_access_hit(api: &PaperseedApi, hit: &PaperHit) -> Result<()> {
+    let Some(url) = hit.oa_pdf_url.as_deref() else {
+        return Ok(());
+    };
+    let incoming = api.paths().root.join("incoming");
+    std::fs::create_dir_all(&incoming).map_err(|e| {
+        ZoteroMcpError::Config(format!("Failed to create Paperseed incoming dir: {e}"))
+    })?;
+    let file = incoming.join(format!("{}.pdf", paperseed_safe_name(hit)));
+    let yams_downloaded = api.download_with_yams_queue(
+        url,
+        Some(&hit.title),
+        hit.doi.as_deref(),
+        hit.url.as_deref().or(hit.oa_pdf_url.as_deref()),
+    );
+    // YAMS queue handles download + indexing, nothing else needed.
+    if yams_downloaded.is_some() {
+        return Ok(());
+    }
+
+    // Manual path: download then index into local corpus.
+    let bytes = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?
+        .get(url)
+        .send()
+        .await?
+        .bytes()
+        .await?;
+    std::fs::write(&file, bytes).map_err(|e| {
+        ZoteroMcpError::Config(format!("Failed to write Paperseed OA cache file: {e}"))
+    })?;
+    api.ingest_with_metadata(
+        &file,
+        paperseed::sources::PaperbridgeMetadata {
+            title: Some(hit.title.clone()),
+            doi: hit.doi.clone(),
+            authors: hit.authors.clone(),
+            year: hit.year.as_deref().and_then(parse_year),
+            venue: hit.venue.clone(),
+            license: Some("unknown".to_string()),
+            source_url: hit.url.clone().or_else(|| hit.oa_pdf_url.clone()),
+        },
+        Some("unknown".to_string()),
+    )?;
+    Ok(())
+}
+
+fn paperseed_safe_name(hit: &PaperHit) -> String {
+    let raw = hit
+        .doi
+        .as_deref()
+        .or(hit.arxiv_id.as_deref())
+        .unwrap_or(&hit.title);
+    raw.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
+fn parse_year(raw: &str) -> Option<u16> {
+    raw.split(|c: char| !c.is_ascii_digit())
+        .find(|part| part.len() == 4)
+        .and_then(|year| year.parse::<u16>().ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::{BackendCapabilities, BackendMode, LibraryBackend};
-    use crate::models::{ListCollectionsQuery, SearchItemsQuery};
+    use crate::models::{ListCollectionsQuery, PaperSource, SearchItemsQuery};
 
     struct StubLocalReadOnlyBackend;
 
@@ -655,6 +963,344 @@ mod tests {
         async fn delete_item(&self, _req: DeleteItemRequest) -> Result<()> {
             panic!("backend delete_item should not be reached when write is unsupported")
         }
+    }
+
+    #[tokio::test]
+    async fn mirror_open_access_hit_downloads_into_paperseed_corpus() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/paper.pdf"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes("pdf bytes"))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let api = PaperseedApi::new(dir.path().join("corpus"), None);
+        let hit = PaperHit {
+            source: PaperSource::OpenAlex,
+            title: "Open Paper".to_string(),
+            authors: vec!["Ada Lovelace".to_string()],
+            year: Some("2024".to_string()),
+            doi: Some("10.5555/open".to_string()),
+            arxiv_id: None,
+            pmid: None,
+            abstract_note: None,
+            url: Some("https://example.org/open".to_string()),
+            pdf_url: None,
+            oa_pdf_url: Some(format!("{}/paper.pdf", server.uri())),
+            venue: Some("Open Venue".to_string()),
+            citation_count: None,
+            cache: None,
+        };
+
+        mirror_open_access_hit(&api, &hit).await.unwrap();
+        let db = api.corpus_status().unwrap();
+        assert_eq!(db.papers.len(), 1);
+        assert_eq!(db.papers[0].paper.metadata.title, "Open Paper");
+        assert_eq!(
+            db.papers[0].paper.metadata.doi.as_deref(),
+            Some("10.5555/open")
+        );
+    }
+
+    #[test]
+    fn cached_paper_fulltext_round_trips_from_paperseed() {
+        let dir = tempfile::tempdir().unwrap();
+        let api = PaperseedApi::new(dir.path().join("corpus"), None);
+        let source = dir.path().join("cached.txt");
+        std::fs::write(&source, "cached paper body text for retrieval").unwrap();
+
+        let paper = api
+            .import_local_file(
+                &source,
+                Some("Cached Paper".to_string()),
+                Some("cc-by".to_string()),
+            )
+            .unwrap();
+        let detail = api.get_cached_paper(&paper.metadata.id).unwrap();
+        assert_eq!(detail.paper_id, paper.metadata.id);
+        assert!(detail.has_full_text);
+
+        let fulltext = api.get_cached_paper_fulltext(&paper.metadata.id).unwrap();
+        assert_eq!(fulltext.content, "cached paper body text for retrieval");
+    }
+
+    #[tokio::test]
+    async fn service_prepares_cached_paper_for_vox() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend: Arc<dyn LibraryBackend> = Arc::new(StubLocalReadOnlyBackend);
+        let source = dir.path().join("cache.txt");
+        std::fs::write(&source, "cached paper body for vox preparation").unwrap();
+
+        let api = PaperseedApi::with_yams(
+            dir.path().join("corpus"),
+            None,
+            paperseed::yams::YamsConfig::disabled(),
+        );
+        let paper = api
+            .ingest_with_metadata(
+                &source,
+                paperseed::sources::PaperbridgeMetadata {
+                    title: Some("Graph Learning at Scale".to_string()),
+                    doi: Some("10.5555/graph".to_string()),
+                    authors: vec!["Grace Hopper".to_string()],
+                    year: Some(2024),
+                    venue: Some("Systems Journal".to_string()),
+                    license: Some("cc-by".to_string()),
+                    source_url: Some("https://example.org/graph".to_string()),
+                },
+                Some("cc-by".to_string()),
+            )
+            .unwrap();
+
+        let service = PaperbridgeService::new(backend).with_paperseed(PaperseedMirrorConfig {
+            corpus_root: Some(dir.path().join("corpus").display().to_string()),
+            unpaywall_email: None,
+            auto_download: false,
+            yams_enabled: false,
+        });
+
+        let payload = service
+            .prepare_item_for_vox(PrepareItemForVoxRequest {
+                item_key: paper.metadata.id.clone(),
+                attachment_key: None,
+                max_chars_per_chunk: Some(12),
+            })
+            .await
+            .unwrap();
+        assert_eq!(payload.item_key, paper.metadata.id);
+        assert!(!payload.vox.chunks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn service_builds_structure_for_cached_paper() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend: Arc<dyn LibraryBackend> = Arc::new(StubLocalReadOnlyBackend);
+        let source = dir.path().join("structure.txt");
+        std::fs::write(&source, "cached structure body text").unwrap();
+
+        let api = PaperseedApi::with_yams(
+            dir.path().join("corpus"),
+            None,
+            paperseed::yams::YamsConfig::disabled(),
+        );
+        let paper = api
+            .ingest_with_metadata(
+                &source,
+                paperseed::sources::PaperbridgeMetadata {
+                    title: Some("Structured Cached Paper".to_string()),
+                    doi: Some("10.5555/structure".to_string()),
+                    authors: vec!["Grace Hopper".to_string()],
+                    year: Some(2024),
+                    venue: Some("Systems Journal".to_string()),
+                    license: Some("cc-by".to_string()),
+                    source_url: Some("https://example.org/structure".to_string()),
+                },
+                Some("cc-by".to_string()),
+            )
+            .unwrap();
+
+        let service = PaperbridgeService::new(backend).with_paperseed(PaperseedMirrorConfig {
+            corpus_root: Some(dir.path().join("corpus").display().to_string()),
+            unpaywall_email: None,
+            auto_download: false,
+            yams_enabled: false,
+        });
+
+        let structure = service
+            .get_paper_structure(&paper.metadata.id, None)
+            .await
+            .unwrap();
+        assert_eq!(structure.item_key, paper.metadata.id);
+        assert_eq!(
+            structure.attachment_key.as_deref(),
+            Some(paper.metadata.id.as_str())
+        );
+        assert_eq!(
+            structure.metadata.title.as_deref(),
+            Some("Structured Cached Paper")
+        );
+        assert_eq!(
+            structure.source,
+            crate::models::PaperStructureSource::ZoteroFulltext
+        );
+        assert_eq!(structure.sections.len(), 1);
+        assert_eq!(structure.sections[0].heading, "Body");
+        assert_eq!(structure.sections[0].text, "cached structure body text");
+    }
+
+    #[tokio::test]
+    async fn service_queries_cached_paper_structure() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend: Arc<dyn LibraryBackend> = Arc::new(StubLocalReadOnlyBackend);
+        let source = dir.path().join("query.txt");
+        std::fs::write(&source, "cached query body text").unwrap();
+
+        let api = PaperseedApi::with_yams(
+            dir.path().join("corpus"),
+            None,
+            paperseed::yams::YamsConfig::disabled(),
+        );
+        let paper = api
+            .ingest_with_metadata(
+                &source,
+                paperseed::sources::PaperbridgeMetadata {
+                    title: Some("Queryable Cached Paper".to_string()),
+                    doi: Some("10.5555/query".to_string()),
+                    authors: vec!["Grace Hopper".to_string()],
+                    year: Some(2024),
+                    venue: Some("Systems Journal".to_string()),
+                    license: Some("cc-by".to_string()),
+                    source_url: Some("https://example.org/query".to_string()),
+                },
+                Some("cc-by".to_string()),
+            )
+            .unwrap();
+
+        let service = PaperbridgeService::new(backend).with_paperseed(PaperseedMirrorConfig {
+            corpus_root: Some(dir.path().join("corpus").display().to_string()),
+            unpaywall_email: None,
+            auto_download: false,
+            yams_enabled: false,
+        });
+
+        let value = service
+            .query_paper(&paper.metadata.id, "sections[0].text", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            value,
+            serde_json::Value::String("cached query body text".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn search_papers_prioritizes_cached_hits_and_annotates_external_matches() {
+        let server = wiremock::MockServer::start().await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/arxiv"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(
+                r#"<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<feed xmlns=\"http://www.w3.org/2005/Atom\">
+  <entry>
+    <id>http://arxiv.org/abs/2401.00001v1</id>
+    <title>Matched External Paper</title>
+    <summary>Matched abstract</summary>
+    <published>2024-01-01T00:00:00Z</published>
+    <author><name>Grace Hopper</name></author>
+    <link rel=\"alternate\" href=\"https://example.org/matched\" />
+    <link title=\"pdf\" href=\"https://example.org/matched.pdf\" type=\"application/pdf\" />
+  </entry>
+</feed>"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let base = server.uri();
+        let paper_search = crate::external::PaperSearch::with_clients(
+            crate::external::ArxivClient::new(Some(&format!("{base}/arxiv"))),
+            crate::external::HuggingFaceClient::new(Some(&format!("{base}/hf")), None),
+            crate::external::SemanticScholarClient::new(Some(&format!("{base}/s2")), None),
+            crate::crossref::CrossrefClient::new(Some(&format!("{base}/crossref"))),
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let api = PaperseedApi::with_yams(
+            dir.path().join("corpus"),
+            None,
+            paperseed::yams::YamsConfig::disabled(),
+        );
+
+        let matched_source = dir.path().join("matched.txt");
+        std::fs::write(&matched_source, "matched cached body").unwrap();
+        let matched = api
+            .ingest_with_metadata(
+                &matched_source,
+                paperseed::sources::PaperbridgeMetadata {
+                    title: Some("Matched External Paper".to_string()),
+                    doi: None,
+                    authors: vec!["Grace Hopper".to_string()],
+                    year: Some(2024),
+                    venue: Some("Systems Journal".to_string()),
+                    license: Some("cc-by".to_string()),
+                    source_url: Some("https://example.org/matched".to_string()),
+                },
+                Some("cc-by".to_string()),
+            )
+            .unwrap();
+
+        let local_source = dir.path().join("local.txt");
+        std::fs::write(&local_source, "local cached body").unwrap();
+        let local = api
+            .ingest_with_metadata(
+                &local_source,
+                paperseed::sources::PaperbridgeMetadata {
+                    title: Some("Local Only Paper".to_string()),
+                    doi: Some("10.5555/local".to_string()),
+                    authors: vec!["Ada Lovelace".to_string()],
+                    year: Some(2023),
+                    venue: Some("Local Venue".to_string()),
+                    license: Some("cc-by".to_string()),
+                    source_url: Some("https://example.org/local".to_string()),
+                },
+                Some("cc-by".to_string()),
+            )
+            .unwrap();
+
+        let backend: Arc<dyn LibraryBackend> = Arc::new(StubLocalReadOnlyBackend);
+        let service = PaperbridgeService::with_paper_search(backend, paper_search).with_paperseed(
+            PaperseedMirrorConfig {
+                corpus_root: Some(dir.path().join("corpus").display().to_string()),
+                unpaywall_email: None,
+                auto_download: false,
+                yams_enabled: false,
+            },
+        );
+
+        let hits = service
+            .search_papers(SearchOptions {
+                query: "matched external paper".to_string(),
+                limit_per_source: 5,
+                sources: Some(vec![PaperSource::Arxiv]),
+                timeout_ms: 8_000,
+            })
+            .await
+            .unwrap();
+
+        assert!(!hits.is_empty());
+        assert!(
+            hits.iter()
+                .all(|hit| hit.cache.as_ref().map(|c| c.cached).unwrap_or(false))
+        );
+
+        let first_non_cached = hits
+            .iter()
+            .position(|hit| hit.cache.is_none())
+            .unwrap_or(hits.len());
+        assert_eq!(first_non_cached, hits.len());
+
+        let local_cached = hits
+            .iter()
+            .find(|hit| {
+                hit.cache.as_ref().map(|c| c.paper_id.as_str()) == Some(local.metadata.id.as_str())
+            })
+            .expect("local cached hit present");
+        assert_eq!(local_cached.title, "Local Only Paper");
+        assert_eq!(
+            local_cached.cache.as_ref().map(|c| c.paper_id.as_str()),
+            Some(local.metadata.id.as_str())
+        );
+
+        let matched_external = hits
+            .iter()
+            .find(|hit| hit.source == PaperSource::Arxiv)
+            .expect("external hit present");
+        assert_eq!(matched_external.title, "Matched External Paper");
+        assert_eq!(
+            matched_external.cache.as_ref().map(|c| c.paper_id.as_str()),
+            Some(matched.metadata.id.as_str())
+        );
     }
 
     #[tokio::test]

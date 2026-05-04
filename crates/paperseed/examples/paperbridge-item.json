@@ -1,0 +1,11 @@
+{
+  "data": {
+    "title": "Graph Learning at Scale",
+    "DOI": "10.5555/graph",
+    "date": "2024-08-01",
+    "publicationTitle": "Systems Journal",
+    "creators": [{ "firstName": "Grace", "lastName": "Hopper" }],
+    "url": "https://example.org/graph",
+    "rights": "cc-by"
+  }
+}

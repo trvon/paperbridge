@@ -63,9 +63,9 @@ paperbridge library read-search -q "sparse attention" --result-index 0 --search-
 Return a paper as a typed JSON structure, then select into it with a dotted path:
 
 ```bash
-paperbridge paper structure --key ABCD1234
-paperbridge paper query --key ABCD1234 --selector "sections[0].heading"
-paperbridge paper query --key ABCD1234 --selector "metadata.doi"
+paperbridge papers structure --key ABCD1234
+paperbridge papers query --key ABCD1234 --selector "sections[0].heading"
+paperbridge papers query --key ABCD1234 --selector "metadata.doi"
 ```
 
 - MCP tools: `get_paper_structure { item_key, attachment_key? }` and `query_paper { item_key, selector, attachment_key? }`.

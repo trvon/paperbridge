@@ -165,6 +165,7 @@ fn convert_work(w: RawOpenAlexWork) -> PaperHit {
         oa_pdf_url,
         venue,
         citation_count: w.cited_by_count,
+        cache: None,
     }
 }
 

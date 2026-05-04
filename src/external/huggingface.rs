@@ -140,6 +140,7 @@ fn convert_entry(entry: RawHfPaperEntry) -> PaperHit {
         oa_pdf_url: None,
         venue: Some("HuggingFace Papers".to_string()),
         citation_count: None,
+        cache: None,
     }
 }
 

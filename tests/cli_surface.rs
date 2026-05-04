@@ -17,6 +17,7 @@ fn top_level_help_advertises_canonical_groups() {
         "item",
         "collection",
         "papers",
+        "paperseed",
         "config",
         "status",
         "serve",
@@ -52,6 +53,7 @@ fn top_level_help_hides_legacy_aliases() {
         "search-papers",
         "resolve-doi",
         "backend-info",
+        "paper",
     ] {
         assert!(
             !visible.contains(&legacy),
@@ -77,6 +79,27 @@ fn legacy_aliases_still_parse() {
         &["paperbridge", "delete-collection", "--file", "f.json"],
         &["paperbridge", "search-papers", "--q", "x"],
         &["paperbridge", "resolve-doi", "--doi", "10.1/x"],
+        &["paperbridge", "paper", "structure", "--key", "K"],
+        &[
+            "paperbridge",
+            "paper",
+            "query",
+            "--key",
+            "K",
+            "--selector",
+            "metadata.title",
+        ],
+        &["paperbridge", "paperseed", "corpus", "status"],
+        &["paperbridge", "paperseed", "corpus", "query", "--q", "x"],
+        &[
+            "paperbridge",
+            "paperseed",
+            "seed",
+            "check",
+            "--paper-id",
+            "abc",
+        ],
+        &["paperbridge", "paperseed", "p2p", "status"],
     ];
 
     for argv in cases {
@@ -88,6 +111,17 @@ fn legacy_aliases_still_parse() {
 #[test]
 fn canonical_subtree_help_lists_actions() {
     let mut cmd = Cli::command();
+
+    let config_help = render_help(
+        cmd.find_subcommand_mut("config")
+            .expect("config subtree exists"),
+    );
+    for action in ["init", "validate", "doctor", "get", "set"] {
+        assert!(
+            config_help.contains(action),
+            "config --help missing action '{action}'\n{config_help}"
+        );
+    }
 
     let library_help = render_help(
         cmd.find_subcommand_mut("library")
@@ -115,10 +149,21 @@ fn canonical_subtree_help_lists_actions() {
         cmd.find_subcommand_mut("papers")
             .expect("papers subtree exists"),
     );
-    for action in ["search", "resolve-doi"] {
+    for action in ["search", "resolve-doi", "structure", "query"] {
         assert!(
             papers_help.contains(action),
             "papers --help missing action '{action}'\n{papers_help}"
+        );
+    }
+
+    let paperseed_help = render_help(
+        cmd.find_subcommand_mut("paperseed")
+            .expect("paperseed subtree exists"),
+    );
+    for action in ["corpus", "seed", "p2p"] {
+        assert!(
+            paperseed_help.contains(action),
+            "paperseed --help missing action '{action}'\n{paperseed_help}"
         );
     }
 }

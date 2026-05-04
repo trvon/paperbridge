@@ -122,8 +122,8 @@ paperbridge query -q "graph learning" --limit 5
 paperbridge collections --top-only
 paperbridge read --item-key ITEMA --max-chars-per-chunk 1200
 paperbridge read-search -q "graph learning" --result-index 0
-paperbridge paper structure --key ITEMA
-paperbridge paper query --key ITEMA --selector "sections[0].heading"
+paperbridge papers structure --key ITEMA
+paperbridge papers query --key ITEMA --selector "sections[0].heading"
 paperbridge backend-info
 ```
 

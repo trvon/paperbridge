@@ -104,6 +104,11 @@ pub struct Config {
     pub grobid_auto_spawn: bool,
     pub grobid_image: String,
     pub update_check_enabled: bool,
+    pub paperseed_enabled: bool,
+    pub paperseed_auto_download: bool,
+    pub paperseed_yams_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paperseed_corpus_root: Option<String>,
 }
 
 impl Default for Config {
@@ -130,6 +135,10 @@ impl Default for Config {
             grobid_auto_spawn: false,
             grobid_image: "lfoppiano/grobid:0.8.1".to_string(),
             update_check_enabled: true,
+            paperseed_enabled: false,
+            paperseed_auto_download: true,
+            paperseed_yams_enabled: true,
+            paperseed_corpus_root: None,
         }
     }
 }
@@ -159,6 +168,10 @@ struct PartialConfig {
     grobid_auto_spawn: Option<bool>,
     grobid_image: Option<String>,
     update_check_enabled: Option<bool>,
+    paperseed_enabled: Option<bool>,
+    paperseed_auto_download: Option<bool>,
+    paperseed_yams_enabled: Option<bool>,
+    paperseed_corpus_root: Option<String>,
 }
 
 impl Config {
@@ -241,7 +254,11 @@ impl Config {
         };
         let plain = |opt: &Option<String>| opt.clone().unwrap_or_else(|| "<unset>".to_string());
         format!(
-            "backend_mode = \"{}\"\ncloud_api_base = \"{}\"\nlocal_api_base = \"{}\"\napi_key = {}\nlibrary_type = \"{}\"\nuser_id = {}\ngroup_id = {}\ntimeout_secs = {}\nlog_level = \"{}\"\nhf_token = {}\nsemantic_scholar_api_key = {}\ncore_api_key = {}\nads_api_token = {}\nncbi_api_key = {}\nscholarapi_key = {}\nunpaywall_email = {}\ngrobid_url = {}\ngrobid_timeout_secs = {}\ngrobid_auto_spawn = {}\ngrobid_image = \"{}\"\nupdate_check_enabled = {}",
+            "backend_mode = \"{}\"\ncloud_api_base = \"{}\"\nlocal_api_base = \"{}\"\napi_key = {}\nlibrary_type = \"{}\"\nuser_id = {}\ngroup_id = {}\ntimeout_secs = {}\nlog_level = \"{}\"\nhf_token = {}\nsemantic_scholar_api_key = {}\ncore_api_key = {}\nads_api_token = {}\nncbi_api_key = {}\nscholarapi_key = {}\nunpaywall_email = {}\ngrobid_url = {}\ngrobid_timeout_secs = {}\ngrobid_auto_spawn = {}\ngrobid_image = \"{}\"\nupdate_check_enabled = {}
+paperseed_enabled = {}
+paperseed_auto_download = {}
+paperseed_yams_enabled = {}
+paperseed_corpus_root = {}",
             self.backend_mode.as_str(),
             self.cloud_api_base,
             self.local_api_base,
@@ -267,6 +284,10 @@ impl Config {
             self.grobid_auto_spawn,
             self.grobid_image,
             self.update_check_enabled,
+            self.paperseed_enabled,
+            self.paperseed_auto_download,
+            self.paperseed_yams_enabled,
+            plain(&self.paperseed_corpus_root),
         )
     }
 
@@ -364,6 +385,14 @@ impl Config {
             "grobid_auto_spawn" => Some(self.grobid_auto_spawn.to_string()),
             "grobid_image" => Some(self.grobid_image.clone()),
             "update_check_enabled" => Some(self.update_check_enabled.to_string()),
+            "paperseed_enabled" => Some(self.paperseed_enabled.to_string()),
+            "paperseed_auto_download" => Some(self.paperseed_auto_download.to_string()),
+            "paperseed_yams_enabled" => Some(self.paperseed_yams_enabled.to_string()),
+            "paperseed_corpus_root" => Some(
+                self.paperseed_corpus_root
+                    .clone()
+                    .unwrap_or_else(|| "<unset>".to_string()),
+            ),
             _ => None,
         }
     }
@@ -468,19 +497,23 @@ impl Config {
                 self.grobid_image = v.to_string();
             }
             "update_check_enabled" => {
-                self.update_check_enabled = match v.to_ascii_lowercase().as_str() {
-                    "true" | "1" | "yes" | "on" => true,
-                    "false" | "0" | "no" | "off" => false,
-                    other => {
-                        return Err(ZoteroMcpError::InvalidInput(format!(
-                            "update_check_enabled must be a boolean, got '{other}'"
-                        )));
-                    }
-                };
+                self.update_check_enabled = parse_bool_key("update_check_enabled", v)?;
+            }
+            "paperseed_enabled" => {
+                self.paperseed_enabled = parse_bool_key("paperseed_enabled", v)?;
+            }
+            "paperseed_auto_download" => {
+                self.paperseed_auto_download = parse_bool_key("paperseed_auto_download", v)?;
+            }
+            "paperseed_yams_enabled" => {
+                self.paperseed_yams_enabled = parse_bool_key("paperseed_yams_enabled", v)?;
+            }
+            "paperseed_corpus_root" => {
+                self.paperseed_corpus_root = optional_string(v);
             }
             _ => {
                 return Err(ZoteroMcpError::InvalidInput(format!(
-                    "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key, core_api_key, ads_api_token, ncbi_api_key, scholarapi_key, unpaywall_email, grobid_url, grobid_timeout_secs, grobid_auto_spawn, grobid_image, update_check_enabled"
+                    "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key, core_api_key, ads_api_token, ncbi_api_key, scholarapi_key, unpaywall_email, grobid_url, grobid_timeout_secs, grobid_auto_spawn, grobid_image, update_check_enabled, paperseed_enabled, paperseed_auto_download, paperseed_yams_enabled, paperseed_corpus_root"
                 )));
             }
         }
@@ -553,6 +586,18 @@ impl Config {
         }
         if let Some(v) = partial.update_check_enabled {
             self.update_check_enabled = v;
+        }
+        if let Some(v) = partial.paperseed_enabled {
+            self.paperseed_enabled = v;
+        }
+        if let Some(v) = partial.paperseed_auto_download {
+            self.paperseed_auto_download = v;
+        }
+        if let Some(v) = partial.paperseed_yams_enabled {
+            self.paperseed_yams_enabled = v;
+        }
+        if let Some(v) = partial.paperseed_corpus_root {
+            self.paperseed_corpus_root = Some(v);
         }
     }
 
@@ -677,15 +722,7 @@ impl Config {
                     self.grobid_image = value.to_string();
                 }
                 "PAPERBRIDGE_UPDATE_CHECK" => {
-                    self.update_check_enabled = match value.trim().to_ascii_lowercase().as_str() {
-                        "true" | "1" | "yes" | "on" => true,
-                        "false" | "0" | "no" | "off" => false,
-                        other => {
-                            return Err(ZoteroMcpError::Config(format!(
-                                "Invalid PAPERBRIDGE_UPDATE_CHECK '{other}'"
-                            )));
-                        }
-                    };
+                    self.update_check_enabled = parse_bool_env(key, value)?;
                 }
                 _ => {}
             }
@@ -735,6 +772,20 @@ fn parse_u64_env(key: &str, raw: &str) -> Result<u64> {
     raw.parse::<u64>().map_err(|_| {
         ZoteroMcpError::Config(format!("{key} must be an unsigned integer, got '{raw}'"))
     })
+}
+
+fn parse_bool_key(key: &str, raw: &str) -> Result<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        other => Err(ZoteroMcpError::InvalidInput(format!(
+            "{key} must be a boolean, got '{other}'"
+        ))),
+    }
+}
+
+fn parse_bool_env(key: &str, raw: &str) -> Result<bool> {
+    parse_bool_key(key, raw).map_err(|error| ZoteroMcpError::Config(error.to_string()))
 }
 
 fn optional_string(raw: &str) -> Option<String> {
@@ -866,6 +917,10 @@ mod tests {
         assert_eq!(cfg.get_value("library_type").as_deref(), Some("user"));
         assert_eq!(cfg.get_value("user_id").as_deref(), Some("12"));
         assert_eq!(cfg.get_value("api_key").as_deref(), Some("secret"));
+        assert_eq!(
+            cfg.get_value("paperseed_yams_enabled").as_deref(),
+            Some("true")
+        );
         assert!(cfg.get_value("unknown").is_none());
     }
 
@@ -907,5 +962,14 @@ mod tests {
         assert_eq!(cfg.api_key, None);
         assert_eq!(cfg.user_id, None);
         assert_eq!(cfg.group_id, None);
+    }
+
+    #[test]
+    fn set_value_supports_paperseed_yams_toggle() {
+        let mut cfg = Config::default();
+        cfg.set_value("paperseed_yams_enabled", "false").unwrap();
+        assert!(!cfg.paperseed_yams_enabled);
+        cfg.set_value("paperseed_yams_enabled", "yes").unwrap();
+        assert!(cfg.paperseed_yams_enabled);
     }
 }

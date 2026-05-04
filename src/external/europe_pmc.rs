@@ -161,6 +161,7 @@ fn convert_result(r: RawEpmcResult) -> PaperHit {
         oa_pdf_url,
         venue: r.journal_title,
         citation_count: None,
+        cache: None,
     }
 }
 

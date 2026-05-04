@@ -1,0 +1,2 @@
+Graph learning at scale requires careful systems design.
+This example fixture is open text for paperseed prototype tests and demos.

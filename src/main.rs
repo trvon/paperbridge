@@ -1,7 +1,8 @@
 use clap::{CommandFactory, Parser};
 use paperbridge::cli::{
     Cli, CollectionAction, Command, ConfigAction, ItemAction, LibraryAction, PaperAction,
-    PapersAction, SnippetTarget,
+    PapersAction, PaperseedAction, PaperseedCorpusAction, PaperseedExportFormat,
+    PaperseedP2pAction, PaperseedSeedAction, SnippetTarget,
 };
 use paperbridge::config::Config;
 use paperbridge::external::SearchOptions;
@@ -11,7 +12,8 @@ use paperbridge::models::{
 };
 use paperbridge::server::PaperbridgeServer;
 use paperbridge::service::{
-    PaperbridgeService, PrepareItemForVoxRequest, PrepareSearchResultForVoxRequest,
+    PaperbridgeService, PaperseedMirrorConfig, PrepareItemForVoxRequest,
+    PrepareSearchResultForVoxRequest,
 };
 use paperbridge::zotero_api::build_backend;
 use rmcp::ServiceExt;
@@ -69,6 +71,14 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
             } => {
                 handle_config_resolve_user_id(login, api_key.as_deref(), api_base.as_deref())
                     .await?;
+                return Ok(());
+            }
+            ConfigAction::Doctor {
+                json,
+                verbose,
+                setup,
+            } => {
+                handle_config_doctor(*json, *verbose, *setup)?;
                 return Ok(());
             }
             ConfigAction::Validate => {}
@@ -173,18 +183,33 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
                 .await?
             }
             PapersAction::ResolveDoi { doi } => handle_papers_resolve_doi(config, doi).await?,
-        },
-
-        Some(Command::Paper { action }) => match action {
-            PaperAction::Structure { key, attachment } => {
+            PapersAction::Structure { key, attachment } => {
                 handle_paper_structure(config, key, attachment).await?
             }
-            PaperAction::Query {
+            PapersAction::Query {
                 key,
                 selector,
                 attachment,
             } => handle_paper_query(config, key, selector, attachment).await?,
         },
+
+        Some(Command::Paper { action }) => {
+            warn!(
+                "'paper' is deprecated; use 'paperbridge papers structure' or 'paperbridge papers query' instead"
+            );
+            match action {
+                PaperAction::Structure { key, attachment } => {
+                    handle_paper_structure(config, key, attachment).await?
+                }
+                PaperAction::Query {
+                    key,
+                    selector,
+                    attachment,
+                } => handle_paper_query(config, key, selector, attachment).await?,
+            }
+        }
+
+        Some(Command::Paperseed { action }) => handle_paperseed(config, action).await?,
 
         // ---------- Hidden legacy aliases (delegate + deprecation warning) ----------
         Some(Command::Query {
@@ -314,12 +339,364 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
         Some(Command::Config {
             action: ConfigAction::ResolveUserId { .. },
         }) => unreachable!("resolve-user-id command handled before config load"),
+        Some(Command::Config {
+            action: ConfigAction::Doctor { .. },
+        }) => unreachable!("doctor command handled before config load"),
         Some(Command::Completions { .. }) => {
             unreachable!("completions command handled before config load")
         }
     }
 
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorReport {
+    config_path: String,
+    config_exists: bool,
+    status: DoctorStatus,
+    checks: Vec<DoctorCheck>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum DoctorStatus {
+    Ok,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorCheck {
+    id: &'static str,
+    level: DoctorLevel,
+    message: String,
+    next: Vec<String>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "kebab-case")]
+enum DoctorLevel {
+    Info,
+    Warning,
+    Error,
+}
+
+fn handle_config_doctor(json: bool, verbose: bool, setup: bool) -> paperbridge::Result<()> {
+    let path = Config::config_path();
+    let mut config_exists = path.exists();
+    let mut raw = if config_exists {
+        Some(std::fs::read_to_string(&path).map_err(|e| {
+            paperbridge::ZoteroMcpError::Config(format!(
+                "Failed to read config at {}: {e}",
+                path.display()
+            ))
+        })?)
+    } else {
+        None
+    };
+    let mut config = Config::load_file_or_default()?;
+    if setup {
+        run_doctor_setup(&mut config, raw.as_deref().unwrap_or_default())?;
+        config.write_to_file()?;
+        raw = Some(toml::to_string_pretty(&config)?);
+        config_exists = true;
+        println!("Updated {}", path.display());
+    }
+    let mut checks = Vec::new();
+
+    if !config_exists {
+        checks.push(DoctorCheck {
+            id: "config.missing",
+            level: DoctorLevel::Warning,
+            message: "No config file exists; Paperbridge is using compiled defaults.".to_string(),
+            next: vec!["paperbridge config init".to_string()],
+        });
+    }
+
+    if let Err(error) = config.validate() {
+        checks.push(DoctorCheck {
+            id: "config.validate",
+            level: DoctorLevel::Error,
+            message: error.to_string(),
+            next: vec![
+                "paperbridge config init --interactive".to_string(),
+                "paperbridge config doctor".to_string(),
+            ],
+        });
+    } else {
+        checks.push(DoctorCheck {
+            id: "config.validate",
+            level: DoctorLevel::Info,
+            message: "Core Paperbridge config validates.".to_string(),
+            next: vec![],
+        });
+    }
+
+    let raw = raw.as_deref().unwrap_or_default();
+    for key in [
+        "paperseed_enabled",
+        "paperseed_auto_download",
+        "paperseed_yams_enabled",
+    ] {
+        if config_exists && !toml_mentions_key(raw, key) {
+            checks.push(DoctorCheck {
+                id: "paperseed.config-drift",
+                level: DoctorLevel::Warning,
+                message: format!(
+                    "Config does not mention `{key}`; this may be an older config created before Paperseed integration."
+                ),
+                next: vec![
+                    format!("paperbridge config set {key} <value>"),
+                    "paperbridge config get".to_string(),
+                ],
+            });
+        }
+    }
+
+    let yams_health = paperseed::yams::yams_health("yams");
+    let yams_ready = config.paperseed_yams_enabled && yams_health.ready();
+    if config_exists && !toml_mentions_key(raw, "paperseed_corpus_root") && !yams_ready {
+        checks.push(DoctorCheck {
+            id: "paperseed.config-drift",
+            level: DoctorLevel::Warning,
+            message: "Config does not mention `paperseed_corpus_root`; set it when not using a ready YAMS daemon.".to_string(),
+            next: vec![
+                "paperbridge config doctor --setup".to_string(),
+                "paperbridge config set paperseed_corpus_root <path>".to_string(),
+            ],
+        });
+    }
+
+    if config.paperseed_enabled {
+        checks.push(DoctorCheck {
+            id: "paperseed.enabled",
+            level: DoctorLevel::Info,
+            message: "Paperseed mirroring is enabled for Paperbridge paper search results."
+                .to_string(),
+            next: vec!["paperbridge paperseed corpus status".to_string()],
+        });
+    } else {
+        checks.push(DoctorCheck {
+            id: "paperseed.disabled",
+            level: DoctorLevel::Warning,
+            message: "Paperseed mirroring is disabled; open-access paper results will not be cached automatically.".to_string(),
+            next: vec!["paperbridge config set paperseed_enabled true".to_string()],
+        });
+    }
+
+    if config.paperseed_enabled && !config.paperseed_auto_download {
+        checks.push(DoctorCheck {
+            id: "paperseed.auto-download-disabled",
+            level: DoctorLevel::Warning,
+            message: "Paperseed is enabled but automatic OA PDF download is disabled.".to_string(),
+            next: vec!["paperbridge config set paperseed_auto_download true".to_string()],
+        });
+    }
+
+    let corpus_root = config
+        .paperseed_corpus_root
+        .clone()
+        .unwrap_or_else(|| paperseed::app::default_corpus_root().display().to_string());
+    checks.push(DoctorCheck {
+        id: "paperseed.corpus-root",
+        level: DoctorLevel::Info,
+        message: format!("Paperseed corpus root resolves to `{corpus_root}`."),
+        next: vec!["paperbridge paperseed corpus status".to_string()],
+    });
+
+    checks.push(DoctorCheck {
+        id: "paperseed.yams",
+        level: DoctorLevel::Info,
+        message: if !config.paperseed_yams_enabled {
+            "Experimental YAMS integration is disabled; Paperseed will use the local corpus only."
+                .to_string()
+        } else if yams_health.ready() {
+            "Experimental YAMS integration is enabled and the YAMS daemon is running; Paperseed will try YAMS retrieval first with local fallback.".to_string()
+        } else if yams_health.binary_available {
+            "Experimental YAMS integration is enabled, but the YAMS daemon is not running; Paperseed will use the local corpus fallback.".to_string()
+        } else {
+            "Experimental YAMS integration is enabled, but `yams` was not detected; Paperseed will use the local corpus fallback.".to_string()
+        },
+        next: vec![
+            "yams daemon start".to_string(),
+            "paperbridge config doctor --setup".to_string(),
+        ],
+    });
+
+    checks.push(DoctorCheck {
+        id: "paperseed.p2p",
+        level: DoctorLevel::Info,
+        message: "Paperseed P2P transport is planned; seed manifests are available now."
+            .to_string(),
+        next: vec![
+            "paperbridge paperseed seed check --paper-id <id>".to_string(),
+            "paperbridge paperseed p2p status".to_string(),
+        ],
+    });
+
+    let status = if checks.iter().any(|check| check.level == DoctorLevel::Error) {
+        DoctorStatus::Error
+    } else if checks
+        .iter()
+        .any(|check| check.level == DoctorLevel::Warning)
+    {
+        DoctorStatus::Warning
+    } else {
+        DoctorStatus::Ok
+    };
+
+    let report = DoctorReport {
+        config_path: path.display().to_string(),
+        config_exists,
+        status,
+        checks,
+    };
+
+    if json {
+        print_json(&report)?;
+    } else {
+        print_doctor_report(&report, verbose);
+    }
+    Ok(())
+}
+
+fn run_doctor_setup(config: &mut Config, raw: &str) -> paperbridge::Result<()> {
+    if !toml_mentions_key(raw, "paperseed_enabled") {
+        config.paperseed_enabled =
+            prompt_bool("Enable Paperseed OA caching?", config.paperseed_enabled)?;
+    }
+    if !toml_mentions_key(raw, "paperseed_auto_download") {
+        config.paperseed_auto_download = prompt_bool(
+            "Auto-download open-access PDFs into Paperseed?",
+            config.paperseed_auto_download,
+        )?;
+    }
+    if !toml_mentions_key(raw, "paperseed_yams_enabled") {
+        config.paperseed_yams_enabled = prompt_bool(
+            "Enable experimental YAMS indexing/search when the daemon is running?",
+            config.paperseed_yams_enabled,
+        )?;
+    }
+    let yams_ready = config.paperseed_yams_enabled && paperseed::yams::yams_health("yams").ready();
+    if !toml_mentions_key(raw, "paperseed_corpus_root") && !yams_ready {
+        let current = config
+            .paperseed_corpus_root
+            .clone()
+            .unwrap_or_else(|| paperseed::app::default_corpus_root().display().to_string());
+        let value = prompt_string("Paperseed corpus root", &current)?;
+        config.paperseed_corpus_root = Some(value);
+    } else if config.paperseed_yams_enabled && yams_ready && config.paperseed_corpus_root.is_none()
+    {
+        println!("YAMS daemon detected; using YAMS retrieval with local fallback defaults.");
+    }
+    Ok(())
+}
+
+fn prompt_bool(prompt: &str, default: bool) -> paperbridge::Result<bool> {
+    let suffix = if default { "Y/n" } else { "y/N" };
+    let value = prompt_string(&format!("{prompt} [{suffix}]"), "")?;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" => Ok(default),
+        "y" | "yes" | "true" | "1" | "on" => Ok(true),
+        "n" | "no" | "false" | "0" | "off" => Ok(false),
+        other => Err(paperbridge::ZoteroMcpError::InvalidInput(format!(
+            "Expected yes/no for `{prompt}`, got `{other}`"
+        ))),
+    }
+}
+
+fn prompt_string(prompt: &str, default: &str) -> paperbridge::Result<String> {
+    if default.is_empty() {
+        print!("{prompt}: ");
+    } else {
+        print!("{prompt} [{default}]: ");
+    }
+    io::stdout()
+        .flush()
+        .map_err(|e| paperbridge::ZoteroMcpError::Config(e.to_string()))?;
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| paperbridge::ZoteroMcpError::Config(e.to_string()))?;
+    let input = input.trim();
+    if input.is_empty() {
+        Ok(default.to_string())
+    } else {
+        Ok(input.to_string())
+    }
+}
+
+fn toml_mentions_key(raw: &str, key: &str) -> bool {
+    raw.lines().any(|line| {
+        let line = line.trim_start();
+        !line.starts_with('#')
+            && line.starts_with(key)
+            && line[key.len()..].trim_start().starts_with('=')
+    })
+}
+
+fn print_doctor_report(report: &DoctorReport, verbose: bool) {
+    let warnings = report
+        .checks
+        .iter()
+        .filter(|check| check.level == DoctorLevel::Warning)
+        .count();
+    let errors = report
+        .checks
+        .iter()
+        .filter(|check| check.level == DoctorLevel::Error)
+        .count();
+    println!(
+        "Paperbridge doctor: {:?} ({} issue{})",
+        report.status,
+        warnings + errors,
+        if warnings + errors == 1 { "" } else { "s" }
+    );
+
+    let config_drift: Vec<&DoctorCheck> = report
+        .checks
+        .iter()
+        .filter(|check| check.id == "paperseed.config-drift")
+        .collect();
+    if !config_drift.is_empty() {
+        let missing = config_drift
+            .iter()
+            .filter_map(|check| check.message.split('`').nth(1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("- Missing Paperseed config: {missing}");
+        println!("  Run: paperbridge config doctor --setup");
+    }
+
+    for check in report
+        .checks
+        .iter()
+        .filter(|check| check.id != "paperseed.config-drift")
+    {
+        match check.level {
+            DoctorLevel::Error => {
+                println!("- Error: {}", check.message);
+                if let Some(cmd) = check.next.first() {
+                    println!("  Run: {cmd}");
+                }
+            }
+            DoctorLevel::Warning => {
+                println!("- {}", check.message);
+                if let Some(cmd) = check.next.first() {
+                    println!("  Run: {cmd}");
+                }
+            }
+            DoctorLevel::Info if verbose => {
+                println!("- {}", check.message);
+            }
+            DoctorLevel::Info => {}
+        }
+    }
+
+    if !verbose {
+        println!("Advanced: paperbridge config doctor --verbose | --json");
+    }
 }
 
 // ---------- Shared handlers (used by canonical + legacy dispatch arms) ----------
@@ -551,6 +928,93 @@ async fn handle_paper_query(
     print_json(&value)
 }
 
+async fn handle_paperseed(config: Config, action: PaperseedAction) -> paperbridge::Result<()> {
+    let api = build_paperseed_api(&config);
+    match action {
+        PaperseedAction::Corpus { action } => match action {
+            PaperseedCorpusAction::Status => {
+                print_json(&api.corpus_status()?)?;
+            }
+            PaperseedCorpusAction::Import {
+                file,
+                title,
+                license,
+            } => {
+                let paper = api.import_local_file(file, title, license)?;
+                print_json(&paper)?;
+            }
+            PaperseedCorpusAction::Ingest {
+                metadata,
+                file,
+                license,
+            } => {
+                let raw = std::fs::read_to_string(&metadata).map_err(|e| {
+                    paperbridge::ZoteroMcpError::Config(format!(
+                        "Failed to read metadata file {metadata}: {e}"
+                    ))
+                })?;
+                let metadata = paperseed::sources::metadata_from_paperbridge_json(&raw)?;
+                let paper = api.ingest_with_metadata(file, metadata, license)?;
+                print_json(&paper)?;
+            }
+            PaperseedCorpusAction::Query { q } => {
+                print_json(&api.query_corpus(&q)?)?;
+            }
+            PaperseedCorpusAction::Export { format } => {
+                let db = api.corpus_status()?;
+                match format {
+                    PaperseedExportFormat::Json => print_json(&db)?,
+                    PaperseedExportFormat::Bibtex => {
+                        println!("{}", paperseed::app::export_bibtex(&db));
+                    }
+                }
+            }
+        },
+        PaperseedAction::Seed { action } => match action {
+            PaperseedSeedAction::Check { paper_id } => {
+                let reason = paperseed::app::seed_check(api.paths(), &paper_id)
+                    .map_err(paperbridge::paperseed_api::map_error)?;
+                print_json(&serde_json::json!({
+                    "paper_id": paper_id,
+                    "allowed": true,
+                    "reason": reason,
+                }))?;
+            }
+            PaperseedSeedAction::Create { paper_id } => {
+                print_json(&api.create_seed_manifest(&paper_id)?)?;
+            }
+        },
+        PaperseedAction::P2p { action } => match action {
+            PaperseedP2pAction::Status => {
+                print_json(&serde_json::json!({
+                    "transport": "not-wired",
+                    "status": "planned"
+                }))?;
+            }
+        },
+    }
+    Ok(())
+}
+
+fn build_paperseed_api(config: &Config) -> paperbridge::paperseed_api::PaperseedApi {
+    let yams = if config.paperseed_yams_enabled {
+        paperseed::yams::YamsConfig::auto_detect()
+    } else {
+        paperseed::yams::YamsConfig::disabled()
+    };
+    match &config.paperseed_corpus_root {
+        Some(root) => paperbridge::paperseed_api::PaperseedApi::with_yams(
+            root.clone(),
+            config.unpaywall_email.clone(),
+            yams,
+        ),
+        None => paperbridge::paperseed_api::PaperseedApi::default_with_yams(
+            config.unpaywall_email.clone(),
+            yams,
+        ),
+    }
+}
+
 fn read_json_file<T: serde::de::DeserializeOwned>(file: &str) -> paperbridge::Result<T> {
     let text = std::fs::read_to_string(file)
         .map_err(|e| paperbridge::ZoteroMcpError::Config(format!("Failed to read {file}: {e}")))?;
@@ -575,11 +1039,23 @@ fn build_service(config: Config) -> paperbridge::Result<PaperbridgeService> {
         grobid_image: config.grobid_image.clone(),
         grobid_timeout_secs: config.grobid_timeout_secs,
     };
+    let paperseed_enabled = config.paperseed_enabled;
+    let paperseed_config = PaperseedMirrorConfig {
+        corpus_root: config.paperseed_corpus_root.clone(),
+        unpaywall_email: config.unpaywall_email.clone(),
+        auto_download: config.paperseed_auto_download,
+        yams_enabled: config.paperseed_yams_enabled,
+    };
     let paper_search = paperbridge::external::PaperSearch::with_keys_struct(keys);
     let backend = build_backend(config)?;
-    Ok(PaperbridgeService::with_paper_search(backend, paper_search)
+    let service = PaperbridgeService::with_paper_search(backend, paper_search)
         .with_unpaywall(unpaywall_email)
-        .with_paper_config(paper_config))
+        .with_paper_config(paper_config);
+    Ok(if paperseed_enabled {
+        service.with_paperseed(paperseed_config)
+    } else {
+        service
+    })
 }
 
 async fn run_stdio(config: Config) -> paperbridge::Result<()> {
@@ -839,7 +1315,7 @@ fn handle_config_get(key: Option<&str>, show_secret: bool) -> paperbridge::Resul
     if let Some(key) = key {
         let value = cfg.get_value(key).ok_or_else(|| {
             paperbridge::ZoteroMcpError::InvalidInput(format!(
-                "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key, core_api_key, ads_api_token, ncbi_api_key, scholarapi_key"
+                "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key, core_api_key, ads_api_token, ncbi_api_key, scholarapi_key, unpaywall_email, grobid_url, grobid_timeout_secs, grobid_auto_spawn, grobid_image, update_check_enabled, paperseed_enabled, paperseed_auto_download, paperseed_yams_enabled, paperseed_corpus_root"
             ))
         })?;
         if SENSITIVE_CONFIG_KEYS.contains(&key) && !show_secret {
@@ -1121,5 +1597,17 @@ mod tests {
     fn parse_user_id_from_profile_html_works() {
         let html = r#"<script>window.__DATA__ = {"userID":7141888,"foo":"bar"};</script>"#;
         assert_eq!(parse_user_id_from_profile_html(html), Some(7141888));
+    }
+
+    #[test]
+    fn doctor_key_detection_ignores_comments() {
+        let raw = r#"
+# paperseed_enabled = true
+paperseed_auto_download = true
+  paperseed_corpus_root = "/tmp/corpus"
+"#;
+        assert!(!toml_mentions_key(raw, "paperseed_enabled"));
+        assert!(toml_mentions_key(raw, "paperseed_auto_download"));
+        assert!(toml_mentions_key(raw, "paperseed_corpus_root"));
     }
 }

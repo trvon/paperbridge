@@ -215,7 +215,7 @@ pub struct FulltextContent {
     pub total_chars: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
 pub struct VoxTextPayload {
     pub source: String,
     pub chunk_count: usize,
@@ -273,6 +273,9 @@ pub struct CrossrefWork {
 #[serde(rename_all = "snake_case")]
 pub enum PaperSource {
     Arxiv,
+    #[value(name = "paperseed", alias = "local_cache", alias = "cache")]
+    #[serde(alias = "local_cache", alias = "cache")]
+    Paperseed,
     #[value(name = "hugging_face", alias = "huggingface", alias = "hf")]
     #[serde(alias = "huggingface", alias = "hf")]
     HuggingFace,
@@ -386,6 +389,30 @@ pub struct PaperHit {
     pub oa_pdf_url: Option<String>,
     pub venue: Option<String>,
     pub citation_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CachedPaperSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+pub struct CachedPaperSummary {
+    pub paper_id: String,
+    pub cached: bool,
+    pub has_full_text: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+pub struct CachedPaperDetail {
+    pub paper_id: String,
+    pub title: String,
+    pub authors: Vec<String>,
+    pub year: Option<String>,
+    pub doi: Option<String>,
+    pub venue: Option<String>,
+    pub source_url: Option<String>,
+    pub stored_path: String,
+    pub mime: String,
+    pub yams_hash: Option<String>,
+    pub has_full_text: bool,
 }
 
 #[cfg(test)]

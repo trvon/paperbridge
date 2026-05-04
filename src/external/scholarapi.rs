@@ -113,6 +113,7 @@ fn convert_work(w: RawScholarApiWork) -> PaperHit {
         oa_pdf_url: w.oa_pdf_url,
         venue: w.journal,
         citation_count: w.citation_count,
+        cache: None,
     }
 }
 

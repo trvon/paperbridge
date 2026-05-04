@@ -152,6 +152,7 @@ fn convert_paper(p: RawS2Paper) -> PaperHit {
         oa_pdf_url: pdf,
         venue: p.venue.filter(|v| !v.is_empty()),
         citation_count: p.citation_count,
+        cache: None,
     }
 }
 

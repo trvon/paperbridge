@@ -208,6 +208,7 @@ fn convert_doc(uid: String, d: RawSummaryDoc) -> PaperHit {
         oa_pdf_url: None,
         venue,
         citation_count: None,
+        cache: None,
     }
 }
 

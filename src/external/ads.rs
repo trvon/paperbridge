@@ -127,6 +127,7 @@ fn convert_doc(d: RawAdsDoc) -> PaperHit {
         oa_pdf_url: None,
         venue: d.pub_field,
         citation_count: d.citation_count,
+        cache: None,
     }
 }
 

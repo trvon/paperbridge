@@ -51,16 +51,25 @@ pub enum Command {
         action: CollectionAction,
     },
 
-    /// Search external paper indexes and resolve DOIs
+    /// Search, resolve, and inspect papers
     Papers {
         #[command(subcommand)]
         action: PapersAction,
     },
 
-    /// Retrieve and query structured paper content (sections, references, figures)
+    #[command(
+        hide = true,
+        after_help = "Deprecated. Use 'paperbridge papers structure' or 'paperbridge papers query' instead."
+    )]
     Paper {
         #[command(subcommand)]
         action: PaperAction,
+    },
+
+    /// Manage Paperseed local corpus, seed manifests, and P2P state
+    Paperseed {
+        #[command(subcommand)]
+        action: PaperseedAction,
     },
 
     /// Print the agent operating guide (same content served over MCP as the `paperbridge_skill` prompt)
@@ -393,6 +402,27 @@ pub enum PapersAction {
         #[arg(long)]
         doi: String,
     },
+    /// Fetch the full PaperStructure JSON for a Zotero item or cached paper
+    Structure {
+        /// Zotero item key or cached paper id
+        #[arg(long)]
+        key: String,
+        /// Optional attachment key override
+        #[arg(long)]
+        attachment: Option<String>,
+    },
+    /// Evaluate a dotted-path selector against a paper's structure
+    Query {
+        /// Zotero item key or cached paper id
+        #[arg(long)]
+        key: String,
+        /// Dotted-path selector (e.g. "metadata.title", "sections[0].heading")
+        #[arg(long)]
+        selector: String,
+        /// Optional attachment key override
+        #[arg(long)]
+        attachment: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -420,6 +450,101 @@ pub enum PaperAction {
     },
 }
 
+#[derive(Debug, Subcommand)]
+pub enum PaperseedAction {
+    /// Manage the local Paperseed corpus
+    Corpus {
+        #[command(subcommand)]
+        action: PaperseedCorpusAction,
+    },
+
+    /// Manage license-gated seed manifests
+    Seed {
+        #[command(subcommand)]
+        action: PaperseedSeedAction,
+    },
+
+    /// Manage future P2P transport state
+    P2p {
+        #[command(subcommand)]
+        action: PaperseedP2pAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PaperseedCorpusAction {
+    /// Show Paperseed corpus status using Paperbridge config
+    Status,
+
+    /// Import a PDF/text file that the user has rights to store locally
+    Import {
+        /// File path to import
+        file: String,
+        /// Optional title override
+        #[arg(long)]
+        title: Option<String>,
+        /// Optional license, e.g. cc-by, cc0, public-domain, user-owned-private
+        #[arg(long)]
+        license: Option<String>,
+    },
+
+    /// Ingest Paperbridge/Zotero-style metadata plus an authorized local file
+    Ingest {
+        /// Paperbridge/Zotero-style JSON metadata file
+        #[arg(long)]
+        metadata: String,
+        /// Authorized local PDF/text file to store
+        #[arg(long)]
+        file: String,
+        /// License override
+        #[arg(long)]
+        license: Option<String>,
+    },
+
+    /// Search the local Paperseed full-text corpus
+    Query {
+        /// Local full-text query
+        #[arg(short = 'q', long)]
+        q: String,
+    },
+
+    /// Export the local Paperseed corpus
+    Export {
+        /// Export format
+        #[arg(long, value_enum, default_value_t = PaperseedExportFormat::Json)]
+        format: PaperseedExportFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PaperseedSeedAction {
+    /// Check whether a corpus paper may be seeded
+    Check {
+        /// Local paper id or content hash
+        #[arg(long)]
+        paper_id: String,
+    },
+
+    /// Create a license-gated seed manifest
+    Create {
+        /// Local paper id or content hash
+        #[arg(long)]
+        paper_id: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PaperseedP2pAction {
+    /// Show P2P transport status
+    Status,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, Eq, PartialEq)]
+pub enum PaperseedExportFormat {
+    Json,
+    Bibtex,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum, Eq, PartialEq)]
 pub enum SnippetTarget {
     Opencode,
@@ -442,6 +567,18 @@ pub enum ConfigAction {
     },
     /// Validate loaded config and print safe values
     Validate,
+    /// Diagnose config drift, risky defaults, and Paperseed corpus/P2P settings
+    Doctor {
+        /// Print structured JSON diagnostics
+        #[arg(long)]
+        json: bool,
+        /// Print all checks, including informational advanced/setup hints
+        #[arg(long)]
+        verbose: bool,
+        /// Interactively add missing important config values
+        #[arg(long)]
+        setup: bool,
+    },
     /// Get one config key or print all safe values
     Get {
         /// Optional config key
@@ -503,6 +640,21 @@ mod tests {
             cli.command,
             Some(Command::Config {
                 action: ConfigAction::Path
+            })
+        ));
+    }
+
+    #[test]
+    fn parse_config_doctor() {
+        let cli = Cli::try_parse_from(["paperbridge", "config", "doctor", "--json"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Config {
+                action: ConfigAction::Doctor {
+                    json: true,
+                    verbose: false,
+                    setup: false,
+                }
             })
         ));
     }
@@ -611,6 +763,42 @@ mod tests {
     }
 
     #[test]
+    fn parse_canonical_papers_structure() {
+        let cli =
+            Cli::try_parse_from(["paperbridge", "papers", "structure", "--key", "ITEMA"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Papers {
+                action: PapersAction::Structure { key, attachment: None }
+            }) if key == "ITEMA"
+        ));
+    }
+
+    #[test]
+    fn parse_canonical_papers_query() {
+        let cli = Cli::try_parse_from([
+            "paperbridge",
+            "papers",
+            "query",
+            "--key",
+            "ITEMA",
+            "--selector",
+            "metadata.doi",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Papers {
+                action: PapersAction::Query {
+                    key,
+                    selector,
+                    attachment: None,
+                }
+            }) if key == "ITEMA" && selector == "metadata.doi"
+        ));
+    }
+
+    #[test]
     fn parse_canonical_status() {
         let cli = Cli::try_parse_from(["paperbridge", "status"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Status)));
@@ -653,6 +841,18 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_hidden_paper_alias_still_works() {
+        let cli =
+            Cli::try_parse_from(["paperbridge", "paper", "structure", "--key", "ITEMA"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Paper {
+                action: PaperAction::Structure { key, attachment: None }
+            }) if key == "ITEMA"
+        ));
     }
 
     #[test]

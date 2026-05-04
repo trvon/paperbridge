@@ -623,6 +623,7 @@ mod tests {
             oa_pdf_url: None,
             venue: None,
             citation_count: None,
+            cache: None,
         }
     }
 

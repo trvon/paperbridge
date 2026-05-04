@@ -142,6 +142,7 @@ fn convert_info(info: RawDblpInfo) -> PaperHit {
         oa_pdf_url: None,
         venue: info.venue,
         citation_count: None,
+        cache: None,
     }
 }
 

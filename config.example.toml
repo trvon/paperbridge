@@ -8,3 +8,12 @@ user_id = 123456
 # scholarapi_key = "sch_xxxxxxxxx"
 timeout_secs = 20
 log_level = "info"
+
+# Paperseed integration: Paperbridge owns discovery; Paperseed mirrors OA files
+# into a local corpus and prepares license-gated seed manifests.
+paperseed_enabled = false
+paperseed_auto_download = true
+# Experimental: use YAMS for secondary indexing/search when the `yams` binary is detected and the YAMS daemon is running;
+# Paperseed always falls back to the local JSON corpus.
+paperseed_yams_enabled = true
+# paperseed_corpus_root = "/path/to/paperseed-corpus"

@@ -224,6 +224,7 @@ fn convert_message_to_hit(msg: RawCrossrefMessage) -> PaperHit {
         oa_pdf_url: None,
         venue,
         citation_count: None,
+        cache: None,
     }
 }
 

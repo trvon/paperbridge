@@ -37,10 +37,10 @@ the breakdown:
 ## CLI
 
 ```bash
-paperbridge paper structure --key ABCD1234
-paperbridge paper query --key ABCD1234 --selector "metadata.doi"
-paperbridge paper query --key ABCD1234 --selector "sections[2].heading"
-paperbridge paper query --key ABCD1234 --selector "references[0].title"
+paperbridge papers structure --key ABCD1234
+paperbridge papers query --key ABCD1234 --selector "metadata.doi"
+paperbridge papers query --key ABCD1234 --selector "sections[2].heading"
+paperbridge papers query --key ABCD1234 --selector "references[0].title"
 ```
 
 Both commands accept an optional `--attachment-key` when an item has more than
