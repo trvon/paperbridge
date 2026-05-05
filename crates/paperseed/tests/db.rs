@@ -126,3 +126,59 @@ fn save_is_atomic_and_does_not_leave_partial_files() {
     let reloaded = CorpusDb::load(&db_path).unwrap();
     assert_eq!(reloaded.papers.len(), 0);
 }
+
+#[test]
+fn pdf_import_extracts_full_text_uncompressed() {
+    let dir = tempfile::tempdir().unwrap();
+    let pdf_path = dir.path().join("test.pdf");
+    // Minimal uncompressed PDF with one text stream
+    std::fs::write(
+        &pdf_path,
+        b"%PDF-1.0\n\
+1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n\
+2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n\
+3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Contents 4 0 R/Parent 2 0 R>>endobj\n\
+4 0 obj<</Length 44>>stream\n\
+BT /F1 12 Tf 100 700 Td (Hello World Test) Tj ET\n\
+endstream\n\
+endobj\n\
+xref\n\
+0 5\n\
+0000000000 65535 f \n\
+0000000009 00000 n \n\
+0000000058 00000 n \n\
+0000000115 00000 n \n\
+0000000190 00000 n \n\
+trailer<</Size 5/Root 1 0 R>>\n\
+startxref\n\
+279\n\
+%%EOF\n",
+    )
+    .unwrap();
+
+    let paths = CorpusPaths::new(dir.path().join("corpus"));
+    let paper = import_test_file(&paths, pdf_path, "PDF Test", "cc-by").unwrap();
+
+    let db = CorpusDb::load(&paths.db_path).unwrap();
+    let ft = db
+        .get(&paper.metadata.id)
+        .and_then(|e| e.full_text.as_deref())
+        .expect("pdf full text was not extracted");
+    assert!(ft.contains("Hello World Test"), "fulltext: {ft}");
+}
+
+#[test]
+fn text_import_extracts_full_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("fixture.txt");
+    std::fs::write(&source, "plain text content alpha beta").unwrap();
+    let paths = CorpusPaths::new(dir.path().join("corpus"));
+    let paper = import_test_file(&paths, source, "Text Test", "cc-by").unwrap();
+
+    let db = CorpusDb::load(&paths.db_path).unwrap();
+    let ft = db
+        .get(&paper.metadata.id)
+        .and_then(|e| e.full_text.as_deref())
+        .expect("text full text was not extracted");
+    assert!(ft.contains("plain text content"), "fulltext: {ft}");
+}
