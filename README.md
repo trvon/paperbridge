@@ -149,7 +149,6 @@ paperbridge paperseed corpus export --format bibtex
 
 paperbridge paperseed seed check --paper-id <id>
 paperbridge paperseed seed create --paper-id <id>
-paperbridge paperseed p2p status
 ```
 
 By default, the corpus is stored under the XDG data directory

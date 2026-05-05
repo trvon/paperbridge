@@ -6,8 +6,8 @@ use crate::models::{
     BackendInfo, CachedPaperDetail, CachedPaperSummary, CollectionSummary, CollectionUpdateRequest,
     CollectionWriteRequest, CrossrefWork, DeleteCollectionRequest, DeleteItemRequest,
     FulltextContent, ItemDetail, ItemSummary, ItemUpdateRequest, ItemVoxPayload, ItemWriteRequest,
-    ListCollectionsQuery, PaperHit, PaperStructure, SearchItemsQuery, SearchVoxPayload,
-    ValidationIssue, ValidationIssueLevel, ValidationReport, VoxTextPayload,
+    ListCollectionsQuery, PaperHit, PaperStructure, SearchItemsQuery, SearchPapersResult,
+    SearchVoxPayload, ValidationIssue, ValidationIssueLevel, ValidationReport, VoxTextPayload,
 };
 use crate::paper;
 use crate::paper::docker::DEFAULT_PORT as GROBID_DEFAULT_PORT;
@@ -123,7 +123,8 @@ impl PaperbridgeService {
         self
     }
 
-    pub async fn search_papers(&self, opts: SearchOptions) -> Result<Vec<PaperHit>> {
+    pub async fn search_papers(&self, opts: SearchOptions) -> Result<SearchPapersResult> {
+        let query = opts.query.clone();
         let mut hits = self.paper_search.search(opts.clone()).await?;
         if let Some(api) = &self.paperseed {
             let mut cached_hits =
@@ -137,8 +138,28 @@ impl PaperbridgeService {
                 .map(|cache| cache.cached)
                 .unwrap_or(false)
         });
+        let total_count = hits.len() as u32;
         self.mirror_open_access_hits(&hits);
-        Ok(hits)
+
+        let offset = opts.offset;
+        let limit = opts.limit;
+        if limit > 0 || offset > 0 {
+            let start = offset.min(total_count) as usize;
+            let end = if limit > 0 {
+                (start + limit as usize).min(total_count as usize)
+            } else {
+                total_count as usize
+            };
+            hits = hits[start..end].to_vec();
+        }
+
+        Ok(SearchPapersResult {
+            query,
+            total_count,
+            offset,
+            limit,
+            hits,
+        })
     }
 
     fn mirror_open_access_hits(&self, hits: &[PaperHit]) {
@@ -275,15 +296,31 @@ impl PaperbridgeService {
         self.backend.get_item(key).await
     }
 
-    pub async fn get_item_fulltext(&self, attachment_key: &str) -> Result<FulltextContent> {
-        self.backend.get_item_fulltext(attachment_key).await
-    }
-
     pub async fn get_pdf_text(&self, attachment_key: &str) -> Result<FulltextContent> {
         if let Some(fulltext) = self.try_cached_fulltext(attachment_key)? {
             return Ok(fulltext);
         }
-        self.backend.get_pdf_text(attachment_key).await
+        match self.backend.get_pdf_text(attachment_key).await {
+            Ok(fulltext) => Ok(fulltext),
+            Err(backend_err) => {
+                if let Some(fulltext) = self.try_cached_fulltext_by_query(attachment_key)? {
+                    return Ok(fulltext);
+                }
+                Err(backend_err)
+            }
+        }
+    }
+
+    pub async fn get_item_fulltext(&self, attachment_key: &str) -> Result<FulltextContent> {
+        match self.backend.get_item_fulltext(attachment_key).await {
+            Ok(fulltext) => Ok(fulltext),
+            Err(backend_err) => {
+                if let Some(fulltext) = self.try_cached_fulltext_by_query(attachment_key)? {
+                    return Ok(fulltext);
+                }
+                Err(backend_err)
+            }
+        }
     }
 
     pub async fn get_paper_structure(
@@ -565,13 +602,27 @@ impl PaperbridgeService {
                     &source, &fulltext, max_chars,
                 ));
             }
-            let fulltext = self.backend.get_pdf_text(&attachment_key).await?;
-            let source = req
-                .source_label
-                .unwrap_or_else(|| format!("attachment:{attachment_key}"));
-            return Ok(pdf::prepare_vox_payload_from_fulltext(
-                &source, &fulltext, max_chars,
-            ));
+            match self.backend.get_pdf_text(&attachment_key).await {
+                Ok(fulltext) => {
+                    let source = req
+                        .source_label
+                        .unwrap_or_else(|| format!("attachment:{attachment_key}"));
+                    return Ok(pdf::prepare_vox_payload_from_fulltext(
+                        &source, &fulltext, max_chars,
+                    ));
+                }
+                Err(backend_err) => {
+                    if let Some(fulltext) = self.try_cached_fulltext_by_query(&attachment_key)? {
+                        let source = req
+                            .source_label
+                            .unwrap_or_else(|| format!("paperseed:{attachment_key}"));
+                        return Ok(pdf::prepare_vox_payload_from_fulltext(
+                            &source, &fulltext, max_chars,
+                        ));
+                    }
+                    return Err(backend_err);
+                }
+            }
         }
 
         Err(ZoteroMcpError::InvalidInput(
@@ -637,8 +688,11 @@ impl PaperbridgeService {
                 limit_per_source: req.search_limit.unwrap_or(DEFAULT_PIPELINE_SEARCH_LIMIT),
                 sources: None,
                 timeout_ms: 8_000,
+                offset: 0,
+                limit: 0,
             })
-            .await?;
+            .await?
+            .hits;
         let result_index = req.result_index.unwrap_or(0);
         if let Some(selected) = paper_hits.get(result_index)
             && let Some(cache) = &selected.cache
@@ -718,6 +772,22 @@ impl PaperbridgeService {
             Err(ZoteroMcpError::InvalidInput(_)) => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    fn try_cached_fulltext_by_query(&self, query: &str) -> Result<Option<FulltextContent>> {
+        let Some(api) = &self.paperseed else {
+            return Ok(None);
+        };
+        let hits = match api.search_cached_papers(query, 1) {
+            Ok(hits) => hits,
+            Err(_) => return Ok(None),
+        };
+        if let Some(hit) = hits.first()
+            && let Some(cache) = &hit.cache
+        {
+            return self.try_cached_fulltext(&cache.paper_id);
+        }
+        Ok(None)
     }
 
     fn try_cached_paper_structure(&self, paper_id: &str) -> Result<Option<PaperStructure>> {
@@ -1258,15 +1328,18 @@ mod tests {
             },
         );
 
-        let hits = service
+        let result = service
             .search_papers(SearchOptions {
                 query: "matched external paper".to_string(),
                 limit_per_source: 5,
                 sources: Some(vec![PaperSource::Arxiv]),
                 timeout_ms: 8_000,
+                offset: 0,
+                limit: 0,
             })
             .await
             .unwrap();
+        let hits = result.hits;
 
         assert!(!hits.is_empty());
         assert!(

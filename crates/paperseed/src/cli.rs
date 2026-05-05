@@ -5,7 +5,7 @@ use std::path::PathBuf;
 #[command(
     name = "paperseed",
     version,
-    about = "Paperseed corpus, seeding, and P2P management for Paperbridge"
+    about = "Paperseed local corpus and seeding for Paperbridge"
 )]
 pub struct Cli {
     /// Emit machine-readable JSON for supported commands
@@ -28,16 +28,10 @@ pub enum Command {
         action: CorpusAction,
     },
 
-    /// Manage license-gated seed manifests and future sharing state
+    /// Manage license-gated seed manifests
     Seed {
         #[command(subcommand)]
         action: SeedAction,
-    },
-
-    /// Manage future P2P transport state
-    P2p {
-        #[command(subcommand)]
-        action: P2pAction,
     },
 
     /// Show corpus status and policy mode
@@ -159,12 +153,6 @@ pub enum SeedAction {
         #[arg(long)]
         paper_id: String,
     },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
-pub enum P2pAction {
-    /// Show P2P transport status
-    Status,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

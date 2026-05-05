@@ -1,6 +1,6 @@
 use clap::Parser;
 use paperseed::app::{CorpusPaths, ImportRequest, IngestRequest, default_corpus_root};
-use paperseed::cli::{Cli, Command, CorpusAction, ExportFormat, P2pAction, SeedAction};
+use paperseed::cli::{Cli, Command, CorpusAction, ExportFormat, SeedAction};
 use paperseed::sources::metadata_from_paperbridge_json;
 
 fn main() -> paperseed::Result<()> {
@@ -13,7 +13,6 @@ fn main() -> paperseed::Result<()> {
     }) {
         Command::Corpus { action } => handle_corpus(action, &paths, json)?,
         Command::Seed { action } => handle_seed(action, &paths, json)?,
-        Command::P2p { action } => handle_p2p(action, json)?,
 
         // Hidden compatibility paths while the prototype settles.
         Command::Status => handle_corpus(CorpusAction::Status, &paths, json)?,
@@ -177,24 +176,6 @@ fn handle_seed(action: SeedAction, paths: &CorpusPaths, json: bool) -> paperseed
                         .join(format!("{}.json", manifest.paper_id))
                         .display()
                 );
-                println!("P2P transport is not wired yet");
-            }
-        }
-    }
-    Ok(())
-}
-
-fn handle_p2p(action: P2pAction, json: bool) -> paperseed::Result<()> {
-    match action {
-        P2pAction::Status => {
-            if json {
-                print_json(&serde_json::json!({
-                    "transport": "not-wired",
-                    "status": "planned"
-                }))?;
-            } else {
-                println!("paperseed p2p: transport not wired yet");
-                println!("next: implement transport over seed manifests");
             }
         }
     }

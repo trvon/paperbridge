@@ -1,9 +1,9 @@
 //! Paperseed integration boundary.
 //!
 //! Paperbridge owns research/search user flows and MCP/API exposure. Paperseed
-//! owns local corpus storage, license-gated seed manifests, and future P2P
-//! transport state. This module keeps that boundary explicit so Paperbridge can
-//! call Paperseed as a library without growing a second corpus/seeding CLI.
+//! owns local corpus storage and license-gated seed manifests. This module keeps
+//! that boundary explicit so Paperbridge can call Paperseed as a library
+//! without growing a second corpus/seeding CLI.
 
 use crate::error::{Result, ZoteroMcpError};
 use crate::models::{

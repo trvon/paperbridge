@@ -2,7 +2,7 @@ use clap::{CommandFactory, Parser};
 use paperbridge::cli::{
     Cli, CollectionAction, Command, ConfigAction, ItemAction, LibraryAction, PaperAction,
     PapersAction, PaperseedAction, PaperseedCorpusAction, PaperseedExportFormat,
-    PaperseedP2pAction, PaperseedSeedAction, SnippetTarget,
+    PaperseedSeedAction, SnippetTarget,
 };
 use paperbridge::config::Config;
 use paperbridge::external::SearchOptions;
@@ -172,6 +172,8 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
                 limit,
                 sources,
                 timeout_ms,
+                offset,
+                max_results,
             } => {
                 handle_papers_search(
                     config,
@@ -179,6 +181,8 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
                     limit,
                     sources,
                     timeout_ms,
+                    offset,
+                    max_results,
                 )
                 .await?
             }
@@ -310,6 +314,8 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
                 limit,
                 sources,
                 timeout_ms,
+                None,
+                None,
             )
             .await?;
         }
@@ -521,17 +527,6 @@ fn handle_config_doctor(json: bool, verbose: bool, setup: bool) -> paperbridge::
         next: vec![
             "yams daemon start".to_string(),
             "paperbridge config doctor --setup".to_string(),
-        ],
-    });
-
-    checks.push(DoctorCheck {
-        id: "paperseed.p2p",
-        level: DoctorLevel::Info,
-        message: "Paperseed P2P transport is planned; seed manifests are available now."
-            .to_string(),
-        next: vec![
-            "paperbridge paperseed seed check --paper-id <id>".to_string(),
-            "paperbridge paperseed p2p status".to_string(),
         ],
     });
 
@@ -867,6 +862,8 @@ async fn handle_papers_search(
     limit: Option<u32>,
     sources: Option<Vec<PaperSource>>,
     timeout_ms: Option<u64>,
+    offset: Option<u32>,
+    max_results: Option<u32>,
 ) -> paperbridge::Result<()> {
     let service = build_service(config)?;
     let opts = SearchOptions {
@@ -874,9 +871,11 @@ async fn handle_papers_search(
         limit_per_source: limit.unwrap_or(10),
         sources,
         timeout_ms: timeout_ms.unwrap_or(8000),
+        offset: offset.unwrap_or(0),
+        limit: max_results.unwrap_or(0),
     };
-    let hits = service.search_papers(opts).await?;
-    print_json(&hits)
+    let result = service.search_papers(opts).await?;
+    print_json(&result)
 }
 
 fn normalize_papers_query(
@@ -982,14 +981,6 @@ async fn handle_paperseed(config: Config, action: PaperseedAction) -> paperbridg
             }
             PaperseedSeedAction::Create { paper_id } => {
                 print_json(&api.create_seed_manifest(&paper_id)?)?;
-            }
-        },
-        PaperseedAction::P2p { action } => match action {
-            PaperseedP2pAction::Status => {
-                print_json(&serde_json::json!({
-                    "transport": "not-wired",
-                    "status": "planned"
-                }))?;
             }
         },
     }

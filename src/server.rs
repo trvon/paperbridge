@@ -220,6 +220,12 @@ pub struct SearchPapersParams {
 
     #[schemars(description = "Per-source timeout in milliseconds (default 8000)")]
     pub timeout_ms: Option<u64>,
+
+    #[schemars(description = "Zero-based offset into the merged result list (default 0)")]
+    pub offset: Option<u32>,
+
+    #[schemars(description = "Maximum results to return; 0 means all (default 0)")]
+    pub limit: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -316,7 +322,7 @@ impl PaperbridgeServer {
 
     #[tool(
         name = "get_item_fulltext",
-        description = "Get indexed full-text content for a Zotero attachment key"
+        description = "Get indexed full-text content for a Zotero attachment key. Falls back to searching the local Paperseed cache by the attachment key as a natural-language query when the backend is unavailable."
     )]
     async fn get_item_fulltext(
         &self,
@@ -332,7 +338,7 @@ impl PaperbridgeServer {
 
     #[tool(
         name = "get_pdf_text",
-        description = "Get PDF text for a Zotero attachment key (via Zotero full-text index)"
+        description = "Get PDF text for a Zotero attachment key (via Zotero full-text index). Falls back to searching the local Paperseed cache by the attachment key as a natural-language query when the backend is unavailable."
     )]
     async fn get_pdf_text(
         &self,
@@ -593,7 +599,7 @@ impl PaperbridgeServer {
 
     #[tool(
         name = "search_papers",
-        description = "Search external paper sources (arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed, HuggingFace, Semantic Scholar, CORE, NASA ADS, ScholarAPI) in parallel and return merged, deduped hits"
+        description = "Search external paper sources (arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed, HuggingFace, Semantic Scholar, CORE, NASA ADS, ScholarAPI) and the local Paperseed cache in parallel. Returns paginated results with total_count, offset, limit, and hits. Locally cached papers are prioritized first."
     )]
     async fn search_papers(
         &self,
@@ -604,13 +610,15 @@ impl PaperbridgeServer {
             limit_per_source: params.limit_per_source.unwrap_or(10),
             sources: params.sources,
             timeout_ms: params.timeout_ms.unwrap_or(8000),
+            offset: params.offset.unwrap_or(0),
+            limit: params.limit.unwrap_or(0),
         };
-        let hits = self
+        let result = self
             .service
             .search_papers(opts)
             .await
             .map_err(Self::map_error)?;
-        Self::ok_json(&hits)
+        Self::ok_json(&result)
     }
 }
 

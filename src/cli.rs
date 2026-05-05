@@ -66,7 +66,7 @@ pub enum Command {
         action: PaperAction,
     },
 
-    /// Manage Paperseed local corpus, seed manifests, and P2P state
+    /// Manage Paperseed local corpus and seed manifests
     Paperseed {
         #[command(subcommand)]
         action: PaperseedAction,
@@ -395,6 +395,12 @@ pub enum PapersAction {
         /// Per-source timeout in milliseconds (default 8000)
         #[arg(long)]
         timeout_ms: Option<u64>,
+        /// Zero-based pagination offset (default 0)
+        #[arg(long)]
+        offset: Option<u32>,
+        /// Maximum results to return; 0 means all (default 0)
+        #[arg(long)]
+        max_results: Option<u32>,
     },
     /// Resolve a DOI via Crossref and print structured metadata
     ResolveDoi {
@@ -463,12 +469,6 @@ pub enum PaperseedAction {
         #[command(subcommand)]
         action: PaperseedSeedAction,
     },
-
-    /// Manage future P2P transport state
-    P2p {
-        #[command(subcommand)]
-        action: PaperseedP2pAction,
-    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -531,12 +531,6 @@ pub enum PaperseedSeedAction {
         #[arg(long)]
         paper_id: String,
     },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum PaperseedP2pAction {
-    /// Show P2P transport status
-    Status,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, Eq, PartialEq)]

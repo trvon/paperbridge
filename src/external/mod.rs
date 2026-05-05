@@ -43,6 +43,8 @@ pub struct SearchOptions {
     pub limit_per_source: u32,
     pub sources: Option<Vec<PaperSource>>,
     pub timeout_ms: u64,
+    pub offset: u32,
+    pub limit: u32,
 }
 
 impl SearchOptions {
@@ -52,6 +54,8 @@ impl SearchOptions {
             limit_per_source: DEFAULT_LIMIT_PER_SOURCE,
             sources: None,
             timeout_ms: DEFAULT_TIMEOUT_MS,
+            offset: 0,
+            limit: 0,
         }
     }
 
@@ -727,6 +731,8 @@ mod tests {
                 limit_per_source: 1,
                 sources: Some(vec![PaperSource::HuggingFace, PaperSource::SemanticScholar]),
                 timeout_ms: 200,
+                offset: 0,
+                limit: 0,
             })
             .await
             .unwrap();
@@ -814,6 +820,8 @@ mod tests {
                 PaperSource::Arxiv,
             ]),
             timeout_ms: 200,
+            offset: 0,
+            limit: 0,
         };
         let hits = paper_search.search(opts).await.unwrap();
 
@@ -883,6 +891,8 @@ mod tests {
                 PaperSource::Arxiv,
             ]),
             timeout_ms: 4000,
+            offset: 0,
+            limit: 0,
         };
         let hits = paper_search.search(opts).await.unwrap();
 

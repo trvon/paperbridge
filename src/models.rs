@@ -394,6 +394,15 @@ pub struct PaperHit {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+pub struct SearchPapersResult {
+    pub query: String,
+    pub total_count: u32,
+    pub offset: u32,
+    pub limit: u32,
+    pub hits: Vec<PaperHit>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
 pub struct CachedPaperSummary {
     pub paper_id: String,
     pub cached: bool,

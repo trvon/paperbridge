@@ -288,7 +288,6 @@ inherit Paperbridge config:
 ```text
 paperbridge paperseed corpus {status,import,ingest,query,export}
 paperbridge paperseed seed {check,create}
-paperbridge paperseed p2p {status}
 ```
 
 Do not add Paperseed root-level `search`, `fetch`, or source-discovery commands.

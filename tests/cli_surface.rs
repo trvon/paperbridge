@@ -99,7 +99,6 @@ fn legacy_aliases_still_parse() {
             "--paper-id",
             "abc",
         ],
-        &["paperbridge", "paperseed", "p2p", "status"],
     ];
 
     for argv in cases {
@@ -160,7 +159,7 @@ fn canonical_subtree_help_lists_actions() {
         cmd.find_subcommand_mut("paperseed")
             .expect("paperseed subtree exists"),
     );
-    for action in ["corpus", "seed", "p2p"] {
+    for action in ["corpus", "seed"] {
         assert!(
             paperseed_help.contains(action),
             "paperseed --help missing action '{action}'\n{paperseed_help}"

@@ -12,7 +12,7 @@ fn top_level_help_advertises_canonical_domains_only() {
     let mut cmd = Cli::command();
     let help = render_help(&mut cmd);
 
-    for command in ["corpus", "seed", "p2p"] {
+    for command in ["corpus", "seed"] {
         assert!(
             help.contains(command),
             "top-level --help missing command '{command}'\n--- help ---\n{help}"
@@ -54,7 +54,6 @@ fn canonical_commands_parse() {
         &["paperseed", "corpus", "export", "--format", "bibtex"],
         &["paperseed", "seed", "check", "--paper-id", "abc123"],
         &["paperseed", "seed", "create", "--paper-id", "abc123"],
-        &["paperseed", "p2p", "status"],
     ];
 
     for argv in cases {

@@ -12,7 +12,7 @@ It helps researchers and Paperbridge integrations:
 - store files in a content-addressed local corpus,
 - query local full text and metadata,
 - export corpus metadata as JSON or BibTeX, and
-- run license-gated seeding checks before any future P2P sharing layer.
+- run license-gated seeding checks.
 
 ## Safety boundary
 
@@ -36,7 +36,6 @@ paperbridge paperseed corpus export --format json
 paperbridge paperseed corpus export --format bibtex
 paperbridge paperseed seed check --paper-id <id-or-hash-prefix>
 paperbridge paperseed seed create --paper-id <id-or-hash-prefix>
-paperbridge paperseed p2p status
 ```
 
 Use `--json` for machine-readable output on supported commands:
