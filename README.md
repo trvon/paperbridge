@@ -1,19 +1,13 @@
 # paperbridge
 
-`paperbridge` is a Rust MCP + CLI bridge for Zotero library access, external
-paper discovery, DOI/Crossref resolution, structured paper parsing,
-read-aloud/Vox preparation, and local open-access paper caching.
+Rust MCP + CLI bridge for Zotero library access, external paper discovery,
+DOI/Crossref resolution, structured paper parsing, read-aloud (Vox) preparation,
+and local open-access paper caching.
 
-Paperbridge owns the user-facing CLI, MCP/API surface, and configuration.
-[Paperseed](crates/paperseed/README.md) is vendored under `crates/paperseed` as
-the local corpus + seed-manifest engine. Experimental YAMS-backed caching uses
-[YAMS](https://github.com/trvon/yams) when available.
-
-## For agents
-
-When `paperbridge serve` is registered as an MCP server, fetch the operating guide
-via `prompts/get` with `name: "paperbridge_skill"` — it enumerates every tool,
-calling conventions, and recipes. Start there before composing tool calls.
+[Paperseed](crates/paperseed/README.md) is vendored under `crates/paperseed` for
+local corpus storage and license-gated seed manifests. When available,
+[YAMS](https://github.com/trvon/yams) ([docs](https://yamsmemory.ai)) provides
+an experimental storage/search backend with full-text indexing.
 
 ## Install
 
@@ -21,15 +15,15 @@ calling conventions, and recipes. Start there before composing tool calls.
 # npm
 npm install -g paperbridge
 
-# Homebrew (macOS / Linux)
+# Homebrew
 brew tap trvon/paperbridge && brew install paperbridge
 
 # From source
 ./setup.sh
 ```
 
-Pre-built binaries (macOS arm64/x86_64, Linux x86_64, Windows x86_64) are
-published to [GitHub Releases](https://github.com/trvon/paperbridge/releases).
+Pre-built binaries are published to
+[GitHub Releases](https://github.com/trvon/paperbridge/releases).
 
 ## Get started
 
@@ -50,46 +44,27 @@ For Zotero Desktop local API mode:
 paperbridge config set backend_mode local
 ```
 
-## Config doctor
+## Paper search & discovery
 
-Use doctor after upgrades or when behavior looks off:
-
-```bash
-paperbridge config doctor
-paperbridge config doctor --setup
-paperbridge config doctor --verbose
-paperbridge config doctor --json
-```
-
-`doctor` is concise by default. `--setup` interactively fills important missing
-settings, including Paperseed corpus/caching values and the experimental YAMS
-toggle. Enable YAMS to use it when its daemon is running while keeping the local corpus as a
-fallback; disable it for local-dir-only corpus behavior. `--verbose` and `--json`
-are for advanced troubleshooting and automation.
-
-## External paper discovery
+Search across arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed,
+HuggingFace Papers, Semantic Scholar, CORE, NASA ADS, and ScholarAPI in parallel.
+Local cached results from Paperseed are included and prioritized automatically.
 
 ```bash
-paperbridge papers search -q "retrieval augmented generation" --limit 5
+paperbridge papers search -q "intrusion detection" --limit 3 --max-results 10
+paperbridge papers search -q "attention is all you need" --sources arxiv,semantic_scholar
 paperbridge papers resolve-doi --doi 10.1038/nature12373
 ```
 
-Paperbridge can search external paper indexes and return open-access PDF URLs
-when sources provide them. If Paperseed is enabled and
-`paperseed_auto_download` is left on, open-access results with PDF URLs can be
-mirrored into the local corpus automatically.
+Results are paginated (`--offset`, `--max-results`) and deduplicated by DOI,
+arXiv ID, PMID, and normalized title+author. Unconfigured key-gated sources are
+silently skipped.
 
-If a paper is already cached locally, the existing paper routes become smarter
-without adding new commands:
+If `paperseed_enabled` and `paperseed_auto_download` are on, open-access PDFs
+are mirrored into the local corpus in background threads so they become
+available to all existing paper routes over time.
 
-- `papers search` includes local cached papers and prioritizes cached matches.
-- `get_pdf_text` / `prepare_vox_text` can read cached papers directly.
-- `get_paper_structure` / `query_paper` can build a fallback structure from
-  cached full text.
-- `prepare_item_for_vox` and `prepare_search_result_for_vox` automatically use
-  cached papers when they are the best available source.
-
-See [docs/papers.md](docs/papers.md) for source coverage and API key behavior.
+See [docs/papers.md](docs/papers.md) for API key setup and source details.
 
 ## Structured paper workflows
 
@@ -100,49 +75,33 @@ paperbridge library read --item-key ABCD1234
 paperbridge library read-search -q "transformers" --result-index 0
 ```
 
-Paperbridge supports two levels of paper retrieval:
+- `papers {structure,query}` returns structured JSON (metadata, sections,
+  references) suitable for section-aware agents.
+- `library read...` returns Vox-ready text chunks from Zotero or a cached paper.
 
-- `paperbridge papers {structure,query}` returns structured JSON for section-aware agents and
-  scripts.
-- `paperbridge library read...` prepares Vox-ready text chunks from Zotero or a
-  cached paper.
+Structured parsing uses Zotero's indexed full-text by default and can optionally
+use [GROBID](https://github.com/kermitt2/grobid) for richer section and
+reference extraction. See [docs/structured-paper.md](docs/structured-paper.md).
 
-Structured parsing uses configured full text by default and can optionally use
-[GROBID](https://github.com/kermitt2/grobid) for richer section/reference
-extraction.
+## Smart cache behavior
 
-See [docs/structured-paper.md](docs/structured-paper.md) for the full structure,
-fallback model, and GROBID setup.
+When papers are cached locally, existing routes become smarter without new
+commands:
 
-## Experimental local corpus + cache
+- `get_pdf_text` / `get_item_fulltext` fall back to searching the local cache
+  by the key as a natural-language query when Zotero is unreachable.
+- `prepare_item_for_vox` / `prepare_search_result_for_vox` prefer cached papers.
+- `get_paper_structure` / `query_paper` build a fallback structure from cached
+  full-text when called with a cached paper id.
 
-Paperbridge can optionally keep a local paper cache through vendored
-[Paperseed](crates/paperseed/README.md). This is useful when you want external
-paper discovery to become locally readable automatically over time.
+## Local corpus & caching
 
-When enabled:
-
-- external search results can be mirrored into the local corpus in the
-  background,
-- cached papers are surfaced through existing routes instead of separate cache
-  commands,
-- local corpus search can contribute hits to `papers search`, and
-- licensed files can still be managed explicitly through `paperbridge paperseed`.
-
-Paperseed can also use
-[YAMS](https://github.com/trvon/yams) ([docs](https://yamsmemory.ai))
-experimentally as a storage/search backend when the `yams` binary is available
-and its daemon is running. In that mode, Paperbridge/Paperseed prefer the local
-cache automatically and fall back to the JSON corpus when YAMS is unavailable.
-
-## Paperseed corpus and seeding
-
-Paperseed commands are exposed through Paperbridge so they inherit Paperbridge
-config:
+Paperseed manages a content-addressed local corpus for lawful paper storage,
+full-text querying, and license-gated seed manifests:
 
 ```bash
 paperbridge paperseed corpus status
-paperbridge paperseed corpus import ./paper.pdf --license user-owned-private
+paperbridge paperseed corpus import ./paper.pdf --license cc-by
 paperbridge paperseed corpus ingest --metadata item.json --file paper.pdf --license cc-by
 paperbridge paperseed corpus query -q "induction heads"
 paperbridge paperseed corpus export --format bibtex
@@ -151,31 +110,36 @@ paperbridge paperseed seed check --paper-id <id>
 paperbridge paperseed seed create --paper-id <id>
 ```
 
-By default, the corpus is stored under the XDG data directory
-(`$XDG_DATA_HOME/paperbridge/paperseed` or
-`~/.local/share/paperbridge/paperseed`). When
-`paperseed_yams_enabled = true`, Paperseed experimentally mirrors imports into
-[YAMS](https://github.com/trvon/yams) if the `yams` binary is detected and the
-YAMS daemon is running, then tries YAMS retrieval first with the JSON corpus as
-a fallback. Set `paperseed_yams_enabled = false` to use only the local corpus
-directory.
+The corpus is stored under `$XDG_DATA_HOME/paperbridge/paperseed` (defaults to
+`~/.local/share/paperbridge/paperseed`).
 
-Seeding is license-gated. User-private or unknown-license material may be stored
-and searched locally, but seed manifests are created only when redistribution is
+Seeding is license-gated: private or unknown-license material may be stored and
+searched locally, but seed manifests are created only when redistribution is
 allowed.
 
-Relevant config keys:
+### YAMS experimental backend
+
+When `paperseed_yams_enabled = true` and the `yams` binary is available, Paperseed
+uses YAMS for storage, full-text indexing, and semantic search. If YAMS is
+unavailable, the system falls back to the local JSON corpus automatically.
 
 ```toml
 paperseed_enabled = false
 paperseed_auto_download = true
-paperseed_yams_enabled = true # experimental; falls back to local corpus if yams/daemon is unavailable
+paperseed_yams_enabled = true
 # paperseed_corpus_root = "/path/to/corpus"
 ```
 
-## MCP server
+## Config doctor
 
-Run as an MCP server for Claude, OpenCode, or any MCP-compatible host:
+```bash
+paperbridge config doctor              # check config health
+paperbridge config doctor --setup      # interactively fill missing values
+paperbridge config doctor --verbose    # detailed diagnostics
+paperbridge config doctor --json       # machine-readable output
+```
+
+## MCP server
 
 ```bash
 paperbridge serve
@@ -187,6 +151,9 @@ Generate client config snippets:
 paperbridge config snippet --target claude
 paperbridge config snippet --target opencode
 ```
+
+When connected, agents should fetch the `paperbridge_skill` prompt for the full
+operating guide.
 
 ## Documentation
 
