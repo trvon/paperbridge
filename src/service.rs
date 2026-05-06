@@ -801,7 +801,14 @@ impl PaperbridgeService {
         };
         let fulltext = match api.get_cached_paper_fulltext(paper_id) {
             Ok(fulltext) => fulltext,
-            Err(ZoteroMcpError::InvalidInput(_)) => return Ok(None),
+            Err(ZoteroMcpError::InvalidInput(_)) => FulltextContent {
+                item_key: paper_id.to_string(),
+                content: String::new(),
+                indexed_pages: None,
+                total_pages: None,
+                indexed_chars: None,
+                total_chars: None,
+            },
             Err(error) => return Err(error),
         };
         Ok(Some(cached_paper_structure(&paper, &fulltext)))
