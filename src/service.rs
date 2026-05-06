@@ -138,7 +138,8 @@ impl PaperbridgeService {
                 .map(|cache| cache.cached)
                 .unwrap_or(false)
         });
-        let total_count = hits.len() as u32;
+        // Clamp to u32 via .min() — safe, bounded cast.
+        let total_count = hits.len().min(u32::MAX as usize) as u32;
         self.mirror_open_access_hits(&hits);
 
         let offset = opts.offset;

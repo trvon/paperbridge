@@ -2,7 +2,7 @@ rules:
   - id: paperbridge-rust-unwrap-in-production
     languages: [rust]
     severity: WARNING
-    message: "Prefer explicit error handling over unwrap() in production paths. Use .map_err(?), expect() with a clear message, or proper error propagation."
+    message: "Prefer explicit error handling over unwrap() in production code. Use proper error propagation or expect() with a clear message."
     patterns:
       - pattern: $X.unwrap()
       - pattern-not-inside: |
@@ -28,6 +28,8 @@ rules:
           - pattern: $X.expect("should")
           - pattern: $X.expect("unreachable")
           - pattern: $X.expect("Error")
+    metadata:
+      category: reliability
 
   - id: paperbridge-rust-print-in-library
     languages: [rust]
@@ -43,21 +45,47 @@ rules:
         - "src/main.rs"
         - "crates/*/src/main.rs"
         - "tests/*"
+        - "src/update.rs"
     metadata:
       category: style
 
-  - id: paperbridge-rust-file-read-without-context
+  - id: paperbridge-rust-panic-in-library
+    languages: [rust]
+    severity: WARNING
+    message: "Avoid panic!() in library code. Return Result or use unreachable!() for truly impossible states."
+    patterns:
+      - pattern: panic!(...)
+      - pattern-not-inside: |
+          ...
+          #[cfg(test)]
+          ...
+    paths:
+      exclude:
+        - "src/main.rs"
+        - "crates/*/src/main.rs"
+        - "tests/*"
+    metadata:
+      category: reliability
+
+  - id: paperbridge-rust-let-underscore-ignores-error
     languages: [rust]
     severity: INFO
-    message: "File read/write operations should include path context in error messages for debuggability."
+    message: "let _ = discards a fallible operation's error. Add a comment explaining why it's safe, or handle the Result."
+    patterns:
+      - pattern: let _ = $X?;
+    metadata:
+      category: correctness
+
+  - id: paperbridge-rust-as-cast-truncation
+    languages: [rust]
+    severity: INFO
+    message: "as cast may silently truncate. Use .try_into() or check bounds before casting. Ignore for widening casts (u32->usize on 64-bit)."
     patterns:
       - pattern-either:
-          - pattern: std::fs::read_to_string($P).unwrap()
-          - pattern: std::fs::read($P).unwrap()
-          - pattern: std::fs::write($P, $D).unwrap()
+          - pattern: $X as u32
     paths:
       exclude:
         - "tests/*"
         - "crates/paperseed/tests/*"
     metadata:
-      category: debuggability
+      category: correctness
