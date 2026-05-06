@@ -1,128 +1,170 @@
 ---
 name: paperbridge
-description: Use when a task involves Zotero (search, collections, items, PDFs, full-text), DOI/Crossref resolution, or searching external paper sources (arXiv, HuggingFace Papers, Semantic Scholar, OpenAlex, Europe PMC, DBLP, OpenReview, CORE, NASA ADS, PubMed, ScholarAPI). Provides both a CLI (`paperbridge ...`) and an MCP server (`paperbridge serve`) that expose the same capabilities. Prefer the MCP tools when available in the host; fall back to CLI invocation otherwise.
+description: Use when a task involves Zotero (search, collections, items, PDFs, full-text), DOI/Crossref resolution, searching external paper sources (arXiv, HuggingFace Papers, Semantic Scholar, OpenAlex, etc.), or retrieving locally cached papers from the Paperseed corpus. Provides both a CLI (`paperbridge ...`) and an MCP server (`paperbridge serve`). Prefer MCP tools when available; fall back to CLI invocation otherwise.
 ---
 
 # paperbridge
 
-`paperbridge` is a Rust CLI + MCP server that bridges Zotero (cloud or desktop local API) and external paper indexes. Use it for literature search, reference resolution, and preparing paper content for downstream agents.
+Rust CLI + MCP server bridging Zotero (cloud or desktop local API), external
+paper indexes, and a local Paperseed cache. Use it for literature search,
+reference resolution, structured paper parsing, and preparing paper content
+for downstream agents.
 
-> **Availability over MCP.** When a host is connected to `paperbridge serve`, this guide is also served as the prompt `paperbridge_skill` (call `prompts/get` with `name: "paperbridge_skill"`). That means connected agents get the operating guide automatically — no local checkout required.
+> **MCP availability.** When connected to `paperbridge serve`, this guide is
+> also served as the prompt `paperbridge_skill` (`prompts/get` with
+> `name: "paperbridge_skill"`).
 
 ## When to use
 
-- User references Zotero library, collections, tags, attachments, or wants to pull full-text from their library.
-- User provides a DOI and needs structured metadata (title, authors, year, journal, abstract).
-- User asks to find papers on a topic across arXiv / HuggingFace / Semantic Scholar / Crossref / OpenAlex / Europe PMC / DBLP / OpenReview / CORE / NASA ADS / PubMed / ScholarAPI.
-- User wants to validate or create/update Zotero items from JSON payloads.
+- Search a Zotero library or browse collections, tags, attachments.
+- Resolve a DOI to structured metadata (title, authors, year, journal, abstract).
+- Search external paper indexes: arXiv, Crossref, OpenAlex, Europe PMC, DBLP,
+  OpenReview, PubMed, HuggingFace Papers, Semantic Scholar, CORE, NASA ADS, ScholarAPI.
+- Retrieve full-text or structured content from a Zotero attachment or a cached paper.
+- Validate, create, update, or delete Zotero items and collections.
+- Import or query the local Paperseed corpus (`paperseed_enabled = true`).
 
 ## Modes
 
-- **MCP (preferred in agent contexts):** if a `paperbridge` MCP server is registered in the host, use its tools directly — they mirror the CLI commands below.
-- **CLI:** `paperbridge <domain> <action>`. The command graph is layered by domain (`library`, `item`, `collection`, `papers`, `config`, `status`). All data commands print JSON on stdout; errors go to stderr. Pipe through `| jq` for inspection.
+- **MCP (preferred in agent contexts):** use the registered `paperbridge` MCP
+  server tools directly — they mirror the CLI commands below.
+- **CLI:** `paperbridge <domain> <action>`. All data commands print JSON on
+  stdout; errors go to stderr. Pipe through `| jq` for inspection.
 
 ## First-time setup
 
 ```bash
-paperbridge config init --interactive   # prompts for backend mode, api_key, user_id, etc.
+paperbridge config init --interactive
 paperbridge config validate
-paperbridge status                       # confirm active backend & capabilities
+paperbridge status
 ```
 
-Backend modes: `cloud` (api.zotero.org, requires `api_key` + `user_id`), `local` (Zotero Desktop local API on `http://127.0.0.1:23119`, no key needed), `hybrid` (local reads, cloud writes).
-
-To switch: `paperbridge config set backend_mode local`.
+Backend modes: `cloud` (api.zotero.org, needs `api_key` + `user_id`),
+`local` (Zotero Desktop at `http://127.0.0.1:23119`, no key), `hybrid`
+(local reads, cloud writes).
 
 ## Core recipes
 
-### Search Zotero library
+### Search — library, external, and cached
+
 ```bash
+# Zotero library
 paperbridge library query -q "diffusion models" --limit 10
-paperbridge library query -q "Karpathy" --qmode titleCreatorYear --item-type journalArticle
-paperbridge library collections --top-only --limit 20
+
+# External papers + local cache (cached results prioritized first)
+paperbridge papers search -q "intrusion detection" --limit 3 --max-results 10
+paperbridge papers search -q "attention is all you need" --sources arxiv,semantic_scholar
+
+# Paginated (agents should page through large result sets)
+paperbridge papers search -q "transformers" --max-results 5 --offset 10
 ```
 
-### Resolve a DOI to structured metadata
+Results are deduplicated by DOI → arXiv ID → PMID → normalized
+title+first-author. Cached papers appear with `source: "paperseed"` and a
+`cache.cached` annotation. All cached hits are sorted ahead of external
+results.
+
+MCP tool: `search_papers { query, limit_per_source?, sources?, offset?, limit? }`.
+Returns `{ query, total_count, offset, limit, hits: [...] }`. Use `offset` and
+`limit` to page through large result sets.
+
+Available source values: `arxiv`, `paperseed` (local cache), `crossref`,
+`openalex` (`oa`), `europe_pmc` (`epmc`), `dblp`, `openreview` (`or`),
+`pubmed` (`pm`), `hugging_face` (`hf`), `semantic_scholar` (`s2`), `core`,
+`ads` (`nasa_ads`), `scholarapi` (`scholar`).
+
+Always-on (no key): arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed.
+Key-gated (silent skip when unset): HuggingFace, Semantic Scholar, CORE, NASA ADS, ScholarAPI.
+
+### Resolve a DOI
+
 ```bash
 paperbridge papers resolve-doi --doi "10.1038/nature12373"
 ```
 
-When `unpaywall_email` is configured, the response is enriched with an `oa_pdf_url` (best open-access PDF) from Unpaywall — otherwise that field is omitted. Unpaywall requires only an email address for attribution, not an API key.
+When `unpaywall_email` is configured, the response includes `oa_pdf_url`.
 
-### Read full-text of one item (for summarization, quoting, downstream prompts)
+### Read full-text — Zotero or cached paper
+
 ```bash
+# Zotero attachment
 paperbridge library read --item-key ABCD1234
 paperbridge library read --item-key ABCD1234 --attachment-key PDF5678
-# Chunked output for context-window-aware consumers:
-paperbridge library read --item-key ABCD1234 --max-chars-per-chunk 8000
-# Or combined: search, pick a result index, then prepare it:
+
+# Search then read (picks best attachment)
 paperbridge library read-search -q "sparse attention" --result-index 0 --search-limit 5
 ```
 
-### Query structured paper content (agent-friendly)
-Return a paper as a typed JSON structure, then select into it with a dotted path:
+**Cache fallback:** `get_pdf_text` and `get_item_fulltext` automatically
+search the local Paperseed cache when Zotero is unreachable. Pass a title, DOI,
+or paper ID as the key — the route treats it as a natural-language query
+against cached papers. If a match is found with extracted fulltext, it is
+returned directly.
+
+MCP tools:
+- `get_pdf_text { attachment_key }` — Zotero attachment or cache query
+- `get_item_fulltext { attachment_key }` — same fallback behavior
+- `prepare_vox_text { text?, attachment_key?, max_chars_per_chunk? }` — chunks for Vox
+- `prepare_item_for_vox { item_key, attachment_key?, max_chars_per_chunk? }` — prefers cached papers
+- `prepare_search_result_for_vox { q, result_index?, ... }` — search → cached-paper check → Zotero fallback
+
+### Structured paper content
+
+Returns a typed JSON structure with sections, references, and figures.
+Works with both Zotero items and cached paper IDs.
 
 ```bash
 paperbridge papers structure --key ABCD1234
-paperbridge papers query --key ABCD1234 --selector "sections[0].heading"
+paperbridge papers query --key ABCD1234 --selector "sections[0].text"
 paperbridge papers query --key ABCD1234 --selector "metadata.doi"
 ```
 
-- MCP tools: `get_paper_structure { item_key, attachment_key? }` and `query_paper { item_key, selector, attachment_key? }`.
-- Selectors use dotted paths with bracket indexing (e.g. `sections[2].text`, `references[0].title`).
-- The response includes `source`, one of:
-  - `{ "kind": "grobid" }` — parsed via GROBID; real section / heading / reference breakdown.
-  - `{ "kind": "zotero_fulltext" }` — Zotero's stored full text only; one `sections[0]` body blob. Correct for most agent queries when GROBID isn't configured.
-  - `{ "kind": "grobid_unavailable", "reason": "..." }` — GROBID was configured but the call failed; the service fell back to Zotero full text. Check the reason.
-- **Precedence:** if `grobid_url` is set, it wins — Docker auto-spawn is never attempted. To use auto-spawn, leave `grobid_url` unset and set `grobid_auto_spawn=true`. See [docs/structured-paper.md](structured-paper.md) for the full flow, timing, and troubleshooting.
+MCP tools: `get_paper_structure { item_key, attachment_key? }`, `query_paper
+{ item_key, selector, attachment_key? }`. Both accept Zotero keys or cached
+paper IDs. When a cached paper has no extracted fulltext, metadata is still
+returned with empty sections (no 404s).
 
-### Search external paper sources
-Sources run in parallel; failures/timeouts per source are non-fatal and log only at `debug` level. Results dedupe by DOI → arXiv ID → PMID → normalized title+first-author. `--sources` is parse-validated (invalid values fail before any network call).
+Selectors use dotted paths with bracket indexing (`sections[2].text`,
+`references[0].title`). The `source` field tells you the provenance:
+`grobid`, `zotero_fulltext`, or `grobid_unavailable`.
+
+### Local Paperseed corpus
+
+Manage the content-addressed local cache and license-gated seed manifests:
 
 ```bash
-paperbridge papers search -q "vision transformers" --limit 5
-paperbridge papers search "vision transformers" --limit 5
-paperbridge papers search -q "attention is all you need" --sources arxiv,openalex,semantic_scholar
-paperbridge papers search -q "CRISPR Cas9" --sources europe_pmc,pubmed
-paperbridge papers search -q "graph neural networks" --sources dblp,openreview
+paperbridge paperseed corpus status
+paperbridge paperseed corpus import ./paper.pdf --license cc-by
+paperbridge paperseed corpus ingest --metadata item.json --file paper.pdf --license cc-by
+paperbridge paperseed corpus query -q "induction heads"
+paperbridge paperseed corpus export --format bibtex
+
+paperbridge paperseed seed check --paper-id <id>
+paperbridge paperseed seed create --paper-id <id>
 ```
 
-`-q`, `--q`, and the positional query form are equivalent; prefer `-q` for Unix-style shorthand. `--q` remains supported for compatibility, and positional queries are convenient for quick shell/agent calls.
+Imported PDFs have their text automatically extracted and stored in the
+corpus for full-text search. YAMS provides an experimental
+storage/search backend when `paperseed_yams_enabled = true`.
 
-Available source values for `--sources`: `arxiv`, `crossref`, `openalex` (alias `oa`), `europe_pmc` (alias `epmc`), `dblp`, `openreview` (alias `or`), `pubmed` (alias `pm`), `hugging_face` (alias `hf`), `semantic_scholar` (alias `s2`), `core`, `ads` (alias `nasa_ads`), `scholarapi` (aliases `scholar`, `scholar_api`, `scolarapi`).
+### Write Zotero items & collections
 
-**Always on (no key needed):** arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed. PubMed and OpenAlex will upgrade rate limits / polite-pool priority if `ncbi_api_key` / `unpaywall_email` is set.
-
-**Key-gated (silently skipped when unconfigured):** HuggingFace, Semantic Scholar, CORE, NASA ADS, ScholarAPI.
-
-```bash
-paperbridge config set hf_token <token>
-paperbridge config set semantic_scholar_api_key <key>
-paperbridge config set core_api_key <key>
-paperbridge config set ads_api_token <token>
-paperbridge config set scholarapi_key <key>
-paperbridge config set ncbi_api_key <key>         # optional: upgrades PubMed 3→10 req/s
-paperbridge config set unpaywall_email <email>    # enables OA-PDF enrichment on resolve-doi
-# or env: HF_TOKEN, SEMANTIC_SCHOLAR_API_KEY, CORE_API_KEY, ADS_API_TOKEN, SCHOLARAPI_KEY, NCBI_API_KEY, UNPAYWALL_EMAIL
-```
-
-### Create / update / delete Zotero items & collections
-All write ops take a JSON file on disk (schema is validated before send). Cloud backend requires `api_key` with write scope.
+Write ops take a JSON file on disk. Cloud backend requires `api_key` with
+write scope.
 
 ```bash
-paperbridge item validate --file item.json --online    # pre-check, with Crossref cross-ref
+paperbridge item validate --file item.json --online
 paperbridge item create --file item.json
-paperbridge item update --file item.json               # file must include "key" + "version"
+paperbridge item update --file item.json
 paperbridge item delete --file item.json
-paperbridge collection create --name "ML 2025" --parent-collection ABCD1234
-paperbridge collection update --file collection.json
-paperbridge collection delete --file collection.json
+paperbridge collection create --name "ML 2025"
 ```
 
 ### Run as MCP server
+
 ```bash
-paperbridge serve                               # stdio transport
-paperbridge config snippet --target claude      # print ready-to-paste MCP config
+paperbridge serve
+paperbridge config snippet --target claude
 paperbridge config snippet --target opencode
 ```
 
@@ -131,32 +173,36 @@ paperbridge config snippet --target opencode
 | key | purpose |
 |---|---|
 | `backend_mode` | `cloud`, `local`, `hybrid` |
-| `api_key` | Zotero API key (cloud/hybrid writes) — **redacted in `config get` unless `--show-secret`** |
-| `user_id` | numeric Zotero user ID (cloud). Resolve with `paperbridge config resolve-user-id --login <username>` |
-| `group_id` | numeric group ID (optional, for group libraries) |
+| `api_key` | Zotero API key — **redacted in `config get` unless `--show-secret`** |
+| `user_id` | numeric Zotero user ID |
+| `group_id` | numeric group ID (optional) |
 | `library_type` | `user` or `group` |
-| `cloud_api_base` / `local_api_base` | override default endpoints |
-| `hf_token`, `semantic_scholar_api_key`, `core_api_key`, `ads_api_token`, `scholarapi_key` | gate external sources (silent skip when unset) |
-| `ncbi_api_key` | optional PubMed rate-limit upgrade (3→10 req/s); PubMed still runs without it |
-| `unpaywall_email` | enables OA-PDF enrichment on `papers resolve-doi`; also sent as OpenAlex `mailto` polite-pool hint |
-| `grobid_url` | remote or local GROBID endpoint (e.g. `http://localhost:8070`); if set, auto-spawn is disabled |
-| `grobid_auto_spawn` | when `grobid_url` is unset, launch GROBID via `docker run` on first request (default `false`) |
-| `grobid_image` | Docker image used by auto-spawn (default `lfoppiano/grobid:0.8.1`) |
-| `grobid_timeout_secs` | HTTP timeout for GROBID requests (default 120) |
+| `paperseed_enabled` | enable local Paperseed corpus (default `false`) |
+| `paperseed_auto_download` | automatically mirror OA PDFs into local corpus (default `true`) |
+| `paperseed_yams_enabled` | use YAMS as experimental storage/search backend (default `true`) |
+| `paperseed_corpus_root` | override corpus path |
+| `hf_token`, `semantic_scholar_api_key`, `core_api_key`, `ads_api_token`, `scholarapi_key` | gate external sources |
+| `ncbi_api_key` | optional PubMed rate-limit upgrade |
+| `unpaywall_email` | enables OA-PDF enrichment |
+| `grobid_url` | GROBID endpoint; if set, auto-spawn is disabled |
+| `grobid_auto_spawn` | launch GROBID via Docker (default `false`) |
+| `grobid_image` | Docker image for auto-spawn |
 | `log_level` | `error`, `warn`, `info`, `debug`, `trace` |
 
-`paperbridge config get` masks secrets by default. Use `--show-secret` when you genuinely need the value.
+`paperbridge config get` masks secrets by default. Pass `--show-secret` to reveal.
 
 ## Gotchas
 
-- **Cloud api_base must be HTTPS** (or `http://localhost` for local mode). The CLI refuses to transmit `api_key` over cleartext.
-- **DOI lookups hit Crossref** — be mindful of rate limits on bursty batch work; prefer caching results.
-- **Read output can be large**: always set `--max-chars-per-chunk` when feeding into an LLM with a finite context window.
-- **Write operations require `version` on update/delete** to avoid clobbering concurrent edits (Zotero optimistic concurrency). Re-fetch the item first if you get HTTP 412.
+- **Cloud api_base must be HTTPS** (or `http://localhost` for local mode).
+- **Search results are paginated** — use `offset`/`limit` to page through large sets. The `total_count` field tells you how many remain.
+- **Cached papers are prioritized first** in search results (regardless of `--sources` filter). Look for `cache.cached: true` and `source: "paperseed"`.
+- **PDF text extraction** happens automatically during local corpus import — no separate step needed.
+- **Read output can be large** — always set `--max-chars-per-chunk` when feeding into an LLM.
+- **Write operations need `version` on update/delete** (Zotero optimistic concurrency). Re-fetch if you get HTTP 412.
 - **`config get api_key` no longer prints the raw key** — it prints `(set, N chars — pass --show-secret to reveal)`.
-- **Legacy flat commands still work** (`query`, `create-item`, `backend-info`, `search-papers`, …) but emit a deprecation warning on stderr and will be removed in 0.4.0. Prefer the canonical domain paths above.
+- **Legacy flat commands** (`query`, `create-item`, `backend-info`, `search-papers`, …) still work but emit a deprecation warning. Prefer the canonical domain paths.
 
-## Verify install / health
+## Verify install
 
 ```bash
 paperbridge --version
@@ -164,8 +210,7 @@ paperbridge status
 paperbridge config validate
 ```
 
-If invoking via npm (`npm install -g paperbridge`) fails silently, the per-platform binary may have been shipped without +x; re-run with `--include=optional` or chmod the installed binary.
-
 ## Contributors
 
-CLI surface changes must be reviewed against [`docs/design/cli-design.md`](design/cli-design.md). That document defines paperbridge's 11-principle CLI design methodology and contains the required-review checklist for any PR touching `src/cli.rs`, user-visible error copy, or this skill.
+CLI surface changes must be reviewed against
+[`docs/design/cli-design.md`](design/cli-design.md).

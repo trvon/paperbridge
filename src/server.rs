@@ -637,7 +637,7 @@ impl ServerHandler for PaperbridgeServer {
                 .build(),
             server_info: rmcp::model::Implementation::from_build_env(),
             instructions: Some(
-                "Search Zotero libraries and retrieve full-text content. Use prepare_vox_text to build read-aloud chunks for Vox. Fetch the prompt 'paperbridge_skill' for the full operating guide."
+                "Search Zotero libraries, retrieve full-text content, search external paper sources, and access the local Paperseed cache. Use prepare_vox_text to build read-aloud chunks for Vox. Fetch the prompt 'paperbridge_skill' for the full operating guide."
                     .to_string(),
             ),
         }
@@ -721,7 +721,7 @@ mod tests {
         // include_str! pulls SKILL.md into the binary at compile time; this asserts the
         // canonical opening sentence stays present so connected hosts get a usable guide.
         assert!(
-            SKILL_MD.contains("paperbridge` is a Rust CLI + MCP server"),
+            SKILL_MD.contains("Rust CLI + MCP server bridging Zotero"),
             "embedded SKILL.md missing canonical opening sentence"
         );
         assert!(SKILL_MD.contains("paperbridge library query"));
