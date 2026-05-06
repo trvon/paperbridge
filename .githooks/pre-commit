@@ -7,6 +7,13 @@ cargo fmt --check || { echo "Run 'cargo fmt' to fix formatting."; exit 1; }
 echo "==> pre-commit: cargo clippy"
 cargo clippy -- -D warnings || { echo "Fix clippy warnings before committing."; exit 1; }
 
+echo "==> pre-commit: opengrep"
+if [[ -x .githooks/opengrep-pre-commit ]]; then
+    bash .githooks/opengrep-pre-commit || true
+else
+    echo "opengrep hook not found, skipping"
+fi
+
 echo "==> pre-commit: cargo deny check"
 if command -v cargo-deny >/dev/null 2>&1; then
     cargo deny check advisories bans sources || { echo "Fix cargo-deny issues."; exit 1; }

@@ -1,0 +1,63 @@
+rules:
+  - id: paperbridge-rust-unwrap-in-production
+    languages: [rust]
+    severity: WARNING
+    message: "Prefer explicit error handling over unwrap() in production paths. Use .map_err(?), expect() with a clear message, or proper error propagation."
+    patterns:
+      - pattern: $X.unwrap()
+      - pattern-not-inside: |
+          ...
+          #[cfg(test)]
+          ...
+      - pattern-not-inside: |
+          ...
+          #[test]
+          ...
+    metadata:
+      category: reliability
+      confidence: MEDIUM
+
+  - id: paperbridge-rust-expect-empty-message
+    languages: [rust]
+    severity: WARNING
+    message: "expect() message is empty or unhelpful. Provide a descriptive message explaining the invariant."
+    patterns:
+      - pattern-either:
+          - pattern: $X.expect("")
+          - pattern: $X.expect("expect")
+          - pattern: $X.expect("should")
+          - pattern: $X.expect("unreachable")
+          - pattern: $X.expect("Error")
+
+  - id: paperbridge-rust-print-in-library
+    languages: [rust]
+    severity: INFO
+    message: "Use tracing macros (info!, debug!, warn!, error!) instead of println! in library code."
+    patterns:
+      - pattern-either:
+          - pattern: println!(...)
+          - pattern: eprintln!(...)
+          - pattern: dbg!(...)
+    paths:
+      exclude:
+        - "src/main.rs"
+        - "crates/*/src/main.rs"
+        - "tests/*"
+    metadata:
+      category: style
+
+  - id: paperbridge-rust-file-read-without-context
+    languages: [rust]
+    severity: INFO
+    message: "File read/write operations should include path context in error messages for debuggability."
+    patterns:
+      - pattern-either:
+          - pattern: std::fs::read_to_string($P).unwrap()
+          - pattern: std::fs::read($P).unwrap()
+          - pattern: std::fs::write($P, $D).unwrap()
+    paths:
+      exclude:
+        - "tests/*"
+        - "crates/paperseed/tests/*"
+    metadata:
+      category: debuggability

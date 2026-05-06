@@ -1,0 +1,36 @@
+rules:
+  - id: paperbridge-audit-unsafe-block
+    languages: [rust]
+    severity: WARNING
+    message: "Unsafe block detected. Audit for soundness: raw pointer deref, FFI call, or transmute."
+    pattern: unsafe { ... }
+    metadata:
+      category: security
+
+  - id: paperbridge-audit-hardcoded-secret
+    languages: [rust]
+    severity: WARNING
+    message: "Potential hardcoded secret or token. Move to config or env var."
+    patterns:
+      - pattern-either:
+          - pattern: |
+              "...$PASSWORD..."
+          - pattern: |
+              "...$TOKEN..."
+          - pattern: |
+              "...$API_KEY..."
+          - pattern: |
+              "...$SECRET..."
+    metadata:
+      category: security
+
+  - id: paperbridge-audit-reqwest-no-timeout
+    languages: [rust]
+    severity: INFO
+    message: "HTTP client created without explicit timeout. Consider .timeout() or .connect_timeout()."
+    patterns:
+      - pattern-either:
+          - pattern: reqwest::Client::new()
+          - pattern: reqwest::Client::builder().build()
+    metadata:
+      category: reliability

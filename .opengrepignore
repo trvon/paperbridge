@@ -1,0 +1,23 @@
+# Build artifacts
+target/
+.artifacts/
+
+# Generated/config files
+Cargo.lock
+*.json
+*.toml
+
+# Vendored/docs
+.claude/
+docs/research/
+papers/
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.sarif
