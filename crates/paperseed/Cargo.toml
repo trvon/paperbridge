@@ -1,6 +1,6 @@
 [package]
 name = "paperseed"
-version = "0.1.0"
+version = "0.7.0"
 edition = "2024"
 description = "Local-first scholarly corpus manager for lawful paper discovery, storage, indexing, and seeding"
 license = "MIT"

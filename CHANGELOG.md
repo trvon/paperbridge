@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.0](https://github.com/trvon/paperbridge/compare/v0.6.0...v0.7.0) (2026-05-08)
+
+
+### Features
+
+* paperseed with yams backend. Experimental update ([cdc1d8c](https://github.com/trvon/paperbridge/commit/cdc1d8c23a524d38512f0fe8bfa917e5e731d23e))
+* PDF text extraction during import + dual-path caching tests ([30ce857](https://github.com/trvon/paperbridge/commit/30ce8570568ff9f9eb200c7fad2f03ecb7df1ee8))
+* search pagination + natural-language cache retrieval ([c9e988d](https://github.com/trvon/paperbridge/commit/c9e988da9ab7cdf2f9e8e4add99c8d597af38f9f))
+
+
+### Bug Fixes
+
+* cached paper structure returns metadata even without fulltext ([1999b47](https://github.com/trvon/paperbridge/commit/1999b47796a35f6b7b5eecda61bfacc55469974c))
+
 ## [0.6.0](https://github.com/trvon/paperbridge/compare/v0.5.0...v0.6.0) (2026-04-28)
 
 
