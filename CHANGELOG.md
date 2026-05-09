@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/trvon/paperbridge/compare/v0.7.0...v0.8.0) (2026-05-09)
+
+
+### Features
+
+* **retrieval:** BM25F cache index + fix build & saturation ([bc8d4b4](https://github.com/trvon/paperbridge/commit/bc8d4b423f9125529c218622daaa427c20088973))
+
 ## [0.7.0](https://github.com/trvon/paperbridge/compare/v0.6.0...v0.7.0) (2026-05-08)
 
 
