@@ -312,9 +312,15 @@ fn local_corpus_validates_ten_searches_and_content_without_yams() {
             &YamsConfig::disabled(),
         )
         .unwrap();
-        assert_eq!(entries.len(), 1);
+        assert!(!entries.is_empty(), "query {index} returned no hits");
+        // BM25F tokenizes "unique-token-N" into ["unique", "token", "N"]; the
+        // digit is the only term with df=1, so the matching paper must rank first.
         let expected = format!("local validation paper {index} unique-token-{index} body content");
-        assert_eq!(entries[0].full_text.as_deref(), Some(expected.as_str()));
+        assert_eq!(
+            entries[0].full_text.as_deref(),
+            Some(expected.as_str()),
+            "top hit for unique-token-{index} should be paper {index}"
+        );
     }
 }
 

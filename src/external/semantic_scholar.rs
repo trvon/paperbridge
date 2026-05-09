@@ -153,6 +153,7 @@ fn convert_paper(p: RawS2Paper) -> PaperHit {
         venue: p.venue.filter(|v| !v.is_empty()),
         citation_count: p.citation_count,
         cache: None,
+        relevance_score: None,
     }
 }
 

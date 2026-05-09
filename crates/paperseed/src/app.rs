@@ -1,6 +1,7 @@
 use crate::corpus::import_local_file;
 use crate::db::{CorpusDb, IndexedPaper, QueryHit};
 use crate::error::{PaperseedError, Result};
+use crate::indexing;
 use crate::models::{CorpusAction, License, LocalPaper};
 use crate::policy::{evaluate, license_slug, parse_license};
 use crate::sources::{PaperbridgeMetadata, apply_metadata};
@@ -18,6 +19,7 @@ pub struct CorpusPaths {
     pub root: PathBuf,
     pub files_dir: PathBuf,
     pub db_path: PathBuf,
+    pub index_path: PathBuf,
     pub seeds_dir: PathBuf,
 }
 
@@ -27,6 +29,7 @@ impl CorpusPaths {
         Self {
             files_dir: root.join("files"),
             db_path: root.join("corpus.json"),
+            index_path: root.join("corpus.idx.json"),
             seeds_dir: root.join("seeds"),
             root,
         }
@@ -140,6 +143,7 @@ pub fn import_with_yams_runner(
         yams_hash,
     });
     db.save(&paths.db_path)?;
+    save_index(paths, &db);
     Ok(paper)
 }
 
@@ -177,6 +181,7 @@ pub fn ingest_with_yams(
         yams_hash,
     });
     db.save(&paths.db_path)?;
+    save_index(paths, &db);
     Ok(paper)
 }
 
@@ -219,6 +224,7 @@ pub fn fetch_open_file(
         yams_hash: None,
     });
     db.save(&paths.db_path)?;
+    save_index(paths, &db);
     Ok(paper)
 }
 
@@ -233,12 +239,19 @@ pub fn query_with_yams(paths: &CorpusPaths, q: &str, yams: &YamsConfig) -> Resul
             return Ok(hits);
         }
     }
-    Ok(CorpusDb::load(&paths.db_path)?.query(q))
+    let db = CorpusDb::load(&paths.db_path)?;
+    Ok(indexing::search(
+        &db,
+        &paths.index_path,
+        q,
+        DEFAULT_QUERY_TOP_K,
+    ))
 }
 
 pub fn query_entries(paths: &CorpusPaths, q: &str) -> Result<Vec<IndexedPaper>> {
     let db = CorpusDb::load(&paths.db_path)?;
-    Ok(entries_from_hits(&db, db.query(q)))
+    let hits = indexing::search(&db, &paths.index_path, q, DEFAULT_QUERY_TOP_K);
+    Ok(entries_from_hits(&db, hits))
 }
 
 pub fn query_entries_with_yams(
@@ -265,7 +278,56 @@ pub fn query_entries_with_yams_runner(
             return Ok(entries);
         }
     }
-    Ok(entries_from_hits(&db, db.query(q)))
+    let hits = indexing::search(&db, &paths.index_path, q, DEFAULT_QUERY_TOP_K);
+    Ok(entries_from_hits(&db, hits))
+}
+
+/// Same as [`query_entries_with_yams`] but also returns the BM25F relevance
+/// score per hit. `None` indicates the hit came from the YAMS path which does
+/// not produce comparable scores.
+pub fn query_entries_scored_with_yams(
+    paths: &CorpusPaths,
+    q: &str,
+    yams: &YamsConfig,
+) -> Result<Vec<(IndexedPaper, Option<f32>)>> {
+    let runner = CommandYamsRunner::new(&yams.binary);
+    let db = CorpusDb::load(&paths.db_path)?;
+    if yams.enabled
+        && let Some(hits) = query_with_runner(yams, &runner, q)
+    {
+        let entries: Vec<(IndexedPaper, Option<f32>)> = hits
+            .into_iter()
+            .filter_map(|hit| db.get(&hit.id).cloned().map(|entry| (entry, None)))
+            .collect();
+        if !entries.is_empty() {
+            return Ok(entries);
+        }
+    }
+    let scored = indexing::search_scored(&db, &paths.index_path, q, DEFAULT_QUERY_TOP_K);
+    Ok(scored
+        .into_iter()
+        .filter_map(|(hit, score)| db.get(&hit.id).cloned().map(|entry| (entry, Some(score))))
+        .collect())
+}
+
+/// Default top-K for index-backed corpus queries. Generous enough to feed the
+/// downstream merge step without over-collecting.
+pub const DEFAULT_QUERY_TOP_K: usize = 64;
+
+fn save_index(paths: &CorpusPaths, db: &CorpusDb) {
+    if let Err(err) = indexing::persist_index(db, &paths.index_path) {
+        // Non-fatal: query path falls back to in-memory build on miss. Log
+        // via tracing once the crate adopts it; for now, swallow and move on.
+        let _ = err;
+    }
+}
+
+/// Rebuild the BM25F index from `corpus.json`. Used by `paperseed reindex`.
+pub fn reindex(paths: &CorpusPaths) -> Result<usize> {
+    let db = CorpusDb::load(&paths.db_path)?;
+    let count = db.papers.len();
+    indexing::persist_index(&db, &paths.index_path)?;
+    Ok(count)
 }
 
 pub fn get_entry(paths: &CorpusPaths, paper_id: &str) -> Result<IndexedPaper> {

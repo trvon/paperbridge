@@ -3,6 +3,7 @@ pub mod cli;
 pub mod corpus;
 pub mod db;
 pub mod error;
+pub mod indexing;
 pub mod models;
 pub mod policy;
 pub mod resolver;

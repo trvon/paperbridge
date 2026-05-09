@@ -141,6 +141,7 @@ fn convert_entry(entry: RawHfPaperEntry) -> PaperHit {
         venue: Some("HuggingFace Papers".to_string()),
         citation_count: None,
         cache: None,
+        relevance_score: None,
     }
 }
 

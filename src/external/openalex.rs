@@ -166,6 +166,7 @@ fn convert_work(w: RawOpenAlexWork) -> PaperHit {
         venue,
         citation_count: w.cited_by_count,
         cache: None,
+        relevance_score: None,
     }
 }
 

@@ -114,6 +114,7 @@ fn convert_work(w: RawScholarApiWork) -> PaperHit {
         venue: w.journal,
         citation_count: w.citation_count,
         cache: None,
+        relevance_score: None,
     }
 }
 

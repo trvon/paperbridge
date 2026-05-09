@@ -270,6 +270,7 @@ impl EntryBuilder {
             venue: Some("arXiv".to_string()),
             citation_count: None,
             cache: None,
+            relevance_score: None,
         })
     }
 }

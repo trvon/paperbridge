@@ -441,6 +441,32 @@ fn dedupe(hits: Vec<PaperHit>) -> Vec<PaperHit> {
     out
 }
 
+pub(crate) fn doi_key(hit: &PaperHit) -> Option<String> {
+    hit.doi
+        .as_deref()
+        .map(|d| d.trim().to_ascii_lowercase())
+        .filter(|k| !k.is_empty())
+}
+
+pub(crate) fn arxiv_key(hit: &PaperHit) -> Option<String> {
+    hit.arxiv_id
+        .as_deref()
+        .map(|a| strip_arxiv_version(a).to_ascii_lowercase())
+        .filter(|k| !k.is_empty())
+}
+
+pub(crate) fn pmid_key(hit: &PaperHit) -> Option<String> {
+    hit.pmid
+        .as_deref()
+        .map(|p| p.trim().to_string())
+        .filter(|k| !k.is_empty())
+}
+
+pub(crate) fn title_author_key(hit: &PaperHit) -> Option<String> {
+    let key = title_authors_key(hit);
+    if key.is_empty() { None } else { Some(key) }
+}
+
 fn strip_arxiv_version(id: &str) -> String {
     if let Some(idx) = id.rfind('v') {
         let (base, ver) = id.split_at(idx);
@@ -628,6 +654,7 @@ mod tests {
             venue: None,
             citation_count: None,
             cache: None,
+            relevance_score: None,
         }
     }
 

@@ -629,18 +629,17 @@ impl ServerHandler for PaperbridgeServer {
         let _ = &self.processor;
         let _ = &self.tool_router;
 
-        ServerInfo {
-            protocol_version: rmcp::model::ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities::builder()
+        ServerInfo::new(
+            ServerCapabilities::builder()
                 .enable_tools()
                 .enable_prompts()
                 .build(),
-            server_info: rmcp::model::Implementation::from_build_env(),
-            instructions: Some(
-                "Search Zotero libraries, retrieve full-text content, search external paper sources, and access the local Paperseed cache. Use prepare_vox_text to build read-aloud chunks for Vox. Fetch the prompt 'paperbridge_skill' for the full operating guide."
-                    .to_string(),
-            ),
-        }
+        )
+        .with_protocol_version(rmcp::model::ProtocolVersion::V_2024_11_05)
+        .with_server_info(rmcp::model::Implementation::from_build_env())
+        .with_instructions(
+            "Search Zotero libraries, retrieve full-text content, search external paper sources, and access the local Paperseed cache. Use prepare_vox_text to build read-aloud chunks for Vox. Fetch the prompt 'paperbridge_skill' for the full operating guide.",
+        )
     }
 
     async fn list_prompts(
@@ -668,10 +667,11 @@ impl ServerHandler for PaperbridgeServer {
                 None,
             ));
         }
-        Ok(GetPromptResult {
-            description: Some("paperbridge operating guide".to_string()),
-            messages: vec![PromptMessage::new_text(PromptMessageRole::User, SKILL_MD)],
-        })
+        Ok(GetPromptResult::new(vec![PromptMessage::new_text(
+            PromptMessageRole::User,
+            SKILL_MD,
+        )])
+        .with_description("paperbridge operating guide"))
     }
 }
 

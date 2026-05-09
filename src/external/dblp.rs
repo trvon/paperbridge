@@ -143,6 +143,7 @@ fn convert_info(info: RawDblpInfo) -> PaperHit {
         venue: info.venue,
         citation_count: None,
         cache: None,
+        relevance_score: None,
     }
 }
 

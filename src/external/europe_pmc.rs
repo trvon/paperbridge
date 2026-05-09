@@ -162,6 +162,7 @@ fn convert_result(r: RawEpmcResult) -> PaperHit {
         venue: r.journal_title,
         citation_count: None,
         cache: None,
+        relevance_score: None,
     }
 }
 

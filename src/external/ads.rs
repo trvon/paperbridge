@@ -128,6 +128,7 @@ fn convert_doc(d: RawAdsDoc) -> PaperHit {
         venue: d.pub_field,
         citation_count: d.citation_count,
         cache: None,
+        relevance_score: None,
     }
 }
 

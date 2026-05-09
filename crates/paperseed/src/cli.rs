@@ -136,6 +136,9 @@ pub enum CorpusAction {
         #[arg(long, value_enum, default_value_t = ExportFormat::Json)]
         format: ExportFormat,
     },
+
+    /// Rebuild the BM25F search index from corpus.json
+    Reindex,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]

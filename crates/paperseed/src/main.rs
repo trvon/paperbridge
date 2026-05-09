@@ -142,6 +142,17 @@ fn handle_corpus(action: CorpusAction, paths: &CorpusPaths, json: bool) -> paper
                 ExportFormat::Bibtex => println!("{}", paperseed::app::export_bibtex(&db)),
             }
         }
+        CorpusAction::Reindex => {
+            let count = paperseed::app::reindex(paths)?;
+            if json {
+                print_json(&serde_json::json!({
+                    "indexed": count,
+                    "index_path": paths.index_path.display().to_string(),
+                }))?;
+            } else {
+                println!("reindexed {count} papers -> {}", paths.index_path.display());
+            }
+        }
     }
     Ok(())
 }

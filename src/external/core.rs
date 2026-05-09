@@ -128,6 +128,7 @@ fn convert_work(w: RawCoreWork) -> PaperHit {
         venue: w.publisher,
         citation_count: None,
         cache: None,
+        relevance_score: None,
     }
 }
 

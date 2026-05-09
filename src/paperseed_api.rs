@@ -144,12 +144,12 @@ impl PaperseedApi {
     }
 
     pub fn search_cached_papers(&self, query: &str, limit: usize) -> Result<Vec<PaperHit>> {
-        let entries = paperseed::app::query_entries_with_yams(&self.paths, query, &self.yams)
+        let scored = paperseed::app::query_entries_scored_with_yams(&self.paths, query, &self.yams)
             .map_err(map_error)?;
-        Ok(entries
+        Ok(scored
             .into_iter()
             .take(limit)
-            .map(|entry| PaperHit {
+            .map(|(entry, score)| PaperHit {
                 source: PaperSource::Paperseed,
                 title: entry.paper.metadata.title.clone(),
                 authors: entry.paper.metadata.authors.clone(),
@@ -171,6 +171,7 @@ impl PaperseedApi {
                     cached: true,
                     has_full_text: entry.full_text.is_some(),
                 }),
+                relevance_score: score,
             })
             .collect())
     }

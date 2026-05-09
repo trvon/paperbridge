@@ -127,17 +127,13 @@ impl PaperbridgeService {
         let query = opts.query.clone();
         let mut hits = self.paper_search.search(opts.clone()).await?;
         if let Some(api) = &self.paperseed {
-            let mut cached_hits =
+            let cache_start = hits.len();
+            let cached_hits =
                 api.search_cached_papers(&opts.query, opts.limit_per_source as usize)?;
-            hits.append(&mut cached_hits);
+            hits.extend(cached_hits);
+            merge_prefer_cached(&mut hits, cache_start);
         }
         self.annotate_cached_hits(&mut hits);
-        hits.sort_by_key(|hit| {
-            !hit.cache
-                .as_ref()
-                .map(|cache| cache.cached)
-                .unwrap_or(false)
-        });
         // Clamp to u32 via .min() — safe, bounded cast.
         let total_count = hits.len().min(u32::MAX as usize) as u32;
         self.mirror_open_access_hits(&hits);
@@ -854,6 +850,39 @@ impl PaperbridgeService {
     }
 }
 
+/// Merge cache hits into the externals list. Cache hits that collide with an
+/// external on DOI / arXiv / PMID / (title + first-author) replace the external
+/// entry in place — preserving the external's list position so cache content
+/// doesn't get force-promoted to the top. Cache hits with no collision stay at
+/// the tail in their original order.
+fn merge_prefer_cached(hits: &mut Vec<PaperHit>, cache_start: usize) {
+    if cache_start >= hits.len() {
+        return;
+    }
+    let cached: Vec<PaperHit> = hits.drain(cache_start..).collect();
+    for cache_hit in cached {
+        match collision_index(hits, &cache_hit) {
+            Some(idx) => hits[idx] = cache_hit,
+            None => hits.push(cache_hit),
+        }
+    }
+}
+
+fn collision_index(externals: &[PaperHit], cache_hit: &PaperHit) -> Option<usize> {
+    use crate::external::{arxiv_key, doi_key, pmid_key, title_author_key};
+    let cache_doi = doi_key(cache_hit);
+    let cache_arxiv = arxiv_key(cache_hit);
+    let cache_pmid = pmid_key(cache_hit);
+    let cache_title = title_author_key(cache_hit);
+
+    externals.iter().position(|ext| {
+        (cache_doi.is_some() && cache_doi == doi_key(ext))
+            || (cache_arxiv.is_some() && cache_arxiv == arxiv_key(ext))
+            || (cache_pmid.is_some() && cache_pmid == pmid_key(ext))
+            || (cache_title.is_some() && cache_title == title_author_key(ext))
+    })
+}
+
 fn cached_paper_structure(paper: &CachedPaperDetail, fulltext: &FulltextContent) -> PaperStructure {
     PaperStructure {
         item_key: paper.paper_id.clone(),
@@ -1069,6 +1098,7 @@ mod tests {
             venue: Some("Open Venue".to_string()),
             citation_count: None,
             cache: None,
+            relevance_score: None,
         };
 
         mirror_open_access_hit(&api, &hit).await.unwrap();
@@ -1253,7 +1283,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_papers_prioritizes_cached_hits_and_annotates_external_matches() {
+    async fn search_papers_dedupes_external_matches_against_cache() {
         let server = wiremock::MockServer::start().await;
 
         wiremock::Mock::given(wiremock::matchers::method("GET"))
@@ -1350,16 +1380,27 @@ mod tests {
         let hits = result.hits;
 
         assert!(!hits.is_empty());
+
+        // The arXiv entry "Matched External Paper" collides on title+author with
+        // the paperseed-cached copy of the same paper. merge_prefer_cached replaces
+        // the external entry with the cached one in place, so the result list has
+        // no Arxiv-source duplicate of a cached paper.
         assert!(
-            hits.iter()
-                .all(|hit| hit.cache.as_ref().map(|c| c.cached).unwrap_or(false))
+            !hits.iter().any(
+                |hit| hit.source == PaperSource::Arxiv && hit.title == "Matched External Paper"
+            ),
+            "external duplicate of cached paper should be replaced by the cache entry"
         );
 
-        let first_non_cached = hits
+        let matched_cached = hits
             .iter()
-            .position(|hit| hit.cache.is_none())
-            .unwrap_or(hits.len());
-        assert_eq!(first_non_cached, hits.len());
+            .find(|hit| {
+                hit.cache.as_ref().map(|c| c.paper_id.as_str())
+                    == Some(matched.metadata.id.as_str())
+            })
+            .expect("matched cached hit present");
+        assert_eq!(matched_cached.title, "Matched External Paper");
+        assert_eq!(matched_cached.source, PaperSource::Paperseed);
 
         let local_cached = hits
             .iter()
@@ -1368,20 +1409,6 @@ mod tests {
             })
             .expect("local cached hit present");
         assert_eq!(local_cached.title, "Local Only Paper");
-        assert_eq!(
-            local_cached.cache.as_ref().map(|c| c.paper_id.as_str()),
-            Some(local.metadata.id.as_str())
-        );
-
-        let matched_external = hits
-            .iter()
-            .find(|hit| hit.source == PaperSource::Arxiv)
-            .expect("external hit present");
-        assert_eq!(matched_external.title, "Matched External Paper");
-        assert_eq!(
-            matched_external.cache.as_ref().map(|c| c.paper_id.as_str()),
-            Some(matched.metadata.id.as_str())
-        );
     }
 
     #[tokio::test]
@@ -1414,5 +1441,108 @@ mod tests {
             err.to_string()
                 .contains("not available for the active local backend")
         );
+    }
+
+    fn make_hit(source: PaperSource, title: &str, doi: Option<&str>) -> PaperHit {
+        PaperHit {
+            source,
+            title: title.to_string(),
+            authors: vec!["A. Author".to_string()],
+            year: None,
+            doi: doi.map(|d| d.to_string()),
+            arxiv_id: None,
+            pmid: None,
+            abstract_note: None,
+            url: None,
+            pdf_url: None,
+            oa_pdf_url: None,
+            venue: None,
+            citation_count: None,
+            cache: None,
+            relevance_score: None,
+        }
+    }
+
+    fn make_cache_hit(title: &str, doi: Option<&str>) -> PaperHit {
+        let mut hit = make_hit(PaperSource::Paperseed, title, doi);
+        hit.cache = Some(CachedPaperSummary {
+            paper_id: "p1".to_string(),
+            cached: true,
+            has_full_text: true,
+        });
+        hit
+    }
+
+    #[test]
+    fn merge_prefer_cached_keeps_cache_only_hit_at_tail() {
+        let mut hits = vec![
+            make_hit(PaperSource::Arxiv, "External A", Some("10.1/a")),
+            make_hit(PaperSource::Arxiv, "External B", Some("10.1/b")),
+        ];
+        let cache_start = hits.len();
+        hits.push(make_cache_hit("Cached Only", Some("10.1/c")));
+
+        merge_prefer_cached(&mut hits, cache_start);
+
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].title, "External A");
+        assert_eq!(hits[1].title, "External B");
+        assert_eq!(hits[2].title, "Cached Only");
+        assert!(hits[2].cache.is_some());
+    }
+
+    #[test]
+    fn merge_prefer_cached_replaces_external_at_collision_position() {
+        let mut hits = vec![
+            make_hit(PaperSource::Arxiv, "External A", Some("10.1/a")),
+            make_hit(PaperSource::Arxiv, "External B", Some("10.1/b")),
+            make_hit(PaperSource::Arxiv, "External C", Some("10.1/c")),
+        ];
+        let cache_start = hits.len();
+        hits.push(make_cache_hit("Cached B", Some("10.1/b")));
+
+        merge_prefer_cached(&mut hits, cache_start);
+
+        assert_eq!(hits.len(), 3, "collision should replace, not append");
+        assert_eq!(hits[0].title, "External A");
+        assert_eq!(
+            hits[1].title, "Cached B",
+            "cache hit must take external B's slot"
+        );
+        assert!(
+            hits[1].cache.is_some(),
+            "cached entry should win on DOI collision"
+        );
+        assert_eq!(hits[2].title, "External C");
+    }
+
+    #[test]
+    fn merge_prefer_cached_does_not_force_cache_to_top() {
+        // Regression: previously a sort_by_key forced all cached hits to the
+        // front of the list regardless of relevance. After the fix, cache
+        // hits keep their natural position (tail unless they collide).
+        let mut hits = vec![make_hit(
+            PaperSource::Arxiv,
+            "Strong External",
+            Some("10.1/strong"),
+        )];
+        let cache_start = hits.len();
+        hits.push(make_cache_hit("Weak Cached", Some("10.1/weak")));
+
+        merge_prefer_cached(&mut hits, cache_start);
+
+        assert_eq!(hits[0].title, "Strong External");
+        assert_eq!(hits[1].title, "Weak Cached");
+    }
+
+    #[test]
+    fn merge_prefer_cached_handles_empty_cache_segment() {
+        let mut hits = vec![make_hit(PaperSource::Arxiv, "Only External", None)];
+        let cache_start = hits.len();
+
+        merge_prefer_cached(&mut hits, cache_start);
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].title, "Only External");
     }
 }

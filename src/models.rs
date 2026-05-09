@@ -372,7 +372,7 @@ pub struct PaperStructure {
     pub source: PaperStructureSource,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct PaperHit {
     pub source: PaperSource,
     pub title: String,
@@ -391,9 +391,14 @@ pub struct PaperHit {
     pub citation_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache: Option<CachedPaperSummary>,
+    /// Optional BM25F relevance score for cache hits. Advisory — used to
+    /// break ties in downstream ranking when other signals are equal. `None`
+    /// for external hits (no comparable score available).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relevance_score: Option<f32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct SearchPapersResult {
     pub query: String,
     pub total_count: u32,
