@@ -317,6 +317,7 @@ pub struct PaperMetadata {
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authors: Vec<String>,
+    #[serde(rename = "abstract", alias = "abstract_note", alias = "abstractNote")]
     pub abstract_note: Option<String>,
     pub doi: Option<String>,
     pub year: Option<String>,
@@ -382,6 +383,7 @@ pub struct PaperHit {
     pub arxiv_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pmid: Option<String>,
+    #[serde(rename = "abstract", alias = "abstract_note", alias = "abstractNote")]
     pub abstract_note: Option<String>,
     pub url: Option<String>,
     pub pdf_url: Option<String>,

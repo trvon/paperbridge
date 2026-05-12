@@ -370,7 +370,7 @@ impl PaperbridgeServer {
 
     #[tool(
         name = "query_paper",
-        description = "Evaluate a dotted-path selector against the paper's PaperStructure and return the matching subtree. Example selectors: 'metadata.title', 'sections[0].heading', 'references[3]'."
+        description = "Evaluate a dotted-path selector against PaperStructure and return the matching subtree. Top-level keys: item_key, attachment_key, metadata, sections, references, figures, source. metadata sub-keys: title, authors, abstract, doi, year. Examples: 'metadata.title', 'metadata.abstract', 'sections[0].heading', 'references[3].doi'."
     )]
     async fn query_paper(
         &self,

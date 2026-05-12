@@ -51,9 +51,14 @@ pub fn evaluate(root: &Value, selector: &str) -> Result<Value> {
 
 fn descend_key<'a>(value: &'a Value, key: &str, selector: &str) -> Result<&'a Value> {
     match value {
-        Value::Object(map) => map
-            .get(key)
-            .ok_or_else(|| invalid(selector, &format!("missing key '{key}'"))),
+        Value::Object(map) => map.get(key).ok_or_else(|| {
+            let mut keys: Vec<&str> = map.keys().map(String::as_str).collect();
+            keys.sort();
+            invalid(
+                selector,
+                &format!("missing key '{key}' (available: {})", keys.join(", ")),
+            )
+        }),
         Value::Array(_) => Err(invalid(
             selector,
             &format!("expected object, found array when resolving '{key}'"),
@@ -132,7 +137,13 @@ mod tests {
     fn missing_key_errors() {
         let v = sample();
         let err = evaluate(&v, "metadata.doi").unwrap_err();
-        assert!(format!("{err}").contains("missing key 'doi'"));
+        let msg = format!("{err}");
+        assert!(msg.contains("missing key 'doi'"));
+        // Error must enumerate what is actually available so callers can
+        // recover without guessing field names.
+        assert!(msg.contains("available:"));
+        assert!(msg.contains("title"));
+        assert!(msg.contains("authors"));
     }
 
     #[test]
@@ -146,5 +157,56 @@ mod tests {
     fn unclosed_bracket_errors() {
         let v = sample();
         assert!(evaluate(&v, "sections[0").is_err());
+    }
+
+    #[test]
+    fn metadata_abstract_selector_resolves_on_paper_structure() {
+        use crate::models::{PaperMetadata, PaperStructure, PaperStructureSource};
+        let structure = PaperStructure {
+            item_key: "ABCD".to_string(),
+            attachment_key: None,
+            metadata: PaperMetadata {
+                title: Some("Title".to_string()),
+                authors: vec!["Vaswani".to_string()],
+                abstract_note: Some("Attention summary.".to_string()),
+                doi: None,
+                year: None,
+            },
+            sections: vec![],
+            references: vec![],
+            figures: vec![],
+            source: PaperStructureSource::ZoteroFulltext,
+        };
+        let v = serde_json::to_value(&structure).unwrap();
+        // Canonical selector — what the user typed.
+        assert_eq!(
+            evaluate(&v, "metadata.abstract").unwrap(),
+            json!("Attention summary.")
+        );
+    }
+
+    #[test]
+    fn paper_metadata_accepts_legacy_abstract_note_alias() {
+        // Anything that previously emitted JSON with `abstract_note` must
+        // still deserialize cleanly into `PaperMetadata`.
+        use crate::models::PaperMetadata;
+        let legacy = json!({
+            "title": "Old",
+            "abstract_note": "From the old shape",
+            "doi": null,
+            "year": null,
+        });
+        let parsed: PaperMetadata = serde_json::from_value(legacy).unwrap();
+        assert_eq!(parsed.abstract_note.as_deref(), Some("From the old shape"));
+
+        // camelCase Zotero shape also works.
+        let zotero = json!({
+            "title": "Z",
+            "abstractNote": "From Zotero",
+            "doi": null,
+            "year": null,
+        });
+        let parsed: PaperMetadata = serde_json::from_value(zotero).unwrap();
+        assert_eq!(parsed.abstract_note.as_deref(), Some("From Zotero"));
     }
 }
