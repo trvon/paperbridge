@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1](https://github.com/trvon/paperbridge/compare/v0.8.0...v0.8.1) (2026-05-12)
+
+
+### Bug Fixes
+
+* **query_paper:** rename abstract_note JSON key to abstract ([b43aa50](https://github.com/trvon/paperbridge/commit/b43aa50cbb213224911b2023f6a77a1323cbdb34))
+
 ## [0.8.0](https://github.com/trvon/paperbridge/compare/v0.7.0...v0.8.0) (2026-05-09)
 
 
