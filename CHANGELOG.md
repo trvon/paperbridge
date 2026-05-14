@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/trvon/paperbridge/compare/v0.8.1...v0.9.0) (2026-05-14)
+
+
+### Features
+
+* **paperseed:** replace hand-rolled PDF extractor with pdf-extract ([712ebdd](https://github.com/trvon/paperbridge/commit/712ebdd16d2f0c336cc4953a3dd8394e5704cee5))
+
 ## [0.8.1](https://github.com/trvon/paperbridge/compare/v0.8.0...v0.8.1) (2026-05-12)
 
 
