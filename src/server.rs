@@ -767,4 +767,338 @@ mod tests {
             Some(vec![PaperSource::Arxiv, PaperSource::Crossref])
         );
     }
+
+    // ---- Phase B2: MCP handler round-trip coverage ----
+
+    use crate::config::{BackendModeConfig, Config, LibraryType};
+    use crate::models::{ItemDetail, ItemSummary};
+    use crate::service::PaperbridgeService;
+    use crate::zotero_api::build_backend;
+    use serde::de::DeserializeOwned;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn cloud_test_config(api_base: String) -> Config {
+        Config {
+            backend_mode: BackendModeConfig::Cloud,
+            cloud_api_base: api_base,
+            local_api_base: "http://127.0.0.1:23119/api".to_string(),
+            user_id: Some(123),
+            library_type: LibraryType::User,
+            ..Config::default()
+        }
+    }
+
+    /// Spin up a Zotero cloud mock with the minimum endpoints needed by the
+    /// read-side MCP handlers, wrap it in PaperbridgeServer, and return both
+    /// so individual tests can assert on the response shape.
+    async fn server_with_mocked_cloud() -> (PaperbridgeServer, MockServer) {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/users/123/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "key": "ITEMA",
+                    "data": {
+                        "itemType": "journalArticle",
+                        "title": "Graph Learning at Scale",
+                        "date": "2024-08-01",
+                        "creators": [{"firstName": "Grace", "lastName": "Hopper"}],
+                        "url": "https://example.org/graph"
+                    }
+                }
+            ])))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/users/123/collections/top"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "key": "COLL1",
+                    "data": {"name": "Research", "parentCollection": null},
+                    "meta": {"numItems": 7}
+                }
+            ])))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/users/123/items/ITEMA"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "key": "ITEMA",
+                "data": {
+                    "itemType": "journalArticle",
+                    "title": "Graph Learning at Scale",
+                    "date": "2024-08-01",
+                    "abstractNote": "A practical systems paper.",
+                    "creators": [{"firstName": "Grace", "lastName": "Hopper"}],
+                    "url": "https://example.org/graph"
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/users/123/items/ITEMA/children"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/users/123/items/PDFA/fulltext"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "content": "First sentence. Second sentence.",
+                "indexedPages": 2,
+                "totalPages": 2,
+                "indexedChars": 30,
+                "totalChars": 30
+            })))
+            .mount(&server)
+            .await;
+
+        let backend = build_backend(cloud_test_config(server.uri())).unwrap();
+        let service = PaperbridgeService::new(backend);
+        (PaperbridgeServer::new(service), server)
+    }
+
+    /// Parse the JSON payload out of a successful CallToolResult.
+    fn parse_call_tool_result<T: DeserializeOwned>(result: &CallToolResult) -> T {
+        let first = result
+            .content
+            .first()
+            .expect("CallToolResult should contain at least one content item");
+        let text = match &first.raw {
+            rmcp::model::RawContent::Text(text_content) => text_content.text.as_str(),
+            other => panic!("expected text content, got {other:?}"),
+        };
+        serde_json::from_str(text).expect("CallToolResult payload should be JSON")
+    }
+
+    #[tokio::test]
+    async fn search_items_handler_returns_mocked_results() {
+        let (srv, _mock) = server_with_mocked_cloud().await;
+        let result = srv
+            .search_items(Parameters(SearchItemsParams {
+                q: Some("graph".to_string()),
+                qmode: None,
+                item_type: None,
+                tag: None,
+                limit: Some(10),
+                start: None,
+            }))
+            .await
+            .unwrap();
+        let items: Vec<ItemSummary> = parse_call_tool_result(&result);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].key, "ITEMA");
+    }
+
+    #[tokio::test]
+    async fn list_collections_handler_returns_mocked_results() {
+        let (srv, _mock) = server_with_mocked_cloud().await;
+        let result = srv
+            .list_collections(Parameters(ListCollectionsParams {
+                top_only: Some(true),
+                limit: None,
+                start: None,
+            }))
+            .await
+            .unwrap();
+        let json: serde_json::Value = parse_call_tool_result(&result);
+        let arr = json.as_array().expect("array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["key"], "COLL1");
+    }
+
+    #[tokio::test]
+    async fn get_item_handler_round_trips_through_service() {
+        let (srv, _mock) = server_with_mocked_cloud().await;
+        let result = srv
+            .get_item(Parameters(GetItemParams {
+                key: "ITEMA".to_string(),
+            }))
+            .await
+            .unwrap();
+        let item: ItemDetail = parse_call_tool_result(&result);
+        assert_eq!(item.key, "ITEMA");
+        assert_eq!(item.title, "Graph Learning at Scale");
+    }
+
+    #[tokio::test]
+    async fn get_item_fulltext_handler_returns_content() {
+        let (srv, _mock) = server_with_mocked_cloud().await;
+        let result = srv
+            .get_item_fulltext(Parameters(GetItemFulltextParams {
+                attachment_key: "PDFA".to_string(),
+            }))
+            .await
+            .unwrap();
+        let json: serde_json::Value = parse_call_tool_result(&result);
+        assert!(
+            json["content"]
+                .as_str()
+                .unwrap_or("")
+                .contains("First sentence")
+        );
+    }
+
+    #[tokio::test]
+    async fn backend_info_handler_reports_cloud_mode() {
+        let (srv, _mock) = server_with_mocked_cloud().await;
+        let result = srv.backend_info(Parameters(BackendInfoParams {})).await.unwrap();
+        let json: serde_json::Value = parse_call_tool_result(&result);
+        assert_eq!(json["mode"], "cloud");
+        assert_eq!(json["read_library"], true);
+    }
+
+    #[tokio::test]
+    async fn validate_item_handler_flags_missing_title() {
+        let (srv, _mock) = server_with_mocked_cloud().await;
+        let result = srv
+            .validate_item(Parameters(ValidateItemParams {
+                item: ItemWriteRequest {
+                    item_type: "journalArticle".to_string(),
+                    title: None,
+                    creators: vec![],
+                    abstract_note: None,
+                    date: None,
+                    url: None,
+                    doi: None,
+                    isbn: None,
+                    tags: vec![],
+                    collections: vec![],
+                    extra: None,
+                    parent_item: None,
+                },
+                online: Some(false),
+            }))
+            .await
+            .unwrap();
+        let json: serde_json::Value = parse_call_tool_result(&result);
+        assert_eq!(json["valid"], false);
+        assert!(!json["issues"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn prepare_vox_text_handler_chunks_inline_text() {
+        let (srv, _mock) = server_with_mocked_cloud().await;
+        let result = srv
+            .prepare_vox_text(Parameters(PrepareVoxTextParams {
+                text: Some("inline content for vox handler".to_string()),
+                attachment_key: None,
+                source_label: Some("test".to_string()),
+                max_chars_per_chunk: Some(8),
+            }))
+            .await
+            .unwrap();
+        let json: serde_json::Value = parse_call_tool_result(&result);
+        assert_eq!(json["source"], "test");
+        assert!(json["chunk_count"].as_u64().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn create_item_handler_rejects_unsupported_write_with_invalid_params() {
+        // Local backend doesn't support writes — the handler must surface
+        // ZoteroMcpError::InvalidInput as an MCP "invalid params" error so
+        // clients can distinguish capability errors from server faults.
+        use crate::backend::{BackendCapabilities, BackendMode, LibraryBackend};
+        use std::sync::Arc;
+
+        struct ReadOnlyStub;
+        #[async_trait::async_trait]
+        impl LibraryBackend for ReadOnlyStub {
+            fn mode(&self) -> BackendMode {
+                BackendMode::Local
+            }
+            fn capabilities(&self) -> BackendCapabilities {
+                BackendCapabilities::read_only_local()
+            }
+            async fn search_items(
+                &self,
+                _: crate::models::SearchItemsQuery,
+            ) -> crate::Result<Vec<crate::models::ItemSummary>> {
+                Ok(vec![])
+            }
+            async fn list_collections(
+                &self,
+                _: crate::models::ListCollectionsQuery,
+            ) -> crate::Result<Vec<crate::models::CollectionSummary>> {
+                Ok(vec![])
+            }
+            async fn get_item(&self, _: &str) -> crate::Result<ItemDetail> {
+                Err(ZoteroMcpError::InvalidInput("unused".into()))
+            }
+            async fn get_item_fulltext(
+                &self,
+                _: &str,
+            ) -> crate::Result<crate::models::FulltextContent> {
+                Err(ZoteroMcpError::InvalidInput("unused".into()))
+            }
+            async fn get_pdf_text(
+                &self,
+                _: &str,
+            ) -> crate::Result<crate::models::FulltextContent> {
+                Err(ZoteroMcpError::InvalidInput("unused".into()))
+            }
+            async fn get_attachment_bytes(&self, _: &str) -> crate::Result<Vec<u8>> {
+                Err(ZoteroMcpError::InvalidInput("unused".into()))
+            }
+            async fn create_collection(
+                &self,
+                _: crate::models::CollectionWriteRequest,
+            ) -> crate::Result<crate::models::CollectionSummary> {
+                panic!("not reached: handler must gate on capabilities first")
+            }
+            async fn update_collection(
+                &self,
+                _: crate::models::CollectionUpdateRequest,
+            ) -> crate::Result<crate::models::CollectionSummary> {
+                panic!("not reached")
+            }
+            async fn delete_collection(
+                &self,
+                _: crate::models::DeleteCollectionRequest,
+            ) -> crate::Result<()> {
+                panic!("not reached")
+            }
+            async fn create_item(&self, _: ItemWriteRequest) -> crate::Result<ItemDetail> {
+                panic!("not reached")
+            }
+            async fn update_item(
+                &self,
+                _: crate::models::ItemUpdateRequest,
+            ) -> crate::Result<ItemDetail> {
+                panic!("not reached")
+            }
+            async fn delete_item(&self, _: crate::models::DeleteItemRequest) -> crate::Result<()> {
+                panic!("not reached")
+            }
+        }
+
+        let srv = PaperbridgeServer::new(PaperbridgeService::new(Arc::new(ReadOnlyStub)));
+        let err = srv
+            .create_item(Parameters(CreateItemParams {
+                item: ItemWriteRequest {
+                    item_type: "journalArticle".to_string(),
+                    title: Some("Test".to_string()),
+                    creators: vec![],
+                    abstract_note: None,
+                    date: None,
+                    url: None,
+                    doi: None,
+                    isbn: None,
+                    tags: vec![],
+                    collections: vec![],
+                    extra: None,
+                    parent_item: None,
+                },
+            }))
+            .await
+            .unwrap_err();
+        // McpError surfaces the underlying message; "local backend" string
+        // confirms `ensure_write_supported` triggered the InvalidInput path.
+        assert!(format!("{err}").contains("local backend"));
+    }
 }

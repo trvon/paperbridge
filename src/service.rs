@@ -1545,4 +1545,217 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].title, "Only External");
     }
+
+    // ---- Phase B1: backend info, validator, and prepare_vox_text coverage ----
+
+    fn service() -> PaperbridgeService {
+        PaperbridgeService::new(Arc::new(StubLocalReadOnlyBackend))
+    }
+
+    #[test]
+    fn backend_mode_reports_local_for_local_stub() {
+        assert_eq!(service().backend_mode(), BackendMode::Local);
+    }
+
+    #[test]
+    fn backend_capabilities_reports_read_only_for_local_stub() {
+        let caps = service().backend_capabilities();
+        assert_eq!(caps, BackendCapabilities::read_only_local());
+        assert!(caps.read_library);
+        assert!(!caps.write_basic);
+    }
+
+    #[test]
+    fn backend_info_returns_local_shape() {
+        let info = service().backend_info();
+        assert_eq!(info.mode, "local");
+        assert!(info.read_library);
+        assert!(!info.write_basic);
+        assert!(!info.group_libraries);
+    }
+
+    fn item_write_request(title: Option<&str>) -> ItemWriteRequest {
+        ItemWriteRequest {
+            item_type: "journalArticle".to_string(),
+            title: title.map(|s| s.to_string()),
+            creators: vec![],
+            abstract_note: None,
+            date: None,
+            url: None,
+            doi: None,
+            isbn: None,
+            tags: vec![],
+            collections: vec![],
+            extra: None,
+            parent_item: None,
+        }
+    }
+
+    fn item_update_request(key: &str) -> ItemUpdateRequest {
+        ItemUpdateRequest {
+            key: key.to_string(),
+            version: None,
+            item_type: None,
+            title: None,
+            creators: None,
+            abstract_note: None,
+            date: None,
+            url: None,
+            doi: None,
+            isbn: None,
+            tags: None,
+            collections: None,
+            extra: None,
+            parent_item: None,
+            clear_parent: false,
+        }
+    }
+
+    fn collection_update_request(key: &str) -> CollectionUpdateRequest {
+        CollectionUpdateRequest {
+            key: key.to_string(),
+            version: None,
+            name: None,
+            parent_collection: None,
+            clear_parent: false,
+        }
+    }
+
+    #[test]
+    fn validate_item_request_rejects_missing_title() {
+        let report = service().validate_item_request(&item_write_request(None));
+        assert!(
+            !report.valid,
+            "missing title must produce at least one issue"
+        );
+    }
+
+    #[test]
+    fn validate_item_request_accepts_well_formed_input() {
+        let mut req = item_write_request(Some("Attention Is All You Need"));
+        req.doi = Some("10.1234/abc".to_string());
+        let report = service().validate_item_request(&req);
+        assert!(
+            report.valid,
+            "well-formed request reported issues: {:?}",
+            report.issues
+        );
+    }
+
+    #[test]
+    fn validate_collection_request_rejects_empty_name() {
+        let report = service().validate_collection_request(&CollectionWriteRequest {
+            name: "   ".to_string(),
+            parent_collection: None,
+        });
+        assert!(!report.valid);
+    }
+
+    #[test]
+    fn validate_item_update_request_requires_key() {
+        let report = service().validate_item_update_request(&item_update_request(""));
+        assert!(!report.valid);
+    }
+
+    #[test]
+    fn validate_collection_update_request_requires_key() {
+        let report =
+            service().validate_collection_update_request(&collection_update_request(""));
+        assert!(!report.valid);
+    }
+
+    #[test]
+    fn validate_delete_item_request_requires_key() {
+        let report = service().validate_delete_item_request(&DeleteItemRequest {
+            key: "".to_string(),
+            version: None,
+        });
+        assert!(!report.valid);
+    }
+
+    #[test]
+    fn validate_delete_collection_request_requires_key() {
+        let report = service().validate_delete_collection_request(&DeleteCollectionRequest {
+            key: "".to_string(),
+            version: None,
+        });
+        assert!(!report.valid);
+    }
+
+    #[tokio::test]
+    async fn prepare_vox_text_chunks_inline_text_with_default_source() {
+        let payload = service()
+            .prepare_vox_text(PrepareVoxTextRequest {
+                text: Some("inline text content for vox preparation".to_string()),
+                attachment_key: None,
+                source_label: None,
+                max_chars_per_chunk: Some(8),
+            })
+            .await
+            .unwrap();
+        assert_eq!(payload.source, "manual-text");
+        assert!(!payload.chunks.is_empty());
+        assert!(payload.chunk_count >= 1);
+    }
+
+    #[tokio::test]
+    async fn prepare_vox_text_honors_custom_source_label() {
+        let payload = service()
+            .prepare_vox_text(PrepareVoxTextRequest {
+                text: Some("hello world".to_string()),
+                attachment_key: None,
+                source_label: Some("note:42".to_string()),
+                max_chars_per_chunk: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(payload.source, "note:42");
+    }
+
+    #[tokio::test]
+    async fn prepare_vox_text_errors_when_no_text_or_attachment() {
+        let err = service()
+            .prepare_vox_text(PrepareVoxTextRequest {
+                text: None,
+                attachment_key: None,
+                source_label: None,
+                max_chars_per_chunk: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Provide either"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn with_unpaywall_attaches_client_when_email_present() {
+        let service = PaperbridgeService::new(Arc::new(StubLocalReadOnlyBackend))
+            .with_unpaywall(Some("tests@example.com".to_string()));
+        assert!(service.unpaywall.is_some());
+    }
+
+    #[test]
+    fn with_unpaywall_skips_client_when_email_missing() {
+        let service =
+            PaperbridgeService::new(Arc::new(StubLocalReadOnlyBackend)).with_unpaywall(None);
+        assert!(service.unpaywall.is_none());
+    }
+
+    #[test]
+    fn with_paper_config_stores_config() {
+        let service =
+            PaperbridgeService::new(Arc::new(StubLocalReadOnlyBackend)).with_paper_config(
+                PaperConfig {
+                    grobid_url: Some("http://localhost:8070".to_string()),
+                    grobid_auto_spawn: false,
+                    grobid_image: "lfoppiano/grobid:latest".to_string(),
+                    grobid_timeout_secs: 30,
+                },
+            );
+        let cfg = service.paper_config.as_ref().expect("paper_config set");
+        assert_eq!(cfg.grobid_url.as_deref(), Some("http://localhost:8070"));
+        assert!(!cfg.grobid_auto_spawn);
+    }
 }

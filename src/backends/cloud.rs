@@ -944,3 +944,238 @@ fn extract_year(date: Option<&str>) -> Option<String> {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{BackendModeConfig, LibraryType};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn test_config(api_base: String) -> Config {
+        Config {
+            backend_mode: BackendModeConfig::Cloud,
+            cloud_api_base: api_base,
+            local_api_base: "http://127.0.0.1:23119/api".to_string(),
+            user_id: Some(123),
+            library_type: LibraryType::User,
+            api_key: Some("test-key".to_string()),
+            ..Config::default()
+        }
+    }
+
+    fn item_request(title: &str) -> ItemWriteRequest {
+        ItemWriteRequest {
+            item_type: "journalArticle".to_string(),
+            title: Some(title.to_string()),
+            creators: vec![CreatorInput {
+                creator_type: "author".to_string(),
+                first_name: Some("Grace".to_string()),
+                last_name: Some("Hopper".to_string()),
+                name: None,
+            }],
+            abstract_note: Some("Body.".to_string()),
+            date: Some("2024".to_string()),
+            url: None,
+            doi: Some("10.1/test".to_string()),
+            isbn: None,
+            tags: vec![],
+            collections: vec![],
+            extra: None,
+            parent_item: None,
+        }
+    }
+
+    #[test]
+    fn mode_reports_cloud() {
+        let server_base = "https://api.zotero.org".to_string();
+        let backend = CloudZoteroBackend::new(test_config(server_base)).unwrap();
+        assert_eq!(backend.mode(), BackendMode::Cloud);
+    }
+
+    #[test]
+    fn capabilities_match_read_only_cloud_constants() {
+        let server_base = "https://api.zotero.org".to_string();
+        let backend = CloudZoteroBackend::new(test_config(server_base)).unwrap();
+        assert_eq!(backend.capabilities(), BackendCapabilities::read_only_cloud());
+    }
+
+    #[test]
+    fn new_requires_secure_transport_when_api_key_present() {
+        // ensure_secure_transport rejects http:// when an api_key is configured —
+        // we should not leak a Zotero key over plaintext to a non-loopback host.
+        let mut cfg = test_config("http://api.zotero.org".to_string());
+        cfg.api_key = Some("test-key".to_string());
+        let err = match CloudZoteroBackend::new(cfg) {
+            Ok(_) => panic!("expected transport rejection for plaintext non-loopback"),
+            Err(e) => e,
+        };
+        assert!(
+            format!("{err}").to_lowercase().contains("http"),
+            "expected transport error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_attachment_bytes_returns_response_body() {
+        let server = MockServer::start().await;
+        let pdf_marker: Vec<u8> = vec![0x25, 0x50, 0x44, 0x46]; // "%PDF"
+        Mock::given(method("GET"))
+            .and(path("/users/123/items/ATTACH/file"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(pdf_marker.clone()),
+            )
+            .mount(&server)
+            .await;
+
+        let mut cfg = test_config(server.uri());
+        cfg.api_key = None; // allow plaintext for wiremock loopback
+        let backend = CloudZoteroBackend::new(cfg).unwrap();
+        let bytes = backend.get_attachment_bytes("ATTACH").await.unwrap();
+        assert_eq!(bytes, pdf_marker);
+    }
+
+    #[tokio::test]
+    async fn get_attachment_bytes_surfaces_api_error_on_404() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/users/123/items/MISSING/file"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("Not Found"))
+            .mount(&server)
+            .await;
+
+        let mut cfg = test_config(server.uri());
+        cfg.api_key = None;
+        let backend = CloudZoteroBackend::new(cfg).unwrap();
+        let err = backend.get_attachment_bytes("MISSING").await.unwrap_err();
+        match err {
+            ZoteroMcpError::Api { status, .. } => assert_eq!(status, 404),
+            other => panic!("expected Api error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_item_parses_multiwrite_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/users/123/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "successful": {
+                    "0": {
+                        "key": "NEW1",
+                        "version": 42,
+                        "data": {
+                            "itemType": "journalArticle",
+                            "title": "Created Paper",
+                            "abstractNote": "Body."
+                        }
+                    }
+                },
+                "unchanged": {},
+                "failed": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let mut cfg = test_config(server.uri());
+        cfg.api_key = None;
+        let backend = CloudZoteroBackend::new(cfg).unwrap();
+        let item = backend.create_item(item_request("Created Paper")).await.unwrap();
+        assert_eq!(item.key, "NEW1");
+        assert_eq!(item.title, "Created Paper");
+    }
+
+    #[tokio::test]
+    async fn create_collection_parses_multiwrite_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/users/123/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "successful": {
+                    "0": {
+                        "key": "COLLNEW",
+                        "version": 1,
+                        "data": {"name": "Research"}
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let mut cfg = test_config(server.uri());
+        cfg.api_key = None;
+        let backend = CloudZoteroBackend::new(cfg).unwrap();
+        let collection = backend
+            .create_collection(CollectionWriteRequest {
+                name: "Research".to_string(),
+                parent_collection: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(collection.key, "COLLNEW");
+        assert_eq!(collection.name, "Research");
+    }
+
+    #[tokio::test]
+    async fn create_item_surfaces_api_error_on_412() {
+        // 412 Precondition Failed is what Zotero returns when an
+        // If-Unmodified-Since-Version check fails on a write.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/users/123/items"))
+            .respond_with(ResponseTemplate::new(412).set_body_string("version mismatch"))
+            .mount(&server)
+            .await;
+
+        let mut cfg = test_config(server.uri());
+        cfg.api_key = None;
+        let backend = CloudZoteroBackend::new(cfg).unwrap();
+        let err = backend.create_item(item_request("X")).await.unwrap_err();
+        match err {
+            ZoteroMcpError::Api { status, .. } => assert_eq!(status, 412),
+            other => panic!("expected Api error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_item_completes_on_204() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/users/123/items/DEL1"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let mut cfg = test_config(server.uri());
+        cfg.api_key = None;
+        let backend = CloudZoteroBackend::new(cfg).unwrap();
+        backend
+            .delete_item(DeleteItemRequest {
+                key: "DEL1".to_string(),
+                version: Some(5),
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_collection_completes_on_204() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/users/123/collections/COLL1"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let mut cfg = test_config(server.uri());
+        cfg.api_key = None;
+        let backend = CloudZoteroBackend::new(cfg).unwrap();
+        backend
+            .delete_collection(DeleteCollectionRequest {
+                key: "COLL1".to_string(),
+                version: Some(3),
+            })
+            .await
+            .unwrap();
+    }
+}
