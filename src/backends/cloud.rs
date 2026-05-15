@@ -997,7 +997,10 @@ mod tests {
     fn capabilities_match_read_only_cloud_constants() {
         let server_base = "https://api.zotero.org".to_string();
         let backend = CloudZoteroBackend::new(test_config(server_base)).unwrap();
-        assert_eq!(backend.capabilities(), BackendCapabilities::read_only_cloud());
+        assert_eq!(
+            backend.capabilities(),
+            BackendCapabilities::read_only_cloud()
+        );
     }
 
     #[test]
@@ -1022,9 +1025,7 @@ mod tests {
         let pdf_marker: Vec<u8> = vec![0x25, 0x50, 0x44, 0x46]; // "%PDF"
         Mock::given(method("GET"))
             .and(path("/users/123/items/ATTACH/file"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_bytes(pdf_marker.clone()),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(pdf_marker.clone()))
             .mount(&server)
             .await;
 
@@ -1080,7 +1081,10 @@ mod tests {
         let mut cfg = test_config(server.uri());
         cfg.api_key = None;
         let backend = CloudZoteroBackend::new(cfg).unwrap();
-        let item = backend.create_item(item_request("Created Paper")).await.unwrap();
+        let item = backend
+            .create_item(item_request("Created Paper"))
+            .await
+            .unwrap();
         assert_eq!(item.key, "NEW1");
         assert_eq!(item.title, "Created Paper");
     }

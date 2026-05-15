@@ -947,7 +947,10 @@ mod tests {
     #[tokio::test]
     async fn backend_info_handler_reports_cloud_mode() {
         let (srv, _mock) = server_with_mocked_cloud().await;
-        let result = srv.backend_info(Parameters(BackendInfoParams {})).await.unwrap();
+        let result = srv
+            .backend_info(Parameters(BackendInfoParams {}))
+            .await
+            .unwrap();
         let json: serde_json::Value = parse_call_tool_result(&result);
         assert_eq!(json["mode"], "cloud");
         assert_eq!(json["read_library"], true);
@@ -1036,10 +1039,7 @@ mod tests {
             ) -> crate::Result<crate::models::FulltextContent> {
                 Err(ZoteroMcpError::InvalidInput("unused".into()))
             }
-            async fn get_pdf_text(
-                &self,
-                _: &str,
-            ) -> crate::Result<crate::models::FulltextContent> {
+            async fn get_pdf_text(&self, _: &str) -> crate::Result<crate::models::FulltextContent> {
                 Err(ZoteroMcpError::InvalidInput("unused".into()))
             }
             async fn get_attachment_bytes(&self, _: &str) -> crate::Result<Vec<u8>> {

@@ -1659,8 +1659,7 @@ mod tests {
 
     #[test]
     fn validate_collection_update_request_requires_key() {
-        let report =
-            service().validate_collection_update_request(&collection_update_request(""));
+        let report = service().validate_collection_update_request(&collection_update_request(""));
         assert!(!report.valid);
     }
 
@@ -1745,15 +1744,13 @@ mod tests {
 
     #[test]
     fn with_paper_config_stores_config() {
-        let service =
-            PaperbridgeService::new(Arc::new(StubLocalReadOnlyBackend)).with_paper_config(
-                PaperConfig {
-                    grobid_url: Some("http://localhost:8070".to_string()),
-                    grobid_auto_spawn: false,
-                    grobid_image: "lfoppiano/grobid:latest".to_string(),
-                    grobid_timeout_secs: 30,
-                },
-            );
+        let service = PaperbridgeService::new(Arc::new(StubLocalReadOnlyBackend))
+            .with_paper_config(PaperConfig {
+                grobid_url: Some("http://localhost:8070".to_string()),
+                grobid_auto_spawn: false,
+                grobid_image: "lfoppiano/grobid:latest".to_string(),
+                grobid_timeout_secs: 30,
+            });
         let cfg = service.paper_config.as_ref().expect("paper_config set");
         assert_eq!(cfg.grobid_url.as_deref(), Some("http://localhost:8070"));
         assert!(!cfg.grobid_auto_spawn);
