@@ -46,6 +46,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Ensure rustup proxies resolve `cargo`
+        shell: bash
+        run: rustup default stable
+
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
