@@ -1,6 +1,6 @@
 [package]
 name = "paperseed-index"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
 description = "BM25F index for the paperseed local paper corpus"
 license = "MIT"
