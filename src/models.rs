@@ -324,9 +324,32 @@ pub struct PaperMetadata {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PaperSectionKind {
+    Abstract,
+    Introduction,
+    Background,
+    RelatedWork,
+    Method,
+    Design,
+    Implementation,
+    Evaluation,
+    Results,
+    Discussion,
+    Limitations,
+    Conclusion,
+    Acknowledgements,
+    References,
+    Appendix,
+    Other,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
 pub struct PaperSection {
     pub id: String,
     pub heading: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<PaperSectionKind>,
     pub level: u8,
     pub text: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

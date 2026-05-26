@@ -445,6 +445,7 @@ impl ParseState {
             self.sections.push(PaperSection {
                 id,
                 heading,
+                kind: None,
                 level: sec.level,
                 text,
                 subsections: Vec::new(),

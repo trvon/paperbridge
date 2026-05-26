@@ -1,5 +1,6 @@
 use crate::models::{
-    FulltextContent, ItemDetail, PaperMetadata, PaperSection, PaperStructure, PaperStructureSource,
+    FulltextContent, ItemDetail, PaperMetadata, PaperSection, PaperSectionKind, PaperStructure,
+    PaperStructureSource,
 };
 
 pub fn build(item: &ItemDetail, fulltext: &FulltextContent) -> PaperStructure {
@@ -11,17 +12,7 @@ pub fn build(item: &ItemDetail, fulltext: &FulltextContent) -> PaperStructure {
         year: item.year.clone(),
     };
 
-    let sections = if fulltext.content.trim().is_empty() {
-        Vec::new()
-    } else {
-        vec![PaperSection {
-            id: "body".to_string(),
-            heading: "Body".to_string(),
-            level: 1,
-            text: fulltext.content.clone(),
-            subsections: Vec::new(),
-        }]
-    };
+    let sections = build_sections(metadata.abstract_note.as_deref(), &fulltext.content);
 
     PaperStructure {
         item_key: item.key.clone(),
@@ -32,6 +23,279 @@ pub fn build(item: &ItemDetail, fulltext: &FulltextContent) -> PaperStructure {
         figures: Vec::new(),
         source: PaperStructureSource::ZoteroFulltext,
     }
+}
+
+pub(crate) fn build_sections(abstract_note: Option<&str>, content: &str) -> Vec<PaperSection> {
+    let mut sections = Vec::new();
+    if let Some(abstract_note) = abstract_note.map(str::trim).filter(|s| !s.is_empty()) {
+        sections.push(PaperSection {
+            id: "abstract".to_string(),
+            heading: "Abstract".to_string(),
+            kind: Some(PaperSectionKind::Abstract),
+            level: 1,
+            text: abstract_note.to_string(),
+            subsections: Vec::new(),
+        });
+    }
+
+    sections.extend(split_fulltext_sections(content));
+    sections
+}
+
+fn split_fulltext_sections(content: &str) -> Vec<PaperSection> {
+    let content = content.trim();
+    if content.is_empty() {
+        return Vec::new();
+    }
+
+    let mut sections = Vec::new();
+    let mut current: Option<(String, PaperSectionKind, Vec<String>)> = None;
+    let mut preamble = Vec::new();
+
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if matches!(
+            current.as_ref().map(|(_, kind, _)| kind),
+            Some(PaperSectionKind::References)
+        ) {
+            if let Some((_, _, lines)) = current.as_mut() {
+                lines.push(line.to_string());
+            }
+        } else if let Some((heading, kind)) = classify_heading(line) {
+            flush_section(&mut sections, &mut current);
+            current = Some((heading, kind, Vec::new()));
+        } else if let Some((_, _, lines)) = current.as_mut() {
+            lines.push(line.to_string());
+        } else {
+            preamble.push(line.to_string());
+        }
+    }
+
+    flush_section(&mut sections, &mut current);
+
+    if sections.is_empty() {
+        return vec![PaperSection {
+            id: "body".to_string(),
+            heading: "Body".to_string(),
+            kind: Some(PaperSectionKind::Other),
+            level: 1,
+            text: content.to_string(),
+            subsections: Vec::new(),
+        }];
+    }
+
+    if !preamble.is_empty() {
+        sections.insert(
+            0,
+            PaperSection {
+                id: "body".to_string(),
+                heading: "Body".to_string(),
+                kind: Some(PaperSectionKind::Other),
+                level: 1,
+                text: collapse_lines(&preamble),
+                subsections: Vec::new(),
+            },
+        );
+    }
+
+    sections
+}
+
+fn flush_section(
+    sections: &mut Vec<PaperSection>,
+    current: &mut Option<(String, PaperSectionKind, Vec<String>)>,
+) {
+    let Some((heading, kind, lines)) = current.take() else {
+        return;
+    };
+    let id = unique_section_id(sections, &kind);
+    sections.push(PaperSection {
+        id,
+        heading,
+        kind: Some(kind),
+        level: 1,
+        text: collapse_lines(&lines),
+        subsections: Vec::new(),
+    });
+}
+
+fn classify_heading(line: &str) -> Option<(String, PaperSectionKind)> {
+    let trimmed = line.trim();
+    if trimmed.len() > 96 || trimmed.ends_with('.') || trimmed.contains(": ") {
+        return None;
+    }
+
+    let display_heading = strip_ordering_prefix(trimmed).trim();
+    let normalized = normalize_heading(trimmed);
+    let heading_like = looks_like_section_heading(display_heading);
+    let kind = match normalized.as_str() {
+        "abstract" => PaperSectionKind::Abstract,
+        "introduction" => PaperSectionKind::Introduction,
+        "background" | "preliminaries" => PaperSectionKind::Background,
+        "related work" | "prior work" => PaperSectionKind::RelatedWork,
+        "method" | "methods" | "methodology" | "approach" | "proposed approach" => {
+            PaperSectionKind::Method
+        }
+        "design" | "system design" | "architecture" | "design and implementation" => {
+            PaperSectionKind::Design
+        }
+        "implementation" => PaperSectionKind::Implementation,
+        "evaluation"
+        | "experimental evaluation"
+        | "experiments"
+        | "experiment"
+        | "empirical evaluation" => PaperSectionKind::Evaluation,
+        "results" | "findings" => PaperSectionKind::Results,
+        "discussion" | "analysis" => PaperSectionKind::Discussion,
+        "limitations" | "threats to validity" => PaperSectionKind::Limitations,
+        "conclusion" | "conclusions" | "concluding remarks" => PaperSectionKind::Conclusion,
+        "acknowledgements" | "acknowledgments" => PaperSectionKind::Acknowledgements,
+        "references" | "bibliography" => PaperSectionKind::References,
+        "appendix" | "appendices" => PaperSectionKind::Appendix,
+        _ if heading_like && normalized.contains("related work") => PaperSectionKind::RelatedWork,
+        _ if heading_like && normalized.contains("implementation") => {
+            PaperSectionKind::Implementation
+        }
+        _ if heading_like
+            && (normalized.contains("evaluation") || normalized.contains("experiment")) =>
+        {
+            PaperSectionKind::Evaluation
+        }
+        _ if heading_like && normalized.contains("result") => PaperSectionKind::Results,
+        _ if heading_like
+            && (normalized.contains("design") || normalized.contains("architecture")) =>
+        {
+            PaperSectionKind::Design
+        }
+        _ if heading_like && normalized.contains("conclusion") => PaperSectionKind::Conclusion,
+        _ => return None,
+    };
+
+    Some((canonical_heading(&kind, display_heading), kind))
+}
+
+fn normalize_heading(line: &str) -> String {
+    let trimmed = line
+        .trim()
+        .trim_matches(|c: char| c == ':' || c == '-' || c == '—')
+        .trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c.is_whitespace())
+        .trim();
+    strip_ordering_prefix(trimmed).to_ascii_lowercase()
+}
+
+fn strip_ordering_prefix(line: &str) -> &str {
+    let line = line.trim();
+    if let Some((prefix, rest)) = line.split_once(['.', ')'])
+        && !rest.trim().is_empty()
+    {
+        let prefix = prefix.trim();
+        if prefix.len() == 1 && prefix.chars().all(|c| c.is_ascii_alphabetic()) {
+            return rest.trim();
+        }
+        if !prefix.is_empty()
+            && prefix
+                .chars()
+                .all(|c| matches!(c.to_ascii_uppercase(), 'I' | 'V' | 'X' | 'L' | 'C'))
+        {
+            return rest.trim();
+        }
+    }
+    line
+}
+
+fn looks_like_section_heading(line: &str) -> bool {
+    let words: Vec<&str> = line
+        .split_whitespace()
+        .filter(|word| word.chars().any(|c| c.is_alphabetic()))
+        .collect();
+    if words.is_empty() || words.len() > 9 {
+        return false;
+    }
+
+    let alpha_count = line.chars().filter(|c| c.is_alphabetic()).count();
+    let uppercase_count = line.chars().filter(|c| c.is_uppercase()).count();
+    if alpha_count > 0 && uppercase_count * 100 / alpha_count >= 60 {
+        return true;
+    }
+
+    words.iter().all(|word| {
+        let trimmed = word.trim_matches(|c: char| !c.is_alphanumeric());
+        let lower = trimmed.to_ascii_lowercase();
+        matches!(
+            lower.as_str(),
+            "and" | "or" | "of" | "the" | "a" | "an" | "for" | "to" | "with" | "in" | "on"
+        ) || trimmed
+            .chars()
+            .next()
+            .map(char::is_uppercase)
+            .unwrap_or(false)
+    })
+}
+
+fn canonical_heading(kind: &PaperSectionKind, original: &str) -> String {
+    match kind {
+        PaperSectionKind::Abstract => "Abstract",
+        PaperSectionKind::Introduction => "Introduction",
+        PaperSectionKind::Background => "Background",
+        PaperSectionKind::RelatedWork => "Related Work",
+        PaperSectionKind::Method => "Method",
+        PaperSectionKind::Design => "Design",
+        PaperSectionKind::Implementation => "Implementation",
+        PaperSectionKind::Evaluation => "Evaluation",
+        PaperSectionKind::Results => "Results",
+        PaperSectionKind::Discussion => "Discussion",
+        PaperSectionKind::Limitations => "Limitations",
+        PaperSectionKind::Conclusion => "Conclusion",
+        PaperSectionKind::Acknowledgements => "Acknowledgements",
+        PaperSectionKind::References => "References",
+        PaperSectionKind::Appendix => "Appendix",
+        PaperSectionKind::Other => original,
+    }
+    .to_string()
+}
+
+fn unique_section_id(sections: &[PaperSection], kind: &PaperSectionKind) -> String {
+    let base = section_id(kind);
+    if !sections.iter().any(|section| section.id == base) {
+        return base;
+    }
+    let mut suffix = 2;
+    loop {
+        let candidate = format!("{base}-{suffix}");
+        if !sections.iter().any(|section| section.id == candidate) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
+fn section_id(kind: &PaperSectionKind) -> String {
+    match kind {
+        PaperSectionKind::RelatedWork => "related_work",
+        PaperSectionKind::Acknowledgements => "acknowledgements",
+        PaperSectionKind::Other => "body",
+        _ => {
+            return format!("{kind:?}")
+                .chars()
+                .flat_map(char::to_lowercase)
+                .collect();
+        }
+    }
+    .to_string()
+}
+
+fn collapse_lines(lines: &[String]) -> String {
+    lines
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
 }
 
 fn extract_doi(item: &ItemDetail) -> Option<String> {
@@ -100,8 +364,9 @@ mod tests {
         assert_eq!(structure.attachment_key.as_deref(), Some("ATT1"));
         assert_eq!(structure.metadata.title.as_deref(), Some("A Paper"));
         assert_eq!(structure.metadata.doi.as_deref(), Some("10.1000/xyz"));
-        assert_eq!(structure.sections.len(), 1);
-        assert_eq!(structure.sections[0].text, "Hello world.");
+        assert_eq!(structure.sections.len(), 2);
+        assert_eq!(structure.sections[0].heading, "Abstract");
+        assert_eq!(structure.sections[1].text, "Hello world.");
         assert!(matches!(
             structure.source,
             PaperStructureSource::ZoteroFulltext
@@ -113,7 +378,8 @@ mod tests {
         let mut ft = sample_fulltext();
         ft.content = String::new();
         let structure = build(&sample_item(), &ft);
-        assert!(structure.sections.is_empty());
+        assert_eq!(structure.sections.len(), 1);
+        assert_eq!(structure.sections[0].heading, "Abstract");
     }
 
     #[test]
@@ -123,5 +389,42 @@ mod tests {
         item.extra = Some("DOI: 10.1234/abc\nother: field".to_string());
         let structure = build(&item, &sample_fulltext());
         assert_eq!(structure.metadata.doi.as_deref(), Some("10.1234/abc"));
+    }
+
+    #[test]
+    fn fallback_splits_common_paper_sections() {
+        let mut ft = sample_fulltext();
+        ft.content = "\
+Introduction
+We frame the problem.
+Design
+We describe the system design.
+Evaluation
+We measure throughput.
+Conclusion
+We summarize."
+            .to_string();
+
+        let structure = build(&sample_item(), &ft);
+        let headings: Vec<&str> = structure
+            .sections
+            .iter()
+            .map(|section| section.heading.as_str())
+            .collect();
+        assert_eq!(
+            headings,
+            vec![
+                "Abstract",
+                "Introduction",
+                "Design",
+                "Evaluation",
+                "Conclusion"
+            ]
+        );
+        assert_eq!(structure.sections[2].kind, Some(PaperSectionKind::Design));
+        assert_eq!(
+            structure.sections[3].kind,
+            Some(PaperSectionKind::Evaluation)
+        );
     }
 }

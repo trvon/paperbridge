@@ -884,6 +884,7 @@ fn collision_index(externals: &[PaperHit], cache_hit: &PaperHit) -> Option<usize
 }
 
 fn cached_paper_structure(paper: &CachedPaperDetail, fulltext: &FulltextContent) -> PaperStructure {
+    let sections = crate::paper::fallback::build_sections(None, &fulltext.content);
     PaperStructure {
         item_key: paper.paper_id.clone(),
         attachment_key: Some(paper.paper_id.clone()),
@@ -894,17 +895,7 @@ fn cached_paper_structure(paper: &CachedPaperDetail, fulltext: &FulltextContent)
             doi: paper.doi.clone(),
             year: paper.year.clone(),
         },
-        sections: if fulltext.content.trim().is_empty() {
-            Vec::new()
-        } else {
-            vec![crate::models::PaperSection {
-                id: "body".to_string(),
-                heading: "Body".to_string(),
-                level: 1,
-                text: fulltext.content.clone(),
-                subsections: Vec::new(),
-            }]
-        },
+        sections,
         references: Vec::new(),
         figures: Vec::new(),
         source: crate::models::PaperStructureSource::ZoteroFulltext,

@@ -354,7 +354,7 @@ impl PaperbridgeServer {
 
     #[tool(
         name = "get_paper_structure",
-        description = "Return a structured tree for a paper in the Zotero library (metadata, sections, references, figures). In this build, sections come from Zotero's indexed fulltext as a single 'Body' block; GROBID-backed section splitting ships in a follow-up."
+        description = "Return a structured tree for a paper in the Zotero library (metadata, sections, references, figures). Without GROBID, Zotero indexed fulltext is split best-effort into common paper sections such as Abstract, Design, Evaluation, Results, and Conclusion; otherwise the body is returned as one section."
     )]
     async fn get_paper_structure(
         &self,
@@ -370,7 +370,7 @@ impl PaperbridgeServer {
 
     #[tool(
         name = "query_paper",
-        description = "Evaluate a dotted-path selector against PaperStructure and return the matching subtree. Top-level keys: item_key, attachment_key, metadata, sections, references, figures, source. metadata sub-keys: title, authors, abstract, doi, year. Examples: 'metadata.title', 'metadata.abstract', 'sections[0].heading', 'references[3].doi'."
+        description = "Evaluate a dotted-path selector against PaperStructure and return the matching subtree. Top-level keys: item_key, attachment_key, metadata, sections, references, figures, source. metadata sub-keys: title, authors, abstract, doi, year. Section sub-keys include id, heading, kind, level, text. Examples: 'metadata.title', 'metadata.abstract', 'sections[0].heading', 'sections[2].kind', 'references[3].doi'."
     )]
     async fn query_paper(
         &self,

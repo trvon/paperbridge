@@ -12,12 +12,18 @@ PaperStructure {
   item_key:       String,
   attachment_key: Option<String>,
   metadata:       PaperMetadata { title, authors[], year, doi, abstract },
-  sections:       [ PaperSection { heading, level, text } ],
+  sections:       [ PaperSection { heading, kind?, level, text } ],
   references:     [ PaperReference { title, authors, year, doi, raw } ],
   figures:        [ PaperFigure { label, caption } ],
   source:         PaperStructureSource,
 }
 ```
+
+`sections[].kind` is a normalized label when paperbridge can infer one
+(`abstract`, `introduction`, `related_work`, `method`, `design`,
+`implementation`, `evaluation`, `results`, `limitations`, `conclusion`, etc.).
+Agents should prefer `kind` over exact heading text when looking for common
+paper parts such as design or evaluation.
 
 `source` tells you where the structure came from and how much you can trust
 the breakdown:
@@ -25,9 +31,12 @@ the breakdown:
 - `{ "kind": "grobid" }` — parsed via GROBID. Real section hierarchy with
   heading levels, a proper reference list, and figure captions.
 - `{ "kind": "zotero_fulltext" }` — GROBID was not configured; the text came
-  from Zotero's stored full text. You get `metadata` plus a single
-  `sections[0]` containing the whole body. For a lot of agent queries (pull
-  the abstract, grep the text, summarize) this is the correct, cheap choice.
+  from Zotero's stored full text. You get `metadata` plus best-effort sections:
+  the Zotero abstract is emitted as an `abstract` section when present, and
+  common headings such as Introduction, Design, Evaluation, Results, and
+  Conclusion are split from the indexed text when Zotero preserved heading
+  lines. If no recognizable headings are available, the full text is returned
+  as a single `Body` section.
 - `{ "kind": "grobid_unavailable", "reason": "..." }` — GROBID was configured
   but the call failed; the service fell back to Zotero full text. The
   `reason` string explains what happened (Docker missing, container never
