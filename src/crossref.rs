@@ -511,6 +511,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_handles_malformed_json() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/works"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{not valid json"))
+            .mount(&server)
+            .await;
+
+        let client = CrossrefClient::new(Some(&server.uri()));
+        let err = client.search("q", 3).await.unwrap_err();
+        match err {
+            ZoteroMcpError::Http(message) => {
+                assert!(message.to_lowercase().contains("response body"));
+            }
+            other => panic!("expected Http decode error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn search_retries_on_429_then_succeeds() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};

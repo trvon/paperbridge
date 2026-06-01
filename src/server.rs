@@ -842,18 +842,28 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/users/123/items/ITEMA/children"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "key": "PDFA",
+                    "data": {
+                        "itemType": "attachment",
+                        "title": "Paper PDF",
+                        "contentType": "application/pdf",
+                        "path": "storage:paper.pdf"
+                    }
+                }
+            ])))
             .mount(&server)
             .await;
 
         Mock::given(method("GET"))
             .and(path("/users/123/items/PDFA/fulltext"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "content": "First sentence. Second sentence.",
+                "content": "Abstract\nA practical systems paper.\nIntroduction\nFirst sentence.\nEvaluation\nSecond sentence.",
                 "indexedPages": 2,
                 "totalPages": 2,
-                "indexedChars": 30,
-                "totalChars": 30
+                "indexedChars": 92,
+                "totalChars": 92
             })))
             .mount(&server)
             .await;
@@ -999,6 +1009,39 @@ mod tests {
         let json: serde_json::Value = parse_call_tool_result(&result);
         assert_eq!(json["source"], "test");
         assert!(json["chunk_count"].as_u64().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn get_paper_structure_handler_returns_structured_json() {
+        let (srv, _mock) = server_with_mocked_cloud().await;
+        let result = srv
+            .get_paper_structure(Parameters(GetPaperStructureParams {
+                item_key: "ITEMA".to_string(),
+                attachment_key: None,
+            }))
+            .await
+            .unwrap();
+        let json: serde_json::Value = parse_call_tool_result(&result);
+        let sections = json["sections"].as_array().expect("sections array");
+        assert_eq!(json["metadata"]["title"], "Graph Learning at Scale");
+        assert_eq!(sections[0]["heading"], "Abstract");
+        assert_eq!(sections[1]["heading"], "Introduction");
+        assert_eq!(sections[2]["kind"], "evaluation");
+    }
+
+    #[tokio::test]
+    async fn query_paper_handler_returns_section_kind() {
+        let (srv, _mock) = server_with_mocked_cloud().await;
+        let result = srv
+            .query_paper(Parameters(QueryPaperParams {
+                item_key: "ITEMA".to_string(),
+                selector: "sections[2].kind".to_string(),
+                attachment_key: None,
+            }))
+            .await
+            .unwrap();
+        let value: serde_json::Value = parse_call_tool_result(&result);
+        assert_eq!(value, serde_json::Value::String("evaluation".to_string()));
     }
 
     #[tokio::test]

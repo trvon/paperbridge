@@ -381,4 +381,20 @@ mod tests {
             other => panic!("expected Api error, got {other:?}"),
         }
     }
+
+    #[tokio::test]
+    async fn search_handles_malformed_xml() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<not xml"))
+            .mount(&server)
+            .await;
+
+        let client = ArxivClient::new(Some(&server.uri()));
+        let err = client.search("q", 1).await.unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("xml parse error"));
+    }
 }

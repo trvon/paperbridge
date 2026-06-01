@@ -134,6 +134,7 @@ impl PaperbridgeService {
             merge_prefer_cached(&mut hits, cache_start);
         }
         self.annotate_cached_hits(&mut hits);
+        rank_search_hits(&query, &mut hits);
         // Clamp to u32 via .min() — safe, bounded cast.
         let total_count = hits.len().min(u32::MAX as usize) as u32;
         self.mirror_open_access_hits(&hits);
@@ -903,14 +904,172 @@ fn cached_paper_structure(paper: &CachedPaperDetail, fulltext: &FulltextContent)
 }
 
 fn titles_match(a: &str, b: &str) -> bool {
-    let norm = |s: &str| {
-        s.trim()
-            .to_ascii_lowercase()
-            .chars()
-            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-            .collect::<String>()
+    normalize_search_text(a) == normalize_search_text(b)
+}
+
+fn rank_search_hits(query: &str, hits: &mut [PaperHit]) {
+    use std::cmp::Reverse;
+
+    let query_title = normalize_search_text(query);
+    let query_tokens: Vec<String> = query_title.split_whitespace().map(str::to_string).collect();
+    let query_doi = normalize_doi(query);
+    let query_arxiv = normalize_arxiv_id(query);
+
+    hits.sort_by_cached_key(|hit| {
+        Reverse(search_rank(
+            &query_title,
+            &query_tokens,
+            query_doi.as_deref(),
+            query_arxiv.as_deref(),
+            hit,
+        ))
+    });
+}
+
+fn search_rank(
+    query_title: &str,
+    query_tokens: &[String],
+    query_doi: Option<&str>,
+    query_arxiv: Option<&str>,
+    hit: &PaperHit,
+) -> (u8, u8, u8, usize, u16, u32, u8) {
+    let normalized_title = normalize_search_text(&hit.title);
+    let title_tokens: Vec<&str> = normalized_title.split_whitespace().collect();
+
+    let doi_match = query_doi
+        .zip(hit.doi.as_deref().and_then(normalize_doi))
+        .map(|(query, doi)| query == doi)
+        .unwrap_or(false);
+    let arxiv_match = query_arxiv
+        .zip(hit.arxiv_id.as_deref().and_then(normalize_arxiv_id))
+        .map(|(query, arxiv)| query == arxiv)
+        .unwrap_or(false);
+
+    let exact_title = !query_title.is_empty() && query_title == normalized_title;
+    let exact_phrase =
+        !exact_title && !query_title.is_empty() && normalized_title.contains(query_title);
+    let token_matches = query_tokens
+        .iter()
+        .filter(|token| {
+            title_tokens
+                .iter()
+                .any(|title_token| title_token == &token.as_str())
+        })
+        .count();
+    let all_tokens_present = !query_tokens.is_empty() && token_matches == query_tokens.len();
+
+    let title_strength = if exact_title {
+        4
+    } else if exact_phrase {
+        3
+    } else if all_tokens_present {
+        2
+    } else if token_matches > 0 {
+        1
+    } else {
+        0
     };
-    norm(a) == norm(b)
+
+    let extra_tokens = title_tokens.len().saturating_sub(query_tokens.len());
+    let tightness = if title_strength >= 3 {
+        u16::MAX.saturating_sub(extra_tokens.min(u16::MAX as usize) as u16)
+    } else {
+        0
+    };
+
+    (
+        doi_match as u8,
+        arxiv_match as u8,
+        title_strength,
+        token_matches,
+        tightness,
+        hit.citation_count.unwrap_or(0),
+        source_rank_bias(hit.source),
+    )
+}
+
+fn normalize_search_text(raw: &str) -> String {
+    raw.trim()
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn normalize_doi(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lowered = trimmed.to_lowercase();
+    let normalized = lowered
+        .strip_prefix("https://doi.org/")
+        .or_else(|| lowered.strip_prefix("http://doi.org/"))
+        .or_else(|| lowered.strip_prefix("doi:"))
+        .unwrap_or(lowered.as_str())
+        .trim();
+
+    if validation::looks_like_doi(normalized) {
+        Some(normalized.to_string())
+    } else {
+        None
+    }
+}
+
+fn normalize_arxiv_id(raw: &str) -> Option<String> {
+    let lowered = raw.trim().to_lowercase();
+    if lowered.is_empty() {
+        return None;
+    }
+
+    let id = lowered
+        .strip_prefix("https://arxiv.org/abs/")
+        .or_else(|| lowered.strip_prefix("http://arxiv.org/abs/"))
+        .or_else(|| lowered.strip_prefix("arxiv:"))
+        .unwrap_or(lowered.as_str())
+        .trim();
+
+    if id.is_empty() {
+        return None;
+    }
+
+    let normalized = if let Some((base, version)) = id.rsplit_once('v')
+        && !base.is_empty()
+        && !version.is_empty()
+        && version.chars().all(|c| c.is_ascii_digit())
+    {
+        base.to_string()
+    } else {
+        id.to_string()
+    };
+
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn source_rank_bias(source: crate::models::PaperSource) -> u8 {
+    match source {
+        crate::models::PaperSource::Paperseed => 12,
+        crate::models::PaperSource::Arxiv => 11,
+        crate::models::PaperSource::SemanticScholar => 10,
+        crate::models::PaperSource::OpenAlex => 9,
+        crate::models::PaperSource::Crossref => 8,
+        crate::models::PaperSource::OpenReview => 7,
+        crate::models::PaperSource::Dblp => 6,
+        crate::models::PaperSource::Pubmed => 5,
+        crate::models::PaperSource::EuropePmc => 4,
+        crate::models::PaperSource::Core => 3,
+        crate::models::PaperSource::HuggingFace => 2,
+        crate::models::PaperSource::Ads => 1,
+        crate::models::PaperSource::ScholarApi => 0,
+    }
 }
 
 fn summarize_validation_report(report: &ValidationReport) -> String {
@@ -1274,6 +1433,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_returns_real_pdf_fixture_as_structured_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend: Arc<dyn LibraryBackend> = Arc::new(StubLocalReadOnlyBackend);
+        let api = PaperseedApi::with_yams(
+            dir.path().join("corpus"),
+            None,
+            paperseed::yams::YamsConfig::disabled(),
+        );
+        let paper = api
+            .ingest_with_metadata(
+                paperseed_fixture_path("arxiv_1408_5939_planar_subgraphs.pdf"),
+                paperseed::sources::PaperbridgeMetadata {
+                    title: Some("Planar Induced Subgraphs of Sparse Graphs".to_string()),
+                    doi: Some("10.48550/arXiv.1408.5939".to_string()),
+                    authors: vec![
+                        "Glencora Borradaile".to_string(),
+                        "David Eppstein".to_string(),
+                    ],
+                    year: Some(2014),
+                    venue: Some("arXiv".to_string()),
+                    license: Some("cc-by".to_string()),
+                    source_url: Some("https://arxiv.org/abs/1408.5939".to_string()),
+                },
+                Some("cc-by".to_string()),
+            )
+            .unwrap();
+
+        let service = PaperbridgeService::new(backend).with_paperseed(PaperseedMirrorConfig {
+            corpus_root: Some(dir.path().join("corpus").display().to_string()),
+            unpaywall_email: None,
+            auto_download: false,
+            yams_enabled: false,
+        });
+
+        let structure = service
+            .get_paper_structure(&paper.metadata.id, None)
+            .await
+            .unwrap();
+        let json = serde_json::to_value(&structure).unwrap();
+        let sections = json["sections"].as_array().expect("sections array");
+        let combined = sections
+            .iter()
+            .filter_map(|section| section["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(
+            json["metadata"]["title"],
+            "Planar Induced Subgraphs of Sparse Graphs"
+        );
+        assert!(
+            !sections.is_empty(),
+            "expected at least one section in structured JSON"
+        );
+        assert!(combined.contains("Glencora Borradaile"));
+        assert!(combined.contains("induced pseudoforest"));
+    }
+
+    #[tokio::test]
     async fn search_papers_dedupes_external_matches_against_cache() {
         let server = wiremock::MockServer::start().await;
 
@@ -1403,6 +1621,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_papers_ranks_exact_title_match_ahead_of_source_order() {
+        let server = wiremock::MockServer::start().await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/crossref/works"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "message": {
+                    "items": [
+                        {"DOI": "10.1/noisy-1", "title": ["Is Attention All You Need?"]},
+                        {"DOI": "10.1/noisy-2", "title": ["Attention Is All You Need for Routing"]}
+                    ]
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/arxiv"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(
+                r#"<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<feed xmlns=\"http://www.w3.org/2005/Atom\">
+  <entry>
+    <id>http://arxiv.org/abs/1706.03762v7</id>
+    <published>2017-06-12T00:00:00Z</published>
+    <title>Attention Is All You Need</title>
+    <summary>Canonical transformer paper.</summary>
+    <author><name>Ashish Vaswani</name></author>
+    <link href=\"http://arxiv.org/abs/1706.03762v7\" rel=\"alternate\" type=\"text/html\"/>
+    <link title=\"pdf\" href=\"http://arxiv.org/pdf/1706.03762v7\" rel=\"related\" type=\"application/pdf\"/>
+  </entry>
+</feed>"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let base = server.uri();
+        let paper_search = crate::external::PaperSearch::with_clients(
+            crate::external::ArxivClient::new(Some(&format!("{base}/arxiv"))),
+            crate::external::HuggingFaceClient::new(Some(&format!("{base}/hf")), None),
+            crate::external::SemanticScholarClient::new(Some(&format!("{base}/s2")), None),
+            crate::crossref::CrossrefClient::new(Some(&format!("{base}/crossref"))),
+        );
+
+        let service =
+            PaperbridgeService::with_paper_search(Arc::new(StubLocalReadOnlyBackend), paper_search);
+        let result = service
+            .search_papers(SearchOptions {
+                query: "attention is all you need".to_string(),
+                limit_per_source: 5,
+                sources: Some(vec![PaperSource::Crossref, PaperSource::Arxiv]),
+                timeout_ms: 8_000,
+                offset: 0,
+                limit: 0,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.hits[0].source, PaperSource::Arxiv);
+        assert_eq!(result.hits[0].title, "Attention Is All You Need");
+    }
+
+    #[tokio::test]
+    async fn search_papers_ranks_exact_arxiv_id_match_ahead_of_title_noise() {
+        let server = wiremock::MockServer::start().await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/crossref/works"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "message": {
+                    "items": [
+                        {"DOI": "10.1/noisy-1", "title": ["Understanding 1706.03762 in Context"]}
+                    ]
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/arxiv"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(
+                r#"<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<feed xmlns=\"http://www.w3.org/2005/Atom\">
+  <entry>
+    <id>http://arxiv.org/abs/1706.03762v7</id>
+    <published>2017-06-12T00:00:00Z</published>
+    <title>Attention Is All You Need</title>
+    <summary>Canonical transformer paper.</summary>
+    <author><name>Ashish Vaswani</name></author>
+    <link href=\"http://arxiv.org/abs/1706.03762v7\" rel=\"alternate\" type=\"text/html\"/>
+    <link title=\"pdf\" href=\"http://arxiv.org/pdf/1706.03762v7\" rel=\"related\" type=\"application/pdf\"/>
+  </entry>
+</feed>"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let base = server.uri();
+        let paper_search = crate::external::PaperSearch::with_clients(
+            crate::external::ArxivClient::new(Some(&format!("{base}/arxiv"))),
+            crate::external::HuggingFaceClient::new(Some(&format!("{base}/hf")), None),
+            crate::external::SemanticScholarClient::new(Some(&format!("{base}/s2")), None),
+            crate::crossref::CrossrefClient::new(Some(&format!("{base}/crossref"))),
+        );
+
+        let service =
+            PaperbridgeService::with_paper_search(Arc::new(StubLocalReadOnlyBackend), paper_search);
+        let result = service
+            .search_papers(SearchOptions {
+                query: "1706.03762".to_string(),
+                limit_per_source: 5,
+                sources: Some(vec![PaperSource::Crossref, PaperSource::Arxiv]),
+                timeout_ms: 8_000,
+                offset: 0,
+                limit: 0,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.hits[0].source, PaperSource::Arxiv);
+        assert_eq!(result.hits[0].arxiv_id.as_deref(), Some("1706.03762"));
+    }
+
+    #[tokio::test]
     async fn local_backend_rejects_create_collection_before_backend_call() {
         let service = PaperbridgeService::new(Arc::new(StubLocalReadOnlyBackend));
         let err = service
@@ -1462,6 +1803,84 @@ mod tests {
             has_full_text: true,
         });
         hit
+    }
+
+    #[test]
+    fn search_rank_prefers_exact_title_over_noisy_variant_even_with_more_citations() {
+        let query_title = normalize_search_text("attention is all you need");
+        let query_tokens: Vec<String> =
+            query_title.split_whitespace().map(str::to_string).collect();
+        let mut exact = make_hit(PaperSource::Arxiv, "Attention Is All You Need", None);
+        exact.citation_count = Some(10);
+        let mut noisy = make_hit(
+            PaperSource::OpenAlex,
+            "Attention Is All You Need In Speech Separation",
+            None,
+        );
+        noisy.citation_count = Some(10_000);
+
+        assert!(
+            search_rank(&query_title, &query_tokens, None, None, &exact)
+                > search_rank(&query_title, &query_tokens, None, None, &noisy)
+        );
+    }
+
+    #[test]
+    fn search_rank_normalizes_doi_queries() {
+        let query_title = normalize_search_text("https://doi.org/10.1000/XYZ");
+        let query_tokens: Vec<String> =
+            query_title.split_whitespace().map(str::to_string).collect();
+        let query_doi = normalize_doi("https://doi.org/10.1000/XYZ");
+        let mut doi_hit = make_hit(PaperSource::Crossref, "Paper A", Some("doi:10.1000/xyz"));
+        doi_hit.citation_count = Some(1);
+        let title_hit = make_hit(PaperSource::OpenAlex, "10 1000 xyz analysis", None);
+
+        assert!(
+            search_rank(
+                &query_title,
+                &query_tokens,
+                query_doi.as_deref(),
+                None,
+                &doi_hit,
+            ) > search_rank(
+                &query_title,
+                &query_tokens,
+                query_doi.as_deref(),
+                None,
+                &title_hit,
+            )
+        );
+    }
+
+    #[test]
+    fn search_rank_normalizes_arxiv_queries() {
+        let query_title = normalize_search_text("https://arxiv.org/abs/1706.03762v7");
+        let query_tokens: Vec<String> =
+            query_title.split_whitespace().map(str::to_string).collect();
+        let query_arxiv = normalize_arxiv_id("https://arxiv.org/abs/1706.03762v7");
+        let mut arxiv_hit = make_hit(PaperSource::Arxiv, "Attention Is All You Need", None);
+        arxiv_hit.arxiv_id = Some("1706.03762".to_string());
+        let noisy_hit = make_hit(
+            PaperSource::Crossref,
+            "Understanding 1706.03762 in Context",
+            None,
+        );
+
+        assert!(
+            search_rank(
+                &query_title,
+                &query_tokens,
+                None,
+                query_arxiv.as_deref(),
+                &arxiv_hit,
+            ) > search_rank(
+                &query_title,
+                &query_tokens,
+                None,
+                query_arxiv.as_deref(),
+                &noisy_hit,
+            )
+        );
     }
 
     #[test]
@@ -1541,6 +1960,12 @@ mod tests {
 
     fn service() -> PaperbridgeService {
         PaperbridgeService::new(Arc::new(StubLocalReadOnlyBackend))
+    }
+
+    fn paperseed_fixture_path(name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("crates/paperseed/tests/fixtures")
+            .join(name)
     }
 
     #[test]

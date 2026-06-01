@@ -26,8 +26,9 @@ pub fn build(item: &ItemDetail, fulltext: &FulltextContent) -> PaperStructure {
 }
 
 pub(crate) fn build_sections(abstract_note: Option<&str>, content: &str) -> Vec<PaperSection> {
+    let abstract_note = abstract_note.map(str::trim).filter(|s| !s.is_empty());
     let mut sections = Vec::new();
-    if let Some(abstract_note) = abstract_note.map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(abstract_note) = abstract_note {
         sections.push(PaperSection {
             id: "abstract".to_string(),
             heading: "Abstract".to_string(),
@@ -38,7 +39,11 @@ pub(crate) fn build_sections(abstract_note: Option<&str>, content: &str) -> Vec<
         });
     }
 
-    sections.extend(split_fulltext_sections(content));
+    let mut body_sections = split_fulltext_sections(content);
+    if abstract_note.is_some() {
+        body_sections.retain(|section| !matches!(section.kind, Some(PaperSectionKind::Abstract)));
+    }
+    sections.extend(body_sections);
     sections
 }
 
@@ -133,29 +138,65 @@ fn classify_heading(line: &str) -> Option<(String, PaperSectionKind)> {
     let normalized = normalize_heading(trimmed);
     let heading_like = looks_like_section_heading(display_heading);
     let kind = match normalized.as_str() {
-        "abstract" => PaperSectionKind::Abstract,
-        "introduction" => PaperSectionKind::Introduction,
-        "background" | "preliminaries" => PaperSectionKind::Background,
-        "related work" | "prior work" => PaperSectionKind::RelatedWork,
-        "method" | "methods" | "methodology" | "approach" | "proposed approach" => {
+        "abstract" | "resumen" | "resumo" | "résumé" | "摘要" => PaperSectionKind::Abstract,
+        "introduction" | "introducción" | "introduccion" | "introdução" | "introducao"
+        | "einleitung" => PaperSectionKind::Introduction,
+        "background" | "preliminaries" | "antecedentes" | "contexte" => {
+            PaperSectionKind::Background
+        }
+        "related work"
+        | "prior work"
+        | "trabajos relacionados"
+        | "état de l'art"
+        | "estado del arte" => PaperSectionKind::RelatedWork,
+        "method" | "methods" | "methodology" | "approach" | "proposed approach" | "método"
+        | "metodo" | "metodología" | "metodologia" | "méthode" | "méthodologie" => {
             PaperSectionKind::Method
         }
-        "design" | "system design" | "architecture" | "design and implementation" => {
-            PaperSectionKind::Design
+        "design"
+        | "system design"
+        | "architecture"
+        | "design and implementation"
+        | "diseño"
+        | "diseno"
+        | "arquitectura"
+        | "conception" => PaperSectionKind::Design,
+        "implementation" | "implementación" | "implementacion" | "implémentation" => {
+            PaperSectionKind::Implementation
         }
-        "implementation" => PaperSectionKind::Implementation,
         "evaluation"
         | "experimental evaluation"
         | "experiments"
         | "experiment"
-        | "empirical evaluation" => PaperSectionKind::Evaluation,
-        "results" | "findings" => PaperSectionKind::Results,
-        "discussion" | "analysis" => PaperSectionKind::Discussion,
-        "limitations" | "threats to validity" => PaperSectionKind::Limitations,
-        "conclusion" | "conclusions" | "concluding remarks" => PaperSectionKind::Conclusion,
-        "acknowledgements" | "acknowledgments" => PaperSectionKind::Acknowledgements,
-        "references" | "bibliography" => PaperSectionKind::References,
-        "appendix" | "appendices" => PaperSectionKind::Appendix,
+        | "empirical evaluation"
+        | "evaluación"
+        | "evaluacion"
+        | "experimentos"
+        | "évaluation" => PaperSectionKind::Evaluation,
+        "results" | "findings" | "resultados" | "résultats" | "ergebnisse" => {
+            PaperSectionKind::Results
+        }
+        "discussion" | "analysis" | "discusión" | "discusion" | "analyse" => {
+            PaperSectionKind::Discussion
+        }
+        "limitations" | "threats to validity" | "limitaciones" | "limitations et menaces" => {
+            PaperSectionKind::Limitations
+        }
+        "conclusion"
+        | "conclusions"
+        | "concluding remarks"
+        | "conclusión"
+        | "conclusion et perspectives"
+        | "conclusao"
+        | "conclusão" => PaperSectionKind::Conclusion,
+        "acknowledgements" | "acknowledgments" | "agradecimientos" | "remerciements" => {
+            PaperSectionKind::Acknowledgements
+        }
+        "references" | "bibliography" | "referencias" | "bibliografía" | "bibliografia"
+        | "bibliographie" | "参考文献" => PaperSectionKind::References,
+        "appendix" | "appendices" | "apéndice" | "apendice" | "annexe" => {
+            PaperSectionKind::Appendix
+        }
         _ if heading_like && normalized.contains("related work") => PaperSectionKind::RelatedWork,
         _ if heading_like && normalized.contains("implementation") => {
             PaperSectionKind::Implementation
@@ -184,7 +225,7 @@ fn normalize_heading(line: &str) -> String {
         .trim_matches(|c: char| c == ':' || c == '-' || c == '—')
         .trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c.is_whitespace())
         .trim();
-    strip_ordering_prefix(trimmed).to_ascii_lowercase()
+    strip_ordering_prefix(trimmed).to_lowercase()
 }
 
 fn strip_ordering_prefix(line: &str) -> &str {
@@ -425,6 +466,67 @@ We summarize."
         assert_eq!(
             structure.sections[3].kind,
             Some(PaperSectionKind::Evaluation)
+        );
+    }
+
+    #[test]
+    fn fallback_dedupes_metadata_abstract_against_fulltext_abstract() {
+        let mut ft = sample_fulltext();
+        ft.content = "\
+Abstract
+Abstract here
+Introduction
+We frame the problem."
+            .to_string();
+
+        let structure = build(&sample_item(), &ft);
+        let headings: Vec<&str> = structure
+            .sections
+            .iter()
+            .map(|section| section.heading.as_str())
+            .collect();
+        assert_eq!(headings, vec!["Abstract", "Introduction"]);
+        assert_eq!(structure.sections[0].text, "Abstract here");
+    }
+
+    #[test]
+    fn fallback_recognizes_localized_section_headings() {
+        let mut item = sample_item();
+        item.abstract_note = None;
+        let mut ft = sample_fulltext();
+        ft.content = "\
+Resumen
+Breve resumen.
+Introducción
+Contexto.
+Resultados
+Hallazgos.
+Conclusão
+Encerramento.
+参考文献
+[1] Example."
+            .to_string();
+
+        let structure = build(&item, &ft);
+        let headings: Vec<&str> = structure
+            .sections
+            .iter()
+            .map(|section| section.heading.as_str())
+            .collect();
+        assert_eq!(
+            headings,
+            vec![
+                "Abstract",
+                "Introduction",
+                "Results",
+                "Conclusion",
+                "References"
+            ]
+        );
+        assert_eq!(structure.sections[0].kind, Some(PaperSectionKind::Abstract));
+        assert_eq!(
+            structure.sections[4].kind,
+            Some(PaperSectionKind::References)
         );
     }
 }

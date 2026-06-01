@@ -255,4 +255,26 @@ mod tests {
                 .unwrap_or(false)
         );
     }
+
+    #[tokio::test]
+    async fn search_handles_malformed_json() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/notes/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{not valid json"))
+            .mount(&server)
+            .await;
+
+        let client = OpenReviewClient::new(Some(&server.uri()));
+        let err = client.search("transformers", 5).await.unwrap_err();
+        match err {
+            ZoteroMcpError::Http(message) => {
+                assert!(message.to_lowercase().contains("response body"));
+            }
+            other => panic!("expected Http decode error, got {other:?}"),
+        }
+    }
 }

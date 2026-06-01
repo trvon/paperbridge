@@ -123,14 +123,18 @@ fn convert_info(info: RawDblpInfo) -> PaperHit {
         .authors
         .and_then(|a| a.author)
         .map(|field| match field {
-            RawDblpAuthorField::One(a) => a.text.into_iter().collect(),
-            RawDblpAuthorField::Many(v) => v.into_iter().filter_map(|a| a.text).collect(),
+            RawDblpAuthorField::One(a) => a.text.into_iter().map(decode_html_entities).collect(),
+            RawDblpAuthorField::Many(v) => v
+                .into_iter()
+                .filter_map(|a| a.text)
+                .map(decode_html_entities)
+                .collect(),
         })
         .unwrap_or_default();
 
     PaperHit {
         source: PaperSource::Dblp,
-        title: info.title.unwrap_or_default(),
+        title: info.title.map(decode_html_entities).unwrap_or_default(),
         authors,
         year: info.year,
         doi: info.doi,
@@ -140,11 +144,17 @@ fn convert_info(info: RawDblpInfo) -> PaperHit {
         url: info.url,
         pdf_url: None,
         oa_pdf_url: None,
-        venue: info.venue,
+        venue: info.venue.map(decode_html_entities),
         citation_count: None,
         cache: None,
         relevance_score: None,
     }
+}
+
+fn decode_html_entities(input: String) -> String {
+    quick_xml::escape::unescape(&input)
+        .map(|decoded| decoded.into_owned())
+        .unwrap_or(input)
 }
 
 #[cfg(test)]
@@ -194,6 +204,23 @@ mod tests {
         let hit = convert_info(info);
         assert_eq!(hit.title, "Minimal");
         assert!(hit.authors.is_empty());
+    }
+
+    #[test]
+    fn convert_info_decodes_html_entities() {
+        let json = serde_json::json!({
+            "title": "Attention Is All You Need But You Don&apos;t Need All Of It",
+            "venue": "Research &amp; Practice",
+            "authors": {"author": {"text": "Tom &amp; Jerry"}}
+        });
+        let info: RawDblpInfo = serde_json::from_value(json).unwrap();
+        let hit = convert_info(info);
+        assert_eq!(
+            hit.title,
+            "Attention Is All You Need But You Don't Need All Of It"
+        );
+        assert_eq!(hit.venue.as_deref(), Some("Research & Practice"));
+        assert_eq!(hit.authors, vec!["Tom & Jerry"]);
     }
 
     #[test]

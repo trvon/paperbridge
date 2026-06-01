@@ -442,10 +442,7 @@ fn dedupe(hits: Vec<PaperHit>) -> Vec<PaperHit> {
 }
 
 pub(crate) fn doi_key(hit: &PaperHit) -> Option<String> {
-    hit.doi
-        .as_deref()
-        .map(|d| d.trim().to_ascii_lowercase())
-        .filter(|k| !k.is_empty())
+    hit.doi.as_deref().and_then(normalize_doi_key)
 }
 
 pub(crate) fn arxiv_key(hit: &PaperHit) -> Option<String> {
@@ -478,21 +475,11 @@ fn strip_arxiv_version(id: &str) -> String {
 }
 
 fn title_authors_key(hit: &PaperHit) -> String {
-    let title_norm: String = hit
-        .title
-        .trim()
-        .to_ascii_lowercase()
-        .chars()
-        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    let first_author_norm: String = hit
+    let title_norm = normalize_text_key(&hit.title);
+    let first_author_norm = hit
         .authors
         .first()
-        .map(|a| a.trim().to_ascii_lowercase())
+        .map(|a| normalize_text_key(a))
         .unwrap_or_default();
 
     if title_norm.is_empty() {
@@ -500,6 +487,38 @@ fn title_authors_key(hit: &PaperHit) -> String {
     } else {
         format!("{title_norm}||{first_author_norm}")
     }
+}
+
+fn normalize_doi_key(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lowered = trimmed.to_lowercase();
+    let normalized = lowered
+        .strip_prefix("https://doi.org/")
+        .or_else(|| lowered.strip_prefix("http://doi.org/"))
+        .or_else(|| lowered.strip_prefix("doi:"))
+        .unwrap_or(lowered.as_str())
+        .trim();
+
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized.to_string())
+    }
+}
+
+fn normalize_text_key(raw: &str) -> String {
+    raw.trim()
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -682,6 +701,29 @@ mod tests {
     }
 
     #[test]
+    fn dedupe_by_doi_normalizes_prefix_and_case() {
+        let hits = vec![
+            mk(
+                PaperSource::SemanticScholar,
+                "Paper A",
+                Some("https://doi.org/10.1/ABC"),
+                None,
+                None,
+            ),
+            mk(
+                PaperSource::Crossref,
+                "Paper A",
+                Some("doi:10.1/abc"),
+                None,
+                None,
+            ),
+        ];
+        let out = dedupe(hits);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].source, PaperSource::SemanticScholar);
+    }
+
+    #[test]
     fn dedupe_by_arxiv_id_strips_version() {
         let hits = vec![
             mk(PaperSource::Arxiv, "X", None, Some("1706.03762"), None),
@@ -725,6 +767,28 @@ mod tests {
                 None,
                 None,
                 Some("Vaswani"),
+            ),
+        ];
+        let out = dedupe(hits);
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn dedupe_by_title_author_handles_unicode_case() {
+        let hits = vec![
+            mk(
+                PaperSource::SemanticScholar,
+                "RÉSUMÉ Systems",
+                None,
+                None,
+                Some("JOSÉ"),
+            ),
+            mk(
+                PaperSource::Arxiv,
+                "résumé systems",
+                None,
+                None,
+                Some("josé"),
             ),
         ];
         let out = dedupe(hits);
