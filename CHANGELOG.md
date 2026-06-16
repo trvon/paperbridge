@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.0](https://github.com/trvon/paperbridge/compare/v0.9.0...v0.10.0) (2026-05-26)
+
+
+### Features
+
+* expanding tests and improving ci ([dbc9b4c](https://github.com/trvon/paperbridge/commit/dbc9b4c125b250b9fc5a8380aa432dd9ee162470))
+* expanding tests and improving ci ([ed8fa9d](https://github.com/trvon/paperbridge/commit/ed8fa9d6b4b799414204e97350668dcc7384203d))
+
 ## [0.9.0](https://github.com/trvon/paperbridge/compare/v0.8.1...v0.9.0) (2026-05-14)
 
 
