@@ -213,28 +213,42 @@ pub fn index_paper_with_runner(
         text.push_str(full_text);
     }
 
+    // `--name=...` (one token) instead of `--name <title>` (two tokens) so a
+    // title starting with `-` can't be parsed as a YAMS flag. Same shape used
+    // for every other arg-with-value below for consistency.
     let args = vec![
         "add".to_string(),
         request.paper.file.path.display().to_string(),
-        "--name".to_string(),
-        request.paper.metadata.title.clone(),
-        "--tags".to_string(),
-        "paperseed,paperbridge,paper".to_string(),
-        "--metadata".to_string(),
-        format!("paperseed_id={}", request.paper.metadata.id),
-        "--metadata".to_string(),
+        format!("--name={}", request.paper.metadata.title),
+        "--tags=paperseed,paperbridge,paper".to_string(),
+        format!("--metadata=paperseed_id={}", request.paper.metadata.id),
         format!(
-            "doi={}",
+            "--metadata=doi={}",
             request.paper.metadata.doi.as_deref().unwrap_or_default()
         ),
-        "--metadata".to_string(),
-        format!("paperseed_text_chars={}", text.len()),
+        // Char count, not byte length — YAMS metadata is informational and
+        // `text.len()` over-reports for non-ASCII titles/authors/full text.
+        format!("--metadata=paperseed_text_chars={}", text.chars().count()),
         "--no-session".to_string(),
         "--json".to_string(),
     ];
 
-    let output = runner.run(&args).ok()?;
+    let output = match runner.run(&args) {
+        Ok(out) => out,
+        Err(err) => {
+            eprintln!(
+                "paperseed: yams add failed to spawn for paper {}: {err}",
+                request.paper.metadata.id
+            );
+            return None;
+        }
+    };
     if !output.status_success {
+        eprintln!(
+            "paperseed: yams add returned non-success for paper {}: {}",
+            request.paper.metadata.id,
+            output.stderr.trim()
+        );
         return None;
     }
     parse_add_hash(&output.stdout)

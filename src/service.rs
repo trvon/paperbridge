@@ -927,6 +927,13 @@ fn rank_search_hits(query: &str, hits: &mut [PaperHit]) {
     let query_doi = normalize_doi(query);
     let query_arxiv = normalize_arxiv_id(query);
 
+    // Nothing to rank against: query was empty, punctuation-only, or
+    // non-Latin enough that normalize_search_text dropped everything and
+    // neither DOI nor arXiv shape was detected. Leave merge order intact.
+    if query_title.is_empty() && query_doi.is_none() && query_arxiv.is_none() {
+        return;
+    }
+
     hits.sort_by_cached_key(|hit| {
         Reverse(search_rank(
             &query_title,
@@ -944,7 +951,7 @@ fn search_rank(
     query_doi: Option<&str>,
     query_arxiv: Option<&str>,
     hit: &PaperHit,
-) -> (u8, u8, u8, usize, u16, u32, u8) {
+) -> (u8, u8, u8, usize, u16, u32, u32, u8) {
     let normalized_title = normalize_search_text(&hit.title);
     let title_tokens: Vec<&str> = normalized_title.split_whitespace().collect();
 
@@ -989,6 +996,16 @@ fn search_rank(
         0
     };
 
+    // Cache hits carry a BM25F score from paperseed-index; surface it as an
+    // advisory tiebreaker. Scale + round so the f32 score participates in the
+    // Ord tuple. External hits (no cache score) contribute 0 here, which is
+    // intentional — citation_count and source_bias still decide their order.
+    let relevance_score = hit
+        .relevance_score
+        .filter(|s| s.is_finite() && *s > 0.0)
+        .map(|s| (s * 1000.0).round().clamp(0.0, u32::MAX as f32) as u32)
+        .unwrap_or(0);
+
     (
         doi_match as u8,
         arxiv_match as u8,
@@ -996,6 +1013,7 @@ fn search_rank(
         token_matches,
         tightness,
         hit.citation_count.unwrap_or(0),
+        relevance_score,
         source_rank_bias(hit.source),
     )
 }

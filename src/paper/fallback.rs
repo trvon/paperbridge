@@ -233,6 +233,11 @@ fn normalize_heading(line: &str) -> String {
         .trim_matches(|c: char| c == ':' || c == '-' || c == '—')
         .trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c.is_whitespace())
         .trim();
+    // Unicode-aware `to_lowercase` here (not `to_ascii_lowercase`): heading
+    // text comes from upstream parsed PDFs and can contain accented characters
+    // ("Résumé", "Méthode") that must compare equal to their lowercased forms
+    // during classify_heading. The English-stopword check at line 276 uses
+    // `to_ascii_lowercase` because it matches against ASCII-only literals.
     strip_ordering_prefix(trimmed).to_lowercase()
 }
 

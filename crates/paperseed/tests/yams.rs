@@ -144,11 +144,18 @@ fn yams_index_sends_title_path_and_text() {
     let args = &calls[0];
     assert!(args.contains(&"add".to_string()));
     assert!(args.contains(&paper.file.path.display().to_string()));
-    assert!(args.contains(&"--name".to_string()));
-    assert!(args.contains(&"YAMS Paper".to_string()));
-    assert!(args.contains(&"--tags".to_string()));
-    assert!(args.contains(&"paperseed,paperbridge,paper".to_string()));
-    assert!(args.iter().any(|arg| arg.contains("paperseed_text_chars")));
+    // Flags moved from two-token (`--name`, `<value>`) to single-token
+    // (`--name=<value>`) form so values starting with `-` can't be parsed
+    // as flags. Same applies to --tags / --metadata.
+    assert!(args.iter().any(|arg| arg == "--name=YAMS Paper"));
+    assert!(
+        args.iter()
+            .any(|arg| arg == "--tags=paperseed,paperbridge,paper")
+    );
+    assert!(
+        args.iter()
+            .any(|arg| arg.starts_with("--metadata=paperseed_text_chars="))
+    );
 }
 
 #[test]
