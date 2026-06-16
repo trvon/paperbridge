@@ -124,7 +124,19 @@ impl PaperbridgeService {
     }
 
     pub async fn search_papers(&self, opts: SearchOptions) -> Result<SearchPapersResult> {
-        let query = opts.query.clone();
+        // Preserve the original query for ranking (its exact form still drives
+        // the DOI/arXiv exact-match short-circuit in rank_search_hits). When
+        // the user pasted a DOI or arXiv URL we also rewrite the *dispatched*
+        // query so external clients and the BM25F cache see the canonical
+        // ID rather than a URL — otherwise the upstream APIs tokenize the URL
+        // as free text and miss the actual paper.
+        let original_query = opts.query.clone();
+        let mut opts = opts;
+        if let Some(doi) = normalize_doi(&opts.query) {
+            opts.query = doi;
+        } else if let Some(arxiv) = normalize_arxiv_id(&opts.query) {
+            opts.query = arxiv;
+        }
         let mut hits = self.paper_search.search(opts.clone()).await?;
         if let Some(api) = &self.paperseed {
             let cache_start = hits.len();
@@ -134,7 +146,7 @@ impl PaperbridgeService {
             merge_prefer_cached(&mut hits, cache_start);
         }
         self.annotate_cached_hits(&mut hits);
-        rank_search_hits(&query, &mut hits);
+        rank_search_hits(&original_query, &mut hits);
         // Clamp to u32 via .min() — safe, bounded cast.
         let total_count = hits.len().min(u32::MAX as usize) as u32;
         self.mirror_open_access_hits(&hits);
@@ -152,7 +164,7 @@ impl PaperbridgeService {
         }
 
         Ok(SearchPapersResult {
-            query,
+            query: original_query,
             total_count,
             offset,
             limit,
@@ -1881,6 +1893,73 @@ mod tests {
                 &noisy_hit,
             )
         );
+    }
+
+    #[test]
+    fn normalize_doi_rejects_prefix_only_input() {
+        // `doi:` alone has no body; should not be considered a DOI shape.
+        assert_eq!(normalize_doi("doi:"), None);
+        assert_eq!(normalize_doi("https://doi.org/"), None);
+    }
+
+    #[test]
+    fn normalize_doi_rejects_text_that_lacks_doi_shape() {
+        // Falls back to looks_like_doi check; bare words aren't DOIs.
+        assert_eq!(normalize_doi("not a doi"), None);
+        assert_eq!(normalize_doi("12345"), None);
+    }
+
+    #[test]
+    fn normalize_doi_accepts_canonical_and_url_forms() {
+        assert_eq!(
+            normalize_doi("10.1234/Abc"),
+            Some("10.1234/abc".to_string())
+        );
+        assert_eq!(
+            normalize_doi("https://doi.org/10.1234/Abc"),
+            Some("10.1234/abc".to_string())
+        );
+        assert_eq!(
+            normalize_doi("doi:10.1234/abc"),
+            Some("10.1234/abc".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_arxiv_id_handles_version_suffix() {
+        assert_eq!(
+            normalize_arxiv_id("1706.03762v7"),
+            Some("1706.03762".to_string())
+        );
+        assert_eq!(
+            normalize_arxiv_id("https://arxiv.org/abs/1706.03762"),
+            Some("1706.03762".to_string())
+        );
+        assert_eq!(
+            normalize_arxiv_id("arxiv:1706.03762v1"),
+            Some("1706.03762".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_arxiv_id_rejects_empty_after_prefix_strip() {
+        // The version-stripper had a partial-id case worth pinning down.
+        assert_eq!(normalize_arxiv_id(""), None);
+        assert_eq!(normalize_arxiv_id("   "), None);
+        // `v7` alone has no base — version-stripper's empty-base guard
+        // kicks in and we keep the raw "v7" as the ID. That's deliberate;
+        // pin it so future regex edits don't silently accept empty bases.
+        assert_eq!(normalize_arxiv_id("v7"), Some("v7".to_string()));
+    }
+
+    #[test]
+    fn normalize_search_text_handles_non_latin_input() {
+        // Non-ASCII alphanumerics survive (they're alphabetic per Unicode).
+        // Pin the behavior so a future "ASCII-only filter" pass can't
+        // regress non-English queries silently.
+        let out = normalize_search_text("中文 paper");
+        assert!(out.contains("中文"), "got {out:?}");
+        assert!(out.contains("paper"));
     }
 
     #[test]

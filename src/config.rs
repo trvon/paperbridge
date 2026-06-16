@@ -494,6 +494,7 @@ paperseed_corpus_root = {}",
                         "grobid_image cannot be empty".to_string(),
                     ));
                 }
+                validate_docker_image_ref("grobid_image", v)?;
                 self.grobid_image = v.to_string();
             }
             "update_check_enabled" => {
@@ -764,8 +765,38 @@ paperseed_corpus_root = {}",
             _ => {}
         }
 
+        validate_docker_image_ref("grobid_image", &self.grobid_image)?;
+
         Ok(())
     }
+}
+
+/// Reject configuration values that would let a config-controlled string
+/// escape as a flag or shell metacharacter when handed to `docker run`. The
+/// real `docker run` invocation lives at `src/paper/docker.rs:20`; we gate
+/// here so a bad config fails at load time rather than at container-spawn
+/// time.
+fn validate_docker_image_ref(key: &str, image: &str) -> Result<()> {
+    if image.is_empty() {
+        return Ok(()); // already covered by other checks; nothing to validate
+    }
+    if image.starts_with('-') {
+        return Err(ZoteroMcpError::Config(format!(
+            "{key} '{image}' must not start with '-'; docker would parse it as a flag"
+        )));
+    }
+    if image.chars().any(|c| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '"' | '\'' | '`' | '$' | ';' | '&' | '|' | '<' | '>' | '\\'
+            )
+    }) {
+        return Err(ZoteroMcpError::Config(format!(
+            "{key} '{image}' contains forbidden characters; expected a docker image reference like 'org/name:tag'"
+        )));
+    }
+    Ok(())
 }
 
 fn parse_u64_env(key: &str, raw: &str) -> Result<u64> {

@@ -41,7 +41,15 @@ pub(crate) fn build_sections(abstract_note: Option<&str>, content: &str) -> Vec<
 
     let mut body_sections = split_fulltext_sections(content);
     if abstract_note.is_some() {
-        body_sections.retain(|section| !matches!(section.kind, Some(PaperSectionKind::Abstract)));
+        // Drop any body section that's clearly an abstract — either tagged
+        // as such (split_fulltext_sections always populates kind) or with a
+        // heading that reads "Abstract" verbatim. The heading-name check
+        // exists as defense in depth so future upstream parsers that leave
+        // `kind: None` don't reintroduce the duplicate.
+        body_sections.retain(|section| {
+            !matches!(section.kind, Some(PaperSectionKind::Abstract))
+                && !section.heading.eq_ignore_ascii_case("abstract")
+        });
     }
     sections.extend(body_sections);
     sections
