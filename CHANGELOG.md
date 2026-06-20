@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.11.0](https://github.com/trvon/paperbridge/compare/v0.10.0...v0.11.0) (2026-06-20)
+
+
+### Features
+
+* **search:** normalize DOI/arXiv queries and tighten title ranking ([311f276](https://github.com/trvon/paperbridge/commit/311f276df7b51e67aea0b6cc3360d1f7ab9dc9d9))
+
+
+### Bug Fixes
+
+* audit round 2 — ranker + yams hardening ([e565352](https://github.com/trvon/paperbridge/commit/e56535206adc77797b18ad6332096c9423842dad))
+* query norm, docker arg gate, abstract dedup ([4616ffa](https://github.com/trvon/paperbridge/commit/4616ffa6a4e03f91796ec56ae990e85fb182f8e8))
+
 ## [0.10.0](https://github.com/trvon/paperbridge/compare/v0.9.0...v0.10.0) (2026-05-26)
 
 
