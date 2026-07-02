@@ -6,8 +6,9 @@ use crate::models::{
     BackendInfo, CachedPaperDetail, CachedPaperSummary, CollectionSummary, CollectionUpdateRequest,
     CollectionWriteRequest, CrossrefWork, DeleteCollectionRequest, DeleteItemRequest,
     FulltextContent, ItemDetail, ItemSummary, ItemUpdateRequest, ItemVoxPayload, ItemWriteRequest,
-    ListCollectionsQuery, PaperHit, PaperStructure, SearchItemsQuery, SearchPapersResult,
-    SearchVoxPayload, ValidationIssue, ValidationIssueLevel, ValidationReport, VoxTextPayload,
+    ListCollectionsQuery, PaperHit, PaperSource, PaperStructure, SearchCacheMode, SearchItemsQuery,
+    SearchPapersResult, SearchVoxPayload, ValidationIssue, ValidationIssueLevel, ValidationReport,
+    VoxTextPayload,
 };
 use crate::paper;
 use crate::paper::docker::DEFAULT_PORT as GROBID_DEFAULT_PORT;
@@ -137,15 +138,27 @@ impl PaperbridgeService {
         } else if let Some(arxiv) = normalize_arxiv_id(&opts.query) {
             opts.query = arxiv;
         }
-        let mut hits = self.paper_search.search(opts.clone()).await?;
-        if let Some(api) = &self.paperseed {
+        let cache_mode = effective_cache_mode(opts.cache_mode, opts.sources.as_deref());
+        let mut hits = if cache_mode == SearchCacheMode::Only {
+            Vec::new()
+        } else {
+            self.paper_search.search(opts.clone()).await?
+        };
+        if cache_mode != SearchCacheMode::Off
+            && let Some(api) = &self.paperseed
+        {
             let cache_start = hits.len();
-            let cached_hits =
+            let mut cached_hits =
                 api.search_cached_papers(&opts.query, opts.limit_per_source as usize)?;
+            if cache_mode == SearchCacheMode::Auto {
+                cached_hits.retain(|hit| should_surface_cached_hit(&original_query, hit));
+            }
             hits.extend(cached_hits);
             merge_prefer_cached(&mut hits, cache_start);
         }
-        self.annotate_cached_hits(&mut hits);
+        if cache_mode != SearchCacheMode::Off {
+            self.annotate_cached_hits(&mut hits);
+        }
         rank_search_hits(&original_query, &mut hits);
         // Clamp to u32 via .min() — safe, bounded cast.
         let total_count = hits.len().min(u32::MAX as usize) as u32;
@@ -700,6 +713,7 @@ impl PaperbridgeService {
                 timeout_ms: 8_000,
                 offset: 0,
                 limit: 0,
+                cache_mode: SearchCacheMode::Auto,
             })
             .await?
             .hits;
@@ -863,6 +877,27 @@ impl PaperbridgeService {
     }
 }
 
+fn effective_cache_mode(
+    requested: SearchCacheMode,
+    sources: Option<&[PaperSource]>,
+) -> SearchCacheMode {
+    if requested != SearchCacheMode::Auto {
+        return requested;
+    }
+    let Some(sources) = sources else {
+        return SearchCacheMode::Auto;
+    };
+    let includes_cache = sources.contains(&PaperSource::Paperseed);
+    if !includes_cache {
+        return SearchCacheMode::Off;
+    }
+    if sources.len() == 1 {
+        SearchCacheMode::Only
+    } else {
+        SearchCacheMode::Include
+    }
+}
+
 /// Merge cache hits into the externals list. Cache hits that collide with an
 /// external on DOI / arXiv / PMID / (title + first-author) replace the external
 /// entry in place — preserving the external's list position so cache content
@@ -917,6 +952,201 @@ fn cached_paper_structure(paper: &CachedPaperDetail, fulltext: &FulltextContent)
 
 fn titles_match(a: &str, b: &str) -> bool {
     normalize_search_text(a) == normalize_search_text(b)
+}
+
+fn should_surface_cached_hit(query: &str, hit: &PaperHit) -> bool {
+    if query_id_matches_hit(query, hit) {
+        return true;
+    }
+
+    let terms = meaningful_query_terms(query);
+    if terms.is_empty() {
+        return false;
+    }
+
+    let title = normalize_search_text(&hit.title);
+    let evidence = normalize_search_text(&cache_evidence_text(hit));
+    let phrase = normalize_search_text(query);
+    if terms.len() >= 2 && !phrase.is_empty() && evidence.contains(&phrase) {
+        return true;
+    }
+
+    let title_matches = terms
+        .iter()
+        .filter(|term| contains_normalized_token(&title, term))
+        .count();
+    let evidence_matches = terms
+        .iter()
+        .filter(|term| contains_normalized_token(&evidence, term))
+        .count();
+
+    if terms.len() == 1 {
+        return title_matches == 1 || (evidence_matches == 1 && cache_score(hit) >= 6_000);
+    }
+
+    evidence_matches >= 2 || (title_matches >= 1 && evidence_matches >= 1)
+}
+
+fn query_id_matches_hit(query: &str, hit: &PaperHit) -> bool {
+    if let Some(query_doi) = normalize_doi(query)
+        && hit.doi.as_deref().and_then(normalize_doi).as_deref() == Some(query_doi.as_str())
+    {
+        return true;
+    }
+    if let Some(query_arxiv) = normalize_arxiv_id(query) {
+        let hit_arxiv = hit
+            .arxiv_id
+            .as_deref()
+            .and_then(normalize_arxiv_id)
+            .or_else(|| hit.url.as_deref().and_then(normalize_arxiv_id))
+            .or_else(|| hit.oa_pdf_url.as_deref().and_then(normalize_arxiv_id));
+        if hit_arxiv.as_deref() == Some(query_arxiv.as_str()) {
+            return true;
+        }
+    }
+    false
+}
+
+fn cache_evidence_text(hit: &PaperHit) -> String {
+    let mut parts = Vec::new();
+    parts.push(hit.title.as_str());
+    parts.extend(hit.authors.iter().map(String::as_str));
+    if let Some(year) = hit.year.as_deref() {
+        parts.push(year);
+    }
+    if let Some(doi) = hit.doi.as_deref() {
+        parts.push(doi);
+    }
+    if let Some(abstract_note) = hit.abstract_note.as_deref() {
+        parts.push(abstract_note);
+    }
+    if let Some(venue) = hit.venue.as_deref() {
+        parts.push(venue);
+    }
+    if let Some(url) = hit.url.as_deref() {
+        parts.push(url);
+    }
+    parts.join(" ")
+}
+
+fn meaningful_query_terms(query: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    for term in normalize_search_text(query).split_whitespace() {
+        if term.len() < 3 || is_weak_cache_query_term(term) {
+            continue;
+        }
+        if !terms.iter().any(|existing| existing == term) {
+            terms.push(term.to_string());
+        }
+    }
+    terms
+}
+
+fn is_weak_cache_query_term(term: &str) -> bool {
+    matches!(
+        term,
+        "about"
+            | "above"
+            | "after"
+            | "again"
+            | "against"
+            | "also"
+            | "and"
+            | "any"
+            | "are"
+            | "because"
+            | "been"
+            | "before"
+            | "being"
+            | "between"
+            | "both"
+            | "but"
+            | "can"
+            | "could"
+            | "did"
+            | "does"
+            | "doing"
+            | "for"
+            | "from"
+            | "had"
+            | "has"
+            | "have"
+            | "her"
+            | "here"
+            | "hers"
+            | "him"
+            | "his"
+            | "how"
+            | "into"
+            | "its"
+            | "itself"
+            | "just"
+            | "literature"
+            | "more"
+            | "most"
+            | "new"
+            | "nor"
+            | "not"
+            | "now"
+            | "off"
+            | "only"
+            | "our"
+            | "ours"
+            | "out"
+            | "over"
+            | "own"
+            | "paper"
+            | "papers"
+            | "research"
+            | "same"
+            | "she"
+            | "should"
+            | "show"
+            | "some"
+            | "such"
+            | "than"
+            | "that"
+            | "the"
+            | "their"
+            | "them"
+            | "then"
+            | "there"
+            | "these"
+            | "they"
+            | "this"
+            | "those"
+            | "through"
+            | "topic"
+            | "under"
+            | "until"
+            | "use"
+            | "used"
+            | "using"
+            | "very"
+            | "was"
+            | "were"
+            | "what"
+            | "when"
+            | "where"
+            | "which"
+            | "while"
+            | "who"
+            | "why"
+            | "with"
+            | "would"
+            | "your"
+    )
+}
+
+fn contains_normalized_token(text: &str, token: &str) -> bool {
+    text.split_whitespace().any(|part| part == token)
+}
+
+fn cache_score(hit: &PaperHit) -> u32 {
+    hit.relevance_score
+        .filter(|s| s.is_finite() && *s > 0.0)
+        .map(|s| (s * 1000.0).round().clamp(0.0, u32::MAX as f32) as u32)
+        .unwrap_or(0)
 }
 
 fn rank_search_hits(query: &str, hits: &mut [PaperHit]) {
@@ -1086,7 +1316,6 @@ fn normalize_arxiv_id(raw: &str) -> Option<String> {
 
 fn source_rank_bias(source: crate::models::PaperSource) -> u8 {
     match source {
-        crate::models::PaperSource::Paperseed => 12,
         crate::models::PaperSource::Arxiv => 11,
         crate::models::PaperSource::SemanticScholar => 10,
         crate::models::PaperSource::OpenAlex => 9,
@@ -1098,6 +1327,7 @@ fn source_rank_bias(source: crate::models::PaperSource) -> u8 {
         crate::models::PaperSource::Core => 3,
         crate::models::PaperSource::HuggingFace => 2,
         crate::models::PaperSource::Ads => 1,
+        crate::models::PaperSource::Paperseed => 1,
         crate::models::PaperSource::ScholarApi => 0,
     }
 }
@@ -1609,10 +1839,11 @@ mod tests {
             .search_papers(SearchOptions {
                 query: "matched external paper".to_string(),
                 limit_per_source: 5,
-                sources: Some(vec![PaperSource::Arxiv]),
+                sources: Some(vec![PaperSource::Arxiv, PaperSource::Paperseed]),
                 timeout_ms: 8_000,
                 offset: 0,
                 limit: 0,
+                cache_mode: SearchCacheMode::Auto,
             })
             .await
             .unwrap();
@@ -1648,6 +1879,77 @@ mod tests {
             })
             .expect("local cached hit present");
         assert_eq!(local_cached.title, "Local Only Paper");
+    }
+
+    #[tokio::test]
+    async fn search_papers_source_filter_excludes_cache_unless_requested() {
+        let dir = tempfile::tempdir().unwrap();
+        let api = PaperseedApi::with_yams(
+            dir.path().join("corpus"),
+            None,
+            paperseed::yams::YamsConfig::disabled(),
+        );
+        let source = dir.path().join("graph.txt");
+        std::fs::write(&source, "graph neural networks for program analysis").unwrap();
+        api.ingest_with_metadata(
+            &source,
+            paperseed::sources::PaperbridgeMetadata {
+                title: Some("Graph Neural Networks for Program Analysis".to_string()),
+                doi: Some("10.5555/graph".to_string()),
+                authors: vec!["Ada Lovelace".to_string()],
+                year: Some(2024),
+                venue: Some("Local Venue".to_string()),
+                license: Some("cc-by".to_string()),
+                source_url: Some("https://example.org/graph".to_string()),
+            },
+            Some("cc-by".to_string()),
+        )
+        .unwrap();
+
+        let service = PaperbridgeService::new(Arc::new(StubLocalReadOnlyBackend)).with_paperseed(
+            PaperseedMirrorConfig {
+                corpus_root: Some(dir.path().join("corpus").display().to_string()),
+                unpaywall_email: None,
+                auto_download: false,
+                yams_enabled: false,
+            },
+        );
+
+        let arxiv_only = service
+            .search_papers(SearchOptions {
+                query: "graph neural networks".to_string(),
+                limit_per_source: 5,
+                sources: Some(vec![PaperSource::Arxiv]),
+                timeout_ms: 200,
+                offset: 0,
+                limit: 0,
+                cache_mode: SearchCacheMode::Auto,
+            })
+            .await
+            .unwrap();
+        assert!(
+            arxiv_only
+                .hits
+                .iter()
+                .all(|hit| hit.source != PaperSource::Paperseed),
+            "cache should not surface when --sources excludes paperseed: {:?}",
+            arxiv_only.hits
+        );
+
+        let cache_only = service
+            .search_papers(SearchOptions {
+                query: "graph neural networks".to_string(),
+                limit_per_source: 5,
+                sources: Some(vec![PaperSource::Paperseed]),
+                timeout_ms: 200,
+                offset: 0,
+                limit: 0,
+                cache_mode: SearchCacheMode::Auto,
+            })
+            .await
+            .unwrap();
+        assert_eq!(cache_only.hits.len(), 1);
+        assert_eq!(cache_only.hits[0].source, PaperSource::Paperseed);
     }
 
     #[tokio::test]
@@ -1704,6 +2006,7 @@ mod tests {
                 timeout_ms: 8_000,
                 offset: 0,
                 limit: 0,
+                cache_mode: SearchCacheMode::Auto,
             })
             .await
             .unwrap();
@@ -1765,6 +2068,7 @@ mod tests {
                 timeout_ms: 8_000,
                 offset: 0,
                 limit: 0,
+                cache_mode: SearchCacheMode::Auto,
             })
             .await
             .unwrap();
@@ -2051,6 +2355,51 @@ mod tests {
 
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].title, "Only External");
+    }
+
+    #[test]
+    fn cache_auto_rejects_common_or_generic_queries() {
+        let mut hit = make_cache_hit("A survey of transfer learning", Some("10.1/cache"));
+        hit.abstract_note = Some(
+            "The field of data mining and machine learning has been used in many applications."
+                .to_string(),
+        );
+        hit.relevance_score = Some(4.0);
+
+        assert!(!should_surface_cached_hit("what is this about", &hit));
+        assert!(!should_surface_cached_hit("no literature unrelated", &hit));
+        assert!(!should_surface_cached_hit("new topic", &hit));
+    }
+
+    #[test]
+    fn cache_auto_accepts_strong_metadata_matches() {
+        let mut hit = make_cache_hit(
+            "Graph Neural Networks for Program Analysis",
+            Some("10.1/cache"),
+        );
+        hit.abstract_note = Some("Graph neural models over program structure.".to_string());
+        hit.relevance_score = Some(2.0);
+
+        assert!(should_surface_cached_hit("graph neural networks", &hit));
+    }
+
+    #[test]
+    fn cache_mode_respects_explicit_sources() {
+        assert_eq!(
+            effective_cache_mode(SearchCacheMode::Auto, Some(&[PaperSource::Arxiv])),
+            SearchCacheMode::Off
+        );
+        assert_eq!(
+            effective_cache_mode(SearchCacheMode::Auto, Some(&[PaperSource::Paperseed])),
+            SearchCacheMode::Only
+        );
+        assert_eq!(
+            effective_cache_mode(
+                SearchCacheMode::Auto,
+                Some(&[PaperSource::Arxiv, PaperSource::Paperseed]),
+            ),
+            SearchCacheMode::Include
+        );
     }
 
     // ---- Phase B1: backend info, validator, and prepare_vox_text coverage ----

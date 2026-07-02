@@ -26,7 +26,7 @@ pub use unpaywall::UnpaywallClient;
 
 use crate::crossref::CrossrefClient;
 use crate::error::{Result, ZoteroMcpError};
-use crate::models::{PaperHit, PaperSource};
+use crate::models::{PaperHit, PaperSource, SearchCacheMode};
 use futures::future::BoxFuture;
 use futures::future::FutureExt;
 use reqwest::header::{HeaderMap, RETRY_AFTER};
@@ -45,6 +45,7 @@ pub struct SearchOptions {
     pub timeout_ms: u64,
     pub offset: u32,
     pub limit: u32,
+    pub cache_mode: SearchCacheMode,
 }
 
 impl SearchOptions {
@@ -56,6 +57,7 @@ impl SearchOptions {
             timeout_ms: DEFAULT_TIMEOUT_MS,
             offset: 0,
             limit: 0,
+            cache_mode: SearchCacheMode::Auto,
         }
     }
 
@@ -824,6 +826,7 @@ mod tests {
                 timeout_ms: 200,
                 offset: 0,
                 limit: 0,
+                cache_mode: SearchCacheMode::Auto,
             })
             .await
             .unwrap();
@@ -913,6 +916,7 @@ mod tests {
             timeout_ms: 200,
             offset: 0,
             limit: 0,
+            cache_mode: SearchCacheMode::Auto,
         };
         let hits = paper_search.search(opts).await.unwrap();
 
@@ -984,6 +988,7 @@ mod tests {
             timeout_ms: 4000,
             offset: 0,
             limit: 0,
+            cache_mode: SearchCacheMode::Auto,
         };
         let hits = paper_search.search(opts).await.unwrap();
 

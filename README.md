@@ -48,11 +48,12 @@ paperbridge config set backend_mode local
 
 Search across arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed,
 HuggingFace Papers, Semantic Scholar, CORE, NASA ADS, and ScholarAPI in parallel.
-Local cached results from Paperseed are included and prioritized automatically.
+Local cached results from Paperseed are used conservatively: cached duplicates are annotated/preferred, and cache-only hits surface only for strong matches unless you explicitly include `paperseed`.
 
 ```bash
 paperbridge papers search -q "intrusion detection" --limit 3 --max-results 10
 paperbridge papers search -q "attention is all you need" --sources arxiv,semantic_scholar
+paperbridge papers search -q "attention is all you need" --sources paperseed  # cache only
 paperbridge papers resolve-doi --doi 10.1038/nature12373
 ```
 

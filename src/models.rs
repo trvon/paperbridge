@@ -312,6 +312,31 @@ pub enum PaperSource {
     ScholarApi,
 }
 
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Serialize,
+    Deserialize,
+    Eq,
+    PartialEq,
+    Hash,
+    schemars::JsonSchema,
+    clap::ValueEnum,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchCacheMode {
+    /// Default behavior: use cache annotations and surface cache-only hits only
+    /// when they pass a strong relevance gate.
+    Auto,
+    /// Blend cached papers into the main result list.
+    Include,
+    /// Search only the local Paperseed cache.
+    Only,
+    /// Do not query or annotate the local cache.
+    Off,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
 pub struct PaperMetadata {
     pub title: Option<String>,

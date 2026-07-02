@@ -4,7 +4,12 @@ targets = []
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    # ttf-parser is currently pulled through lopdf/pdf-extract; RUSTSEC marks it
+    # unmaintained and states that no safe upgrade is available. Keep lopdf on
+    # the fixed line for RUSTSEC-2026-0187 and track replacement upstream.
+    "RUSTSEC-2026-0192",
+]
 
 [bans]
 multiple-versions = "warn"

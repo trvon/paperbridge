@@ -8,7 +8,8 @@ use paperbridge::config::Config;
 use paperbridge::external::SearchOptions;
 use paperbridge::models::{
     CollectionUpdateRequest, CollectionWriteRequest, DeleteCollectionRequest, DeleteItemRequest,
-    ItemUpdateRequest, ItemWriteRequest, ListCollectionsQuery, PaperSource, SearchItemsQuery,
+    ItemUpdateRequest, ItemWriteRequest, ListCollectionsQuery, PaperSource, SearchCacheMode,
+    SearchItemsQuery,
 };
 use paperbridge::server::PaperbridgeServer;
 use paperbridge::service::{
@@ -172,17 +173,21 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
                 limit,
                 sources,
                 timeout_ms,
+                cache,
                 offset,
                 max_results,
             } => {
                 handle_papers_search(
                     config,
-                    normalize_papers_query(q, query)?,
-                    limit,
-                    sources,
-                    timeout_ms,
-                    offset,
-                    max_results,
+                    PapersSearchArgs {
+                        q: normalize_papers_query(q, query)?,
+                        limit,
+                        sources,
+                        timeout_ms,
+                        cache,
+                        offset,
+                        max_results,
+                    },
                 )
                 .await?
             }
@@ -306,16 +311,20 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
             limit,
             sources,
             timeout_ms,
+            cache,
         }) => {
             warn!("'search-papers' is deprecated; use 'paperbridge papers search' instead");
             handle_papers_search(
                 config,
-                normalize_papers_query(q, query)?,
-                limit,
-                sources,
-                timeout_ms,
-                None,
-                None,
+                PapersSearchArgs {
+                    q: normalize_papers_query(q, query)?,
+                    limit,
+                    sources,
+                    timeout_ms,
+                    cache,
+                    offset: None,
+                    max_results: None,
+                },
             )
             .await?;
         }
@@ -856,23 +865,26 @@ async fn handle_collection_delete(config: Config, file: String) -> paperbridge::
     print_json(&serde_json::json!({"deleted": true}))
 }
 
-async fn handle_papers_search(
-    config: Config,
+struct PapersSearchArgs {
     q: String,
     limit: Option<u32>,
     sources: Option<Vec<PaperSource>>,
     timeout_ms: Option<u64>,
+    cache: Option<SearchCacheMode>,
     offset: Option<u32>,
     max_results: Option<u32>,
-) -> paperbridge::Result<()> {
+}
+
+async fn handle_papers_search(config: Config, args: PapersSearchArgs) -> paperbridge::Result<()> {
     let service = build_service(config)?;
     let opts = SearchOptions {
-        query: q,
-        limit_per_source: limit.unwrap_or(10),
-        sources,
-        timeout_ms: timeout_ms.unwrap_or(8000),
-        offset: offset.unwrap_or(0),
-        limit: max_results.unwrap_or(0),
+        query: args.q,
+        limit_per_source: args.limit.unwrap_or(10),
+        sources: args.sources,
+        timeout_ms: args.timeout_ms.unwrap_or(8000),
+        offset: args.offset.unwrap_or(0),
+        limit: args.max_results.unwrap_or(0),
+        cache_mode: args.cache.unwrap_or(SearchCacheMode::Auto),
     };
     let result = service.search_papers(opts).await?;
     print_json(&result)

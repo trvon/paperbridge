@@ -2,7 +2,7 @@
 name = "paperbridge"
 version = "0.11.0"
 edition = "2024"
-description = "MCP and CLI bridge for Zotero search and PDF/full-text retrieval"
+description = "MCP and CLI bridge for paper discovery and PDF/full-text retrieval"
 license = "MIT"
 
 [dependencies]

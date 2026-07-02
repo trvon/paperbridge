@@ -1,7 +1,8 @@
 use crate::external::SearchOptions;
 use crate::models::{
     CollectionUpdateRequest, CollectionWriteRequest, DeleteCollectionRequest, DeleteItemRequest,
-    ItemUpdateRequest, ItemWriteRequest, ListCollectionsQuery, PaperSource, SearchItemsQuery,
+    ItemUpdateRequest, ItemWriteRequest, ListCollectionsQuery, PaperSource, SearchCacheMode,
+    SearchItemsQuery,
 };
 use crate::service::{
     DEFAULT_CHUNK_SIZE, DEFAULT_PIPELINE_SEARCH_LIMIT, PaperbridgeService,
@@ -220,6 +221,9 @@ pub struct SearchPapersParams {
 
     #[schemars(description = "Per-source timeout in milliseconds (default 8000)")]
     pub timeout_ms: Option<u64>,
+
+    #[schemars(description = "Local cache behavior: auto, include, only, or off (default auto)")]
+    pub cache: Option<SearchCacheMode>,
 
     #[schemars(description = "Zero-based offset into the merged result list (default 0)")]
     pub offset: Option<u32>,
@@ -599,7 +603,7 @@ impl PaperbridgeServer {
 
     #[tool(
         name = "search_papers",
-        description = "Search external paper sources (arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed, HuggingFace, Semantic Scholar, CORE, NASA ADS, ScholarAPI) and the local Paperseed cache in parallel. Returns paginated results with total_count, offset, limit, and hits. Locally cached papers are prioritized first."
+        description = "Search external paper sources (arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed, HuggingFace, Semantic Scholar, CORE, NASA ADS, ScholarAPI) and optionally the local Paperseed cache. By default cached papers surface only for strong matches or duplicate live hits; use cache=include/only for explicit cache blending."
     )]
     async fn search_papers(
         &self,
@@ -612,6 +616,7 @@ impl PaperbridgeServer {
             timeout_ms: params.timeout_ms.unwrap_or(8000),
             offset: params.offset.unwrap_or(0),
             limit: params.limit.unwrap_or(0),
+            cache_mode: params.cache.unwrap_or(SearchCacheMode::Auto),
         };
         let result = self
             .service

@@ -1,11 +1,11 @@
-use crate::models::PaperSource;
+use crate::models::{PaperSource, SearchCacheMode};
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(
     name = "paperbridge",
     version,
-    about = "Paperbridge MCP + CLI for Zotero"
+    about = "Paperbridge MCP + CLI for paper discovery and reading"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -242,6 +242,8 @@ pub enum Command {
         sources: Option<Vec<PaperSource>>,
         #[arg(long)]
         timeout_ms: Option<u64>,
+        #[arg(long, value_enum)]
+        cache: Option<SearchCacheMode>,
     },
 }
 
@@ -395,6 +397,9 @@ pub enum PapersAction {
         /// Per-source timeout in milliseconds (default 8000)
         #[arg(long)]
         timeout_ms: Option<u64>,
+        /// Local cache behavior (default auto; --sources paperseed implies only)
+        #[arg(long, value_enum)]
+        cache: Option<SearchCacheMode>,
         /// Zero-based pagination offset (default 0)
         #[arg(long)]
         offset: Option<u32>,
@@ -698,15 +703,21 @@ mod tests {
             "attention",
             "--sources",
             "arxiv,crossref",
+            "--cache",
+            "off",
         ])
         .unwrap();
         match cli.command {
             Some(Command::Papers {
-                action: PapersAction::Search { q, sources, .. },
+                action:
+                    PapersAction::Search {
+                        q, sources, cache, ..
+                    },
             }) => {
                 assert_eq!(q.as_deref(), Some("attention"));
                 let s = sources.expect("sources parsed");
                 assert_eq!(s, vec![PaperSource::Arxiv, PaperSource::Crossref]);
+                assert_eq!(cache, Some(SearchCacheMode::Off));
             }
             other => panic!("unexpected: {other:?}"),
         }

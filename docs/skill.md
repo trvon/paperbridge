@@ -51,20 +51,19 @@ Backend modes: `cloud` (api.zotero.org, needs `api_key` + `user_id`),
 # Zotero library
 paperbridge library query -q "diffusion models" --limit 10
 
-# External papers + local cache (cached results prioritized first)
+# External papers with conservative local-cache surfacing
 paperbridge papers search -q "intrusion detection" --limit 3 --max-results 10
 paperbridge papers search -q "attention is all you need" --sources arxiv,semantic_scholar
+paperbridge papers search -q "attention is all you need" --sources paperseed  # cache only
 
 # Paginated (agents should page through large result sets)
 paperbridge papers search -q "transformers" --max-results 5 --offset 10
 ```
 
 Results are deduplicated by DOI → arXiv ID → PMID → normalized
-title+first-author. Cached papers appear with `source: "paperseed"` and a
-`cache.cached` annotation. All cached hits are sorted ahead of external
-results.
+title+first-author. Cached duplicates get a `cache.cached` annotation and may replace the live hit with `source: "paperseed"` so the readable local copy is easy to use. Cache-only hits are gated by stronger relevance by default; use `--sources paperseed` for cache-only search or include `paperseed` in `--sources` to intentionally blend cache hits.
 
-MCP tool: `search_papers { query, limit_per_source?, sources?, offset?, limit? }`.
+MCP tool: `search_papers { query, limit_per_source?, sources?, cache?, offset?, limit? }`.
 Returns `{ query, total_count, offset, limit, hits: [...] }`. Use `offset` and
 `limit` to page through large result sets.
 
@@ -195,7 +194,7 @@ paperbridge config snippet --target opencode
 
 - **Cloud api_base must be HTTPS** (or `http://localhost` for local mode).
 - **Search results are paginated** — use `offset`/`limit` to page through large sets. The `total_count` field tells you how many remain.
-- **Cached papers are prioritized first** in search results (regardless of `--sources` filter). Look for `cache.cached: true` and `source: "paperseed"`.
+- **Cached papers are conservative by default**: default cache-only hits need strong relevance, and `--sources` without `paperseed` excludes cache hits. Use `--sources paperseed` for explicit cache-only search.
 - **PDF text extraction** happens automatically during local corpus import — no separate step needed.
 - **Read output can be large** — always set `--max-chars-per-chunk` when feeding into an LLM.
 - **Write operations need `version` on update/delete** (Zotero optimistic concurrency). Re-fetch if you get HTTP 412.

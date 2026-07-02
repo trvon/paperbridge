@@ -26,13 +26,16 @@ Search across arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed, H
 paperbridge papers search -q "vision transformers" --limit 5
 paperbridge papers search "vision transformers" --limit 5
 paperbridge papers search -q "attention is all you need" --sources arxiv,openalex,semantic_scholar
+paperbridge papers search -q "attention is all you need" --sources paperseed
 paperbridge papers search -q "CRISPR Cas9" --sources europe_pmc,pubmed
 paperbridge papers search -q "graph neural networks" --sources dblp,openreview
 ```
 
 `-q`, `--q`, and the positional query form are equivalent; prefer `-q` for Unix-style shorthand. `--q` remains supported for compatibility.
 
-Source values for `--sources`: `arxiv`, `crossref`, `openalex` (alias `oa`), `europe_pmc` (alias `epmc`), `dblp`, `openreview` (alias `or`), `pubmed` (alias `pm`), `hugging_face` (alias `hf`), `semantic_scholar` (alias `s2`), `core`, `ads` (alias `nasa_ads`), `scholarapi` (aliases `scholar`, `scholar_api`, `scolarapi`).
+Cache behavior: by default cache-only hits surface only for strong matches, while duplicate cached copies are annotated/preferred. `--sources paperseed` searches only the local cache; adding `paperseed` alongside live sources intentionally blends cache hits; `--cache off` disables cache lookup.
+
+Source values for `--sources`: `arxiv`, `paperseed`, `crossref`, `openalex` (alias `oa`), `europe_pmc` (alias `epmc`), `dblp`, `openreview` (alias `or`), `pubmed` (alias `pm`), `hugging_face` (alias `hf`), `semantic_scholar` (alias `s2`), `core`, `ads` (alias `nasa_ads`), `scholarapi` (aliases `scholar`, `scholar_api`, `scolarapi`).
 
 Results are deduplicated by DOI → arXiv ID → PMID → normalized title+first-author.
 
