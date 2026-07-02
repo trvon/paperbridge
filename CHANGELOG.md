@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.1](https://github.com/trvon/paperbridge/compare/v0.11.0...v0.11.1) (2026-07-02)
+
+
+### Bug Fixes
+
+* **search:** gate cache results and update PDF deps ([5122c60](https://github.com/trvon/paperbridge/commit/5122c6007290ad21aa37568342993045085039aa))
+
 ## [0.11.0](https://github.com/trvon/paperbridge/compare/v0.10.0...v0.11.0) (2026-06-20)
 
 
