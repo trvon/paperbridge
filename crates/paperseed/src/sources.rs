@@ -46,10 +46,10 @@ pub fn legal_sources() -> Vec<LegalSource> {
         LegalSource {
             id: "openalex",
             name: "OpenAlex",
-            kind: SourceKind::Metadata,
+            kind: SourceKind::LicenseResolver,
             supports_metadata: true,
-            supports_open_pdf: false,
-            notes: "Metadata and open-access location hints.",
+            supports_open_pdf: true,
+            notes: "Metadata plus best open-access PDF/location resolution.",
         },
         LegalSource {
             id: "crossref",

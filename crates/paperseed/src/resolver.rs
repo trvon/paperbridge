@@ -33,10 +33,13 @@ pub struct ResolverClient {
 
 impl ResolverClient {
     pub fn new(email: Option<String>) -> Self {
-        Self {
-            http: reqwest::Client::new(),
-            email,
-        }
+        // Bound each resolve/search call so a slow upstream can't leak a
+        // lingering background thread during OA auto-mirroring.
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .unwrap_or_default();
+        Self { http, email }
     }
 
     pub async fn search(&self, q: &str, source: Option<&str>) -> Result<Vec<SearchResult>> {
@@ -48,10 +51,36 @@ impl ResolverClient {
     }
 
     pub async fn resolve_doi(&self, doi: &str, source: Option<&str>) -> Result<ResolvedOpenPaper> {
-        match source.unwrap_or("unpaywall") {
-            "unpaywall" => self.resolve_unpaywall(doi).await,
-            _ => self.resolve_unpaywall(doi).await,
+        match source {
+            Some("unpaywall") => self.resolve_unpaywall(doi).await,
+            Some("openalex") => self.resolve_openalex(doi).await,
+            // Default: try Unpaywall, then fall back to OpenAlex's OA location
+            // when Unpaywall has no open PDF (or is unreachable). This is what
+            // lets DOIs from metadata-only sources (Crossref, PubMed, DBLP)
+            // resolve to a mirrorable open PDF.
+            _ => self.resolve_best(doi).await,
         }
+    }
+
+    async fn resolve_best(&self, doi: &str) -> Result<ResolvedOpenPaper> {
+        match self.resolve_unpaywall(doi).await {
+            Ok(paper) if paper.open_pdf_url.is_some() => Ok(paper),
+            Ok(paper) => match self.resolve_openalex(doi).await {
+                Ok(openalex) if openalex.open_pdf_url.is_some() => Ok(openalex),
+                // OpenAlex added nothing usable — keep the Unpaywall metadata.
+                _ => Ok(paper),
+            },
+            Err(_) => self.resolve_openalex(doi).await,
+        }
+    }
+
+    async fn resolve_openalex(&self, doi: &str) -> Result<ResolvedOpenPaper> {
+        let mut url = format!("https://api.openalex.org/works/https://doi.org/{}", doi);
+        if let Some(email) = self.email.as_deref() {
+            url.push_str(&format!("?mailto={}", encode(email)));
+        }
+        let work: OpenAlexWork = self.http.get(url).send().await?.json().await?;
+        Ok(openalex_work_to_resolved(work, doi))
     }
 
     async fn search_openalex(&self, q: &str) -> Result<Vec<SearchResult>> {
@@ -108,20 +137,48 @@ impl ResolverClient {
             encode(&email)
         );
         let body: UnpaywallResponse = self.http.get(url).send().await?.json().await?;
-        let best = body.best_oa_location;
-        Ok(ResolvedOpenPaper {
-            doi: body.doi.unwrap_or_else(|| doi.to_string()),
-            title: body.title,
-            open_pdf_url: best
-                .as_ref()
-                .and_then(|location| location.url_for_pdf.clone()),
-            landing_url: best.as_ref().and_then(|location| location.url.clone()),
-            license: best
-                .and_then(|location| location.license)
-                .map(|license| parse_license(&license))
-                .unwrap_or(License::Unknown),
-            source: "unpaywall".to_string(),
-        })
+        Ok(unpaywall_to_resolved(body, doi))
+    }
+}
+
+fn unpaywall_to_resolved(body: UnpaywallResponse, doi: &str) -> ResolvedOpenPaper {
+    let best = body.best_oa_location;
+    ResolvedOpenPaper {
+        doi: body.doi.unwrap_or_else(|| doi.to_string()),
+        title: body.title,
+        open_pdf_url: best
+            .as_ref()
+            .and_then(|location| location.url_for_pdf.clone()),
+        landing_url: best.as_ref().and_then(|location| location.url.clone()),
+        license: best
+            .and_then(|location| location.license)
+            .map(|license| parse_license(&license))
+            .unwrap_or(License::Unknown),
+        source: "unpaywall".to_string(),
+    }
+}
+
+fn openalex_work_to_resolved(work: OpenAlexWork, doi: &str) -> ResolvedOpenPaper {
+    let best = work.best_oa_location;
+    let oa_url = work.open_access.and_then(|oa| oa.oa_url);
+    let open_pdf_url = best.as_ref().and_then(|location| location.pdf_url.clone());
+    let landing_url = best
+        .as_ref()
+        .and_then(|location| location.landing_page_url.clone())
+        .or(oa_url);
+    ResolvedOpenPaper {
+        doi: work
+            .doi
+            .map(|doi| doi.trim_start_matches("https://doi.org/").to_string())
+            .unwrap_or_else(|| doi.to_string()),
+        title: work.title,
+        open_pdf_url,
+        landing_url,
+        license: best
+            .and_then(|location| location.license)
+            .map(|license| parse_license(&license))
+            .unwrap_or(License::Unknown),
+        source: "openalex".to_string(),
     }
 }
 
@@ -162,6 +219,71 @@ fn tag(input: &str, name: &str) -> Option<String> {
     Some(after_start.split_once(&end)?.0.trim().to_string())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openalex_work_maps_pdf_and_strips_doi_prefix() {
+        let work: OpenAlexWork = serde_json::from_str(
+            r#"{
+                "title": "A Paper",
+                "doi": "https://doi.org/10.1/abc",
+                "publication_year": 2020,
+                "open_access": {"oa_url": "https://oa.example/landing"},
+                "best_oa_location": {
+                    "landing_page_url": "https://pub.example/land",
+                    "pdf_url": "https://pub.example/paper.pdf",
+                    "license": "cc-by"
+                }
+            }"#,
+        )
+        .unwrap();
+        let resolved = openalex_work_to_resolved(work, "10.1/abc");
+        assert_eq!(resolved.source, "openalex");
+        assert_eq!(resolved.doi, "10.1/abc");
+        assert_eq!(
+            resolved.open_pdf_url.as_deref(),
+            Some("https://pub.example/paper.pdf")
+        );
+        assert_eq!(resolved.license, License::CcBy);
+    }
+
+    #[test]
+    fn openalex_work_without_oa_location_has_no_pdf() {
+        let work: OpenAlexWork = serde_json::from_str(
+            r#"{"title": "Closed", "doi": "10.1/x", "best_oa_location": null}"#,
+        )
+        .unwrap();
+        let resolved = openalex_work_to_resolved(work, "10.1/x");
+        assert!(resolved.open_pdf_url.is_none());
+        assert_eq!(resolved.license, License::Unknown);
+    }
+
+    #[test]
+    fn unpaywall_maps_best_oa_location() {
+        let body: UnpaywallResponse = serde_json::from_str(
+            r#"{
+                "doi": "10.1/abc",
+                "title": "A Paper",
+                "best_oa_location": {
+                    "url": "https://land.example",
+                    "url_for_pdf": "https://land.example/p.pdf",
+                    "license": "cc0"
+                }
+            }"#,
+        )
+        .unwrap();
+        let resolved = unpaywall_to_resolved(body, "10.1/abc");
+        assert_eq!(resolved.source, "unpaywall");
+        assert_eq!(
+            resolved.open_pdf_url.as_deref(),
+            Some("https://land.example/p.pdf")
+        );
+        assert_eq!(resolved.license, License::Cc0);
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct OpenAlexResponse {
     results: Vec<OpenAlexWork>,
@@ -196,6 +318,7 @@ struct OpenAlexAccess {
 #[derive(Debug, Deserialize)]
 struct OpenAlexLocation {
     landing_page_url: Option<String>,
+    pdf_url: Option<String>,
     license: Option<String>,
 }
 

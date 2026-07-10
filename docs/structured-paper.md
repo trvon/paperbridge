@@ -66,6 +66,16 @@ Selectors are dotted paths with `[i]` bracket indexing. Arrays are indexed
 numerically; maps are indexed by key. Out-of-range indices or missing keys
 return `null` rather than erroring.
 
+## Generating a skill scaffold
+
+`prepare_paper_for_skill { item_key, attachment_key? }` (CLI: `paperbridge
+papers skill --key <k>`) reuses this same `PaperStructure` to emit a
+deterministic SKILL.md scaffold — `{ name, description, markdown }`. Section
+`kind`s drive the mapping (abstract → "When to use", method/design/
+implementation → "Method", evaluation/results → "Evaluation"), so a
+`grobid`-sourced structure yields a richer scaffold than a `zotero_fulltext`
+one. It is a starting point for an agent to refine, not a finished skill.
+
 ## Configuring GROBID
 
 GROBID is **opt-in**. Out of the box, `paperbridge` returns

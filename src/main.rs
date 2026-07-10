@@ -9,11 +9,11 @@ use paperbridge::external::SearchOptions;
 use paperbridge::models::{
     CollectionUpdateRequest, CollectionWriteRequest, DeleteCollectionRequest, DeleteItemRequest,
     ItemUpdateRequest, ItemWriteRequest, ListCollectionsQuery, PaperSource, SearchCacheMode,
-    SearchItemsQuery,
+    SearchDetail, SearchItemsQuery,
 };
 use paperbridge::server::PaperbridgeServer;
 use paperbridge::service::{
-    PaperbridgeService, PaperseedMirrorConfig, PrepareItemForVoxRequest,
+    OpenPaperRequest, PaperbridgeService, PaperseedMirrorConfig, PrepareItemForVoxRequest,
     PrepareSearchResultForVoxRequest,
 };
 use paperbridge::zotero_api::build_backend;
@@ -116,13 +116,13 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
                 item_type,
                 tag,
                 limit,
-                start,
-            } => handle_library_query(config, q, qmode, item_type, tag, limit, start).await?,
+                offset,
+            } => handle_library_query(config, q, qmode, item_type, tag, limit, offset).await?,
             LibraryAction::Collections {
                 top_only,
                 limit,
-                start,
-            } => handle_library_collections(config, top_only, limit, start).await?,
+                offset,
+            } => handle_library_collections(config, top_only, limit, offset).await?,
             LibraryAction::Read {
                 item_key,
                 attachment_key,
@@ -169,25 +169,54 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
         Some(Command::Papers { action }) => match action {
             PapersAction::Search {
                 q,
-                query,
-                limit,
+                positional_query,
+                per_source,
                 sources,
                 timeout_ms,
                 cache,
                 offset,
-                max_results,
+                limit,
+                detail,
+                abstract_max_chars,
             } => {
                 handle_papers_search(
                     config,
                     PapersSearchArgs {
-                        q: normalize_papers_query(q, query)?,
-                        limit,
+                        q: normalize_papers_query(q, positional_query)?,
+                        per_source,
                         sources,
                         timeout_ms,
                         cache,
                         offset,
-                        max_results,
+                        limit,
+                        detail,
+                        abstract_max_chars,
                     },
+                )
+                .await?
+            }
+            PapersAction::Open {
+                hit_id,
+                doi,
+                arxiv_id,
+                item_key,
+                paper_id,
+                attachment_key,
+                want,
+                max_chars,
+                selector,
+            } => {
+                handle_papers_open(
+                    config,
+                    hit_id,
+                    doi,
+                    arxiv_id,
+                    item_key,
+                    paper_id,
+                    attachment_key,
+                    want,
+                    max_chars,
+                    selector,
                 )
                 .await?
             }
@@ -200,6 +229,9 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
                 selector,
                 attachment,
             } => handle_paper_query(config, key, selector, attachment).await?,
+            PapersAction::Skill { key, attachment } => {
+                handle_paper_skill(config, key, attachment).await?
+            }
         },
 
         Some(Command::Paper { action }) => {
@@ -318,12 +350,14 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
                 config,
                 PapersSearchArgs {
                     q: normalize_papers_query(q, query)?,
-                    limit,
+                    per_source: limit,
                     sources,
                     timeout_ms,
                     cache,
                     offset: None,
-                    max_results: None,
+                    limit: None,
+                    detail: None,
+                    abstract_max_chars: None,
                 },
             )
             .await?;
@@ -728,12 +762,12 @@ async fn handle_library_query(
 ) -> paperbridge::Result<()> {
     let service = build_service(config)?;
     let results = service
-        .search_items(SearchItemsQuery {
+        .search_items_page(SearchItemsQuery {
             q,
             qmode,
             item_type,
             tag,
-            limit: limit.unwrap_or(25),
+            limit: limit.unwrap_or(10),
             start: start.unwrap_or(0),
         })
         .await?;
@@ -748,9 +782,9 @@ async fn handle_library_collections(
 ) -> paperbridge::Result<()> {
     let service = build_service(config)?;
     let results = service
-        .list_collections(ListCollectionsQuery {
+        .list_collections_page(ListCollectionsQuery {
             top_only,
-            limit: limit.unwrap_or(50),
+            limit: limit.unwrap_or(10),
             start: start.unwrap_or(0),
         })
         .await?;
@@ -867,26 +901,63 @@ async fn handle_collection_delete(config: Config, file: String) -> paperbridge::
 
 struct PapersSearchArgs {
     q: String,
-    limit: Option<u32>,
+    per_source: Option<u32>,
     sources: Option<Vec<PaperSource>>,
     timeout_ms: Option<u64>,
     cache: Option<SearchCacheMode>,
     offset: Option<u32>,
-    max_results: Option<u32>,
+    limit: Option<u32>,
+    detail: Option<SearchDetail>,
+    abstract_max_chars: Option<usize>,
 }
 
 async fn handle_papers_search(config: Config, args: PapersSearchArgs) -> paperbridge::Result<()> {
     let service = build_service(config)?;
     let opts = SearchOptions {
         query: args.q,
-        limit_per_source: args.limit.unwrap_or(10),
+        limit_per_source: args.per_source.unwrap_or(10),
         sources: args.sources,
         timeout_ms: args.timeout_ms.unwrap_or(8000),
         offset: args.offset.unwrap_or(0),
-        limit: args.max_results.unwrap_or(0),
+        limit: args
+            .limit
+            .unwrap_or(paperbridge::external::DEFAULT_PAGE_LIMIT),
         cache_mode: args.cache.unwrap_or(SearchCacheMode::Auto),
+        detail: args.detail.unwrap_or(SearchDetail::Compact),
+        abstract_max_chars: args.abstract_max_chars,
     };
     let result = service.search_papers(opts).await?;
+    print_json(&result)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_papers_open(
+    config: Config,
+    hit_id: Option<String>,
+    doi: Option<String>,
+    arxiv_id: Option<String>,
+    item_key: Option<String>,
+    paper_id: Option<String>,
+    attachment_key: Option<String>,
+    want: Option<Vec<String>>,
+    max_chars: Option<usize>,
+    selector: Option<String>,
+) -> paperbridge::Result<()> {
+    let service = build_service(config)?;
+    let result = service
+        .open_paper(OpenPaperRequest {
+            hit_id,
+            doi,
+            arxiv_id,
+            item_key,
+            paper_id,
+            attachment_key,
+            want: want.unwrap_or_else(|| vec!["metadata".into()]),
+            max_chars,
+            selector,
+            max_chars_per_chunk: None,
+        })
+        .await?;
     print_json(&result)
 }
 
@@ -937,6 +1008,20 @@ async fn handle_paper_query(
         .query_paper(&key, &selector, attachment.as_deref())
         .await?;
     print_json(&value)
+}
+
+async fn handle_paper_skill(
+    config: Config,
+    key: String,
+    attachment: Option<String>,
+) -> paperbridge::Result<()> {
+    let service = build_service(config)?;
+    let payload = service
+        .prepare_paper_for_skill(&key, attachment.as_deref())
+        .await?;
+    // Print the SKILL.md scaffold directly so it can be piped into a file.
+    println!("{}", payload.markdown);
+    Ok(())
 }
 
 async fn handle_paperseed(config: Config, action: PaperseedAction) -> paperbridge::Result<()> {

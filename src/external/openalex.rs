@@ -152,6 +152,7 @@ fn convert_work(w: RawOpenAlexWork) -> PaperHit {
     });
 
     PaperHit {
+        hit_id: None,
         source: PaperSource::OpenAlex,
         title: w.title.unwrap_or_default(),
         authors,
@@ -167,6 +168,10 @@ fn convert_work(w: RawOpenAlexWork) -> PaperHit {
         citation_count: w.cited_by_count,
         cache: None,
         relevance_score: None,
+        ids: None,
+        match_info: None,
+        access: None,
+        next: Vec::new(),
     }
 }
 

@@ -97,6 +97,7 @@ struct RawScholarApiWork {
 fn convert_work(w: RawScholarApiWork) -> PaperHit {
     let pdf_url = w.pdf_url.or_else(|| w.oa_pdf_url.clone());
     PaperHit {
+        hit_id: None,
         source: PaperSource::ScholarApi,
         title: w.title.unwrap_or_default(),
         authors: w.authors.into_iter().filter(|a| !a.is_empty()).collect(),
@@ -115,6 +116,10 @@ fn convert_work(w: RawScholarApiWork) -> PaperHit {
         citation_count: w.citation_count,
         cache: None,
         relevance_score: None,
+        ids: None,
+        match_info: None,
+        access: None,
+        next: Vec::new(),
     }
 }
 

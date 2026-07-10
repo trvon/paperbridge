@@ -29,10 +29,12 @@ pub fn parse_tei(item_key: &str, attachment_key: &str, xml: &str) -> Result<Pape
                 state.handle_end_name(&name);
             }
             Event::Text(e) => {
-                let text = e
-                    .unescape()
-                    .map_err(|err| ZoteroMcpError::Serde(format!("TEI text decode: {err}")))?
-                    .into_owned();
+                let decoded = e
+                    .decode()
+                    .map_err(|err| ZoteroMcpError::Serde(format!("TEI text decode: {err}")))?;
+                let text = quick_xml::escape::unescape(&decoded)
+                    .map(|c| c.into_owned())
+                    .unwrap_or_else(|_| decoded.into_owned());
                 state.handle_text(&text);
             }
             Event::CData(e) => {

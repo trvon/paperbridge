@@ -58,9 +58,10 @@ impl ArxivClient {
 
         self.throttle().await;
 
-        let encoded = urlencoding::encode(trimmed);
+        let search_query = build_arxiv_search_query(trimmed);
+        let encoded = urlencoding::encode(&search_query);
         let url = format!(
-            "{}?search_query=all:{encoded}&max_results={limit}",
+            "{}?search_query={encoded}&max_results={limit}",
             self.base_url
         );
 
@@ -118,7 +119,10 @@ fn parse_atom_feed(xml: &str) -> Result<Vec<PaperHit>> {
                     let mut typ = None;
                     for attr in e.attributes().flatten() {
                         let k = String::from_utf8_lossy(attr.key.as_ref()).to_string();
-                        let v = attr.unescape_value().ok().map(|c| c.to_string());
+                        let v = attr
+                            .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                            .ok()
+                            .map(|c| c.into_owned());
                         match k.as_str() {
                             "rel" => rel = v,
                             "href" => href = v,
@@ -132,7 +136,14 @@ fn parse_atom_feed(xml: &str) -> Result<Vec<PaperHit>> {
                 }
             }
             Ok(Event::Text(e)) => {
-                let t = e.unescape().map(|c| c.to_string()).unwrap_or_default();
+                let t = e
+                    .decode()
+                    .map(|cow| {
+                        quick_xml::escape::unescape(&cow)
+                            .map(|u| u.into_owned())
+                            .unwrap_or_else(|_| cow.into_owned())
+                    })
+                    .unwrap_or_default();
                 text_buf.push_str(&t);
             }
             Ok(Event::End(e)) => {
@@ -228,6 +239,66 @@ fn apply_link(entry: &mut EntryBuilder, link: (Option<String>, Option<String>, O
     }
 }
 
+/// Build an arXiv API `search_query` value.
+///
+/// - Bare arXiv ids → `id:…`
+/// - Multi-word / title-like phrases → `ti:"…"` (phrase title search)
+/// - Otherwise → `all:…` (legacy bag-of-words)
+pub(crate) fn build_arxiv_search_query(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if looks_like_arxiv_id(trimmed) {
+        let id = trimmed
+            .trim_start_matches("https://arxiv.org/abs/")
+            .trim_start_matches("http://arxiv.org/abs/")
+            .trim_start_matches("arxiv:")
+            .trim_start_matches("arXiv:");
+        let id = strip_version_suffix(id);
+        return format!("id:{id}");
+    }
+    // Quoted phrase from user
+    if (trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() > 2)
+        || (trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() > 2)
+    {
+        let inner = &trimmed[1..trimmed.len() - 1];
+        return format!("ti:\"{inner}\"");
+    }
+    let words: Vec<&str> = trimmed.split_whitespace().collect();
+    // Title-like multi-word queries: prefer title field phrase search.
+    if words.len() >= 3 {
+        return format!("ti:\"{trimmed}\"");
+    }
+    if words.len() == 2 {
+        return format!("ti:\"{trimmed}\" OR all:{trimmed}");
+    }
+    format!("all:{trimmed}")
+}
+
+fn looks_like_arxiv_id(raw: &str) -> bool {
+    let s = raw
+        .trim()
+        .trim_start_matches("https://arxiv.org/abs/")
+        .trim_start_matches("http://arxiv.org/abs/")
+        .trim_start_matches("arxiv:")
+        .trim_start_matches("arXiv:");
+    let s = strip_version_suffix(s);
+    // new-style: 1706.03762 or old-style: hep-th/9901001
+    let new = s.len() >= 9
+        && s.chars().filter(|c| *c == '.').count() == 1
+        && s.chars().all(|c| c.is_ascii_digit() || c == '.');
+    let old = s.contains('/') && s.chars().any(|c| c.is_ascii_digit());
+    new || old
+}
+
+fn strip_version_suffix(id: &str) -> &str {
+    if let Some(idx) = id.rfind('v') {
+        let (base, ver) = id.split_at(idx);
+        if ver.len() > 1 && ver[1..].chars().all(|c| c.is_ascii_digit()) {
+            return base;
+        }
+    }
+    id
+}
+
 impl EntryBuilder {
     fn build(self) -> Option<PaperHit> {
         let title = self.title?;
@@ -256,6 +327,7 @@ impl EntryBuilder {
 
         let pdf = self.pdf_url;
         Some(PaperHit {
+            hit_id: None,
             source: PaperSource::Arxiv,
             title,
             authors: self.authors,
@@ -271,6 +343,10 @@ impl EntryBuilder {
             citation_count: None,
             cache: None,
             relevance_score: None,
+            ids: None,
+            match_info: None,
+            access: None,
+            next: Vec::new(),
         })
     }
 }

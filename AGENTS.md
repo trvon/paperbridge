@@ -77,6 +77,15 @@ or the README command examples. The skill content is also embedded in the
 `paperbridge serve` MCP server as prompt `paperbridge_skill`, so changes
 to the skill reach both repo contributors and connected hosts.
 
+## LLM / Agent Interface
+
+MCP tool schemas, search/list JSON envelopes, source wire names, compact vs
+full hit shapes, and discover→read execution (`open_paper`, fulltext
+truncation) must be reviewed against
+[docs/design/llm-interface.md](docs/design/llm-interface.md).
+Implementation status and acceptance checks live in
+[docs/design/llm-interface-tasks.md](docs/design/llm-interface-tasks.md).
+
 ## Config Precedence
 
 1. Compiled defaults (`Config::default()`)

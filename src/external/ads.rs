@@ -114,6 +114,7 @@ fn convert_doc(d: RawAdsDoc) -> PaperHit {
         .map(|b| format!("https://ui.adsabs.harvard.edu/abs/{b}"));
 
     PaperHit {
+        hit_id: None,
         source: PaperSource::Ads,
         title,
         authors: d.author,
@@ -129,6 +130,10 @@ fn convert_doc(d: RawAdsDoc) -> PaperHit {
         citation_count: d.citation_count,
         cache: None,
         relevance_score: None,
+        ids: None,
+        match_info: None,
+        access: None,
+        next: Vec::new(),
     }
 }
 

@@ -141,6 +141,7 @@ fn convert_note(n: RawOrNote, pdf_host: &str) -> PaperHit {
     let url = id.as_ref().map(|i| format!("{pdf_host}/forum?id={i}"));
 
     PaperHit {
+        hit_id: None,
         source: PaperSource::OpenReview,
         title,
         authors,
@@ -156,6 +157,10 @@ fn convert_note(n: RawOrNote, pdf_host: &str) -> PaperHit {
         citation_count: None,
         cache: None,
         relevance_score: None,
+        ids: None,
+        match_info: None,
+        access: None,
+        next: Vec::new(),
     }
 }
 

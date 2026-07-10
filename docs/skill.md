@@ -48,32 +48,38 @@ Backend modes: `cloud` (api.zotero.org, needs `api_key` + `user_id`),
 ### Search — library, external, and cached
 
 ```bash
-# Zotero library
-paperbridge library query -q "diffusion models" --limit 10
+# Zotero library (paginated envelope)
+paperbridge library query --query "diffusion models" --limit 10
 
-# External papers with conservative local-cache surfacing
-paperbridge papers search -q "intrusion detection" --limit 3 --max-results 10
-paperbridge papers search -q "attention is all you need" --sources arxiv,semantic_scholar
-paperbridge papers search -q "attention is all you need" --sources paperseed  # cache only
+# External papers (compact by default; --limit is PAGE size)
+paperbridge papers search --query "intrusion detection" --per-source 3 --limit 10
+paperbridge papers search --query "attention is all you need" --sources arxiv,openalex
+paperbridge papers search --query "attention is all you need" --sources paperseed  # cache only
+paperbridge papers search --query "transformers" --limit 5 --offset 10 --detail full
 
-# Paginated (agents should page through large result sets)
-paperbridge papers search -q "transformers" --max-results 5 --offset 10
+# Open a hit after search (await-friendly path)
+paperbridge papers open --hit-id "arxiv:1706.03762" --want metadata,structure
+paperbridge papers open --doi "10.1038/nature12373" --want metadata
 ```
 
 Results are deduplicated by DOI → arXiv ID → PMID → normalized
-title+first-author. Cached duplicates get a `cache.cached` annotation and may replace the live hit with `source: "paperseed"` so the readable local copy is easy to use. Cache-only hits are gated by stronger relevance by default; use `--sources paperseed` for cache-only search or include `paperseed` in `--sources` to intentionally blend cache hits.
+title+first-author. Each hit includes `hit_id`, `ids`, `match`, `access`, and
+`next` suggested tools. Default `detail=compact` omits full abstracts.
+`diagnostics` lists sources that ran, were skipped (missing key), or failed.
 
-MCP tool: `search_papers { query, limit_per_source?, sources?, cache?, offset?, limit? }`.
-Returns `{ query, total_count, offset, limit, hits: [...] }`. Use `offset` and
-`limit` to page through large result sets.
+MCP tools:
+- `search_papers { query|q, limit?, limit_per_source?, sources?, cache?, offset?, detail?, abstract_max_chars? }`
+  → `{ query, total_count, offset, limit, has_more, next_offset, detail, hits, diagnostics }`
+- `open_paper { hit_id?|doi?|arxiv_id?|item_key?|paper_id?|attachment_key?, want?, max_chars? }`
+- `search_items` / `list_collections` → paginated envelopes (`hits`, not bare arrays)
 
-Available source values: `arxiv`, `paperseed` (local cache), `crossref`,
-`openalex` (`oa`), `europe_pmc` (`epmc`), `dblp`, `openreview` (`or`),
-`pubmed` (`pm`), `hugging_face` (`hf`), `semantic_scholar` (`s2`), `core`,
-`ads` (`nasa_ads`), `scholarapi` (`scholar`).
+Canonical source wire names: `arxiv`, `paperseed`, `crossref`, `openalex`,
+`europe_pmc`, `dblp`, `openreview`, `pubmed`, `hugging_face`,
+`semantic_scholar`, `core`, `ads`, `scholarapi` (aliases still accepted).
 
 Always-on (no key): arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed.
-Key-gated (silent skip when unset): HuggingFace, Semantic Scholar, CORE, NASA ADS, ScholarAPI.
+Key-gated (appear in `diagnostics.sources_skipped` when unset): HuggingFace,
+Semantic Scholar, CORE, NASA ADS, ScholarAPI.
 
 ### Resolve a DOI
 
@@ -83,29 +89,26 @@ paperbridge papers resolve-doi --doi "10.1038/nature12373"
 
 When `unpaywall_email` is configured, the response includes `oa_pdf_url`.
 
-### Read full-text — Zotero or cached paper
+### Read content — prefer `open_paper`
 
 ```bash
-# Zotero attachment
-paperbridge library read --item-key ABCD1234
-paperbridge library read --item-key ABCD1234 --attachment-key PDF5678
+# After search: open by hit_id / DOI / arXiv / Zotero key
+paperbridge papers open --hit-id "arxiv:1706.03762" --want fulltext --max-chars 8000
+paperbridge papers open --item-key ABCD1234 --want structure
+paperbridge papers structure --key ABCD1234
 
-# Search then read (picks best attachment)
+# Vox read-aloud only (not plain fulltext)
+paperbridge library read --item-key ABCD1234
 paperbridge library read-search -q "sparse attention" --result-index 0 --search-limit 5
 ```
 
-**Cache fallback:** `get_pdf_text` and `get_item_fulltext` automatically
-search the local Paperseed cache when Zotero is unreachable. Pass a title, DOI,
-or paper ID as the key — the route treats it as a natural-language query
-against cached papers. If a match is found with extracted fulltext, it is
-returned directly.
+**Agent spine:** `search_items` / `search_papers` → `open_paper` →
+`query_paper` / `resolve_doi`. Use Vox `prepare_*` tools only for read-aloud.
 
 MCP tools:
-- `get_pdf_text { attachment_key }` — Zotero attachment or cache query
-- `get_item_fulltext { attachment_key }` — same fallback behavior
-- `prepare_vox_text { text?, attachment_key?, max_chars_per_chunk? }` — chunks for Vox
-- `prepare_item_for_vox { item_key, attachment_key?, max_chars_per_chunk? }` — prefers cached papers
-- `prepare_search_result_for_vox { q, result_index?, ... }` — search → cached-paper check → Zotero fallback
+- `open_paper { hit_id|doi|arxiv_id|item_key|paper_id|attachment_key, want, max_chars? }` — preferred
+- `get_pdf_text` / `get_item_fulltext` — low-level attachment/cache paths
+- `prepare_vox_text` / `prepare_item_for_vox` / `prepare_search_result_for_vox` — Vox chunks only
 
 ### Structured paper content
 
@@ -127,6 +130,25 @@ Selectors use dotted paths with bracket indexing (`sections[2].text`,
 `references[0].title`). The `source` field tells you the provenance:
 `grobid`, `zotero_fulltext`, or `grobid_unavailable`.
 
+### Paper → skill scaffold
+
+Turn a paper's structure into a deterministic SKILL.md scaffold (YAML
+frontmatter + markdown body). The mapping is mechanical — abstract →
+"When to use", method/design/implementation → "Method", evaluation/results →
+"Evaluation", plus limitations and key references. The output is a *scaffold*
+for an agent to refine into a real operating procedure, not a finished skill.
+
+```bash
+paperbridge papers skill --key ABCD1234 > SKILL.md
+paperbridge papers skill --key <cached-paper-id>
+```
+
+MCP tool: `prepare_paper_for_skill { item_key, attachment_key? }` → returns
+`{ name, description, markdown }`. Accepts Zotero keys or cached paper IDs
+(same routing as `get_paper_structure`). Fidelity follows the structure's
+`source`: a `zotero_fulltext` scaffold is heuristic and should be verified
+against the paper. The CLI prints the raw markdown for piping into a file.
+
 ### Local Paperseed corpus
 
 Manage the content-addressed local cache and license-gated seed manifests:
@@ -145,6 +167,14 @@ paperbridge paperseed seed create --paper-id <id>
 Imported PDFs have their text automatically extracted and stored in the
 corpus for full-text search. YAMS provides an experimental
 storage/search backend when `paperseed_yams_enabled = true`.
+
+**OA auto-mirroring & DOI resolution.** With `paperseed_auto_download = true`,
+search hits are mirrored into the corpus. Hits that already carry an open-access
+PDF url are downloaded directly; hits that only expose a DOI (common for
+metadata-only sources like Crossref, PubMed, and DBLP) are resolved to an open
+PDF via Unpaywall, falling back to OpenAlex's best OA location. Set
+`unpaywall_email` for best Unpaywall coverage. Mirrored files are stored with an
+`unknown` license (cached but not seedable).
 
 ### Write Zotero items & collections
 
@@ -193,10 +223,13 @@ paperbridge config snippet --target opencode
 ## Gotchas
 
 - **Cloud api_base must be HTTPS** (or `http://localhost` for local mode).
-- **Search results are paginated** — use `offset`/`limit` to page through large sets. The `total_count` field tells you how many remain.
+- **`--limit` is page size** (default 10). Fan-out uses `--per-source` / MCP `limit_per_source`.
+- **Search is compact by default** — pass `--detail full` / `detail: "full"` for abstracts.
+- **Search results are paginated** — use `offset`/`limit`; check `has_more` / `next_offset`.
+- **Key-gated sources skip loudly** — see `diagnostics.sources_skipped` / `sources_failed`.
 - **Cached papers are conservative by default**: default cache-only hits need strong relevance, and `--sources` without `paperseed` excludes cache hits. Use `--sources paperseed` for explicit cache-only search.
 - **PDF text extraction** happens automatically during local corpus import — no separate step needed.
-- **Read output can be large** — always set `--max-chars-per-chunk` when feeding into an LLM.
+- **Fulltext can be large** — prefer `open_paper` with `max_chars` (default 8000) or structure selectors. Vox tools use `--max-chars-per-chunk`.
 - **Write operations need `version` on update/delete** (Zotero optimistic concurrency). Re-fetch if you get HTTP 412.
 - **`config get api_key` no longer prints the raw key** — it prints `(set, N chars — pass --show-secret to reveal)`.
 - **Legacy flat commands** (`query`, `create-item`, `backend-info`, `search-papers`, …) still work but emit a deprecation warning. Prefer the canonical domain paths.
@@ -213,3 +246,6 @@ paperbridge config validate
 
 CLI surface changes must be reviewed against
 [`docs/design/cli-design.md`](design/cli-design.md).
+MCP/search/return-shape and agent discover→read changes must also follow
+[`docs/design/llm-interface.md`](design/llm-interface.md) and the backlog in
+[`docs/design/llm-interface-tasks.md`](design/llm-interface-tasks.md).

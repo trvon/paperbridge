@@ -12,6 +12,10 @@ log_level = "info"
 # Paperseed integration: Paperbridge owns discovery; Paperseed mirrors OA files
 # into a local corpus and prepares license-gated seed manifests.
 paperseed_enabled = false
+# When true, search hits are mirrored into the corpus. Hits with an OA PDF are
+# downloaded directly; DOI-only hits (Crossref/PubMed/DBLP) are resolved to an
+# open PDF via Unpaywall, falling back to OpenAlex. Set `unpaywall_email` below
+# for the best Unpaywall coverage.
 paperseed_auto_download = true
 # Experimental: use YAMS for secondary indexing/search when the `yams` binary is detected and the YAMS daemon is running;
 # Paperseed always falls back to the local JSON corpus.

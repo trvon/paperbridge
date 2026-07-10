@@ -1,4 +1,4 @@
-use crate::models::{PaperSource, SearchCacheMode};
+use crate::models::{PaperSource, SearchCacheMode, SearchDetail};
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
@@ -254,7 +254,7 @@ pub enum LibraryAction {
     /// Search items in the local Zotero library and print JSON
     Query {
         /// Quick search query
-        #[arg(short = 'q', long)]
+        #[arg(short = 'q', long = "query", visible_alias = "q")]
         q: Option<String>,
         /// Query mode (e.g. titleCreatorYear, everything)
         #[arg(long)]
@@ -265,24 +265,24 @@ pub enum LibraryAction {
         /// Tag filter
         #[arg(long)]
         tag: Option<String>,
-        /// Result limit (1-100, default 25)
+        /// Page size (1-100, default 10)
         #[arg(long)]
         limit: Option<u32>,
-        /// Pagination start index
-        #[arg(long)]
-        start: Option<u32>,
+        /// Pagination offset (alias: --start)
+        #[arg(long, visible_alias = "start")]
+        offset: Option<u32>,
     },
     /// List Zotero collections and print JSON
     Collections {
         /// If true, list only top-level collections
         #[arg(long)]
         top_only: bool,
-        /// Result limit (1-100, default 50)
+        /// Page size (1-100, default 10)
         #[arg(long)]
         limit: Option<u32>,
-        /// Pagination start index
-        #[arg(long)]
-        start: Option<u32>,
+        /// Pagination offset (alias: --start)
+        #[arg(long, visible_alias = "start")]
+        offset: Option<u32>,
     },
     /// Prepare one item for read-aloud and print Vox-ready JSON
     Read {
@@ -383,14 +383,20 @@ pub enum PapersAction {
     /// Search external paper indexes (arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed, HuggingFace Papers, Semantic Scholar, CORE, NASA ADS, ScholarAPI)
     Search {
         /// Free-text search query
-        #[arg(short = 'q', long, value_name = "Q", required_unless_present = "query")]
+        #[arg(
+            short = 'q',
+            long = "query",
+            visible_alias = "q",
+            value_name = "QUERY",
+            required_unless_present = "positional_query"
+        )]
         q: Option<String>,
-        /// Free-text search query (positional shorthand for -q/--q)
+        /// Free-text search query (positional shorthand for --query)
         #[arg(value_name = "QUERY")]
-        query: Option<String>,
-        /// Max hits per source (default 10)
-        #[arg(long)]
-        limit: Option<u32>,
+        positional_query: Option<String>,
+        /// Max hits per source during fan-out (default 10)
+        #[arg(long = "per-source")]
+        per_source: Option<u32>,
         /// Subset of sources (comma-separated); default is all enabled
         #[arg(long, value_enum, value_delimiter = ',')]
         sources: Option<Vec<PaperSource>>,
@@ -403,9 +409,45 @@ pub enum PapersAction {
         /// Zero-based pagination offset (default 0)
         #[arg(long)]
         offset: Option<u32>,
-        /// Maximum results to return; 0 means all (default 0)
+        /// Page size (default 10, max 50). Alias: --max-results
+        #[arg(long, visible_alias = "max-results")]
+        limit: Option<u32>,
+        /// compact (default) or full (include abstracts)
+        #[arg(long, value_enum)]
+        detail: Option<SearchDetail>,
+        /// Truncate abstracts when --detail full
         #[arg(long)]
-        max_results: Option<u32>,
+        abstract_max_chars: Option<usize>,
+    },
+    /// Open a paper by hit_id / DOI / arXiv / Zotero key / cache id
+    Open {
+        /// hit_id from papers search (arxiv:…, doi:…, paperseed:…)
+        #[arg(long)]
+        hit_id: Option<String>,
+        /// DOI
+        #[arg(long)]
+        doi: Option<String>,
+        /// arXiv id
+        #[arg(long)]
+        arxiv_id: Option<String>,
+        /// Zotero item key
+        #[arg(long)]
+        item_key: Option<String>,
+        /// Paperseed paper id
+        #[arg(long)]
+        paper_id: Option<String>,
+        /// Zotero attachment key
+        #[arg(long)]
+        attachment_key: Option<String>,
+        /// Comma-separated: metadata,fulltext,structure,chunks (default metadata)
+        #[arg(long, value_delimiter = ',')]
+        want: Option<Vec<String>>,
+        /// Max fulltext characters (default 8000)
+        #[arg(long)]
+        max_chars: Option<usize>,
+        /// Structure selector when want includes structure
+        #[arg(long)]
+        selector: Option<String>,
     },
     /// Resolve a DOI via Crossref and print structured metadata
     ResolveDoi {
@@ -430,6 +472,15 @@ pub enum PapersAction {
         /// Dotted-path selector (e.g. "metadata.title", "sections[0].heading")
         #[arg(long)]
         selector: String,
+        /// Optional attachment key override
+        #[arg(long)]
+        attachment: Option<String>,
+    },
+    /// Generate a deterministic SKILL.md scaffold from a paper's structure
+    Skill {
+        /// Zotero item key or cached paper id
+        #[arg(long)]
+        key: String,
         /// Optional attachment key override
         #[arg(long)]
         attachment: Option<String>,
@@ -738,12 +789,15 @@ mod tests {
             Some(Command::Papers {
                 action:
                     PapersAction::Search {
-                        q, query, limit, ..
+                        q,
+                        positional_query,
+                        limit,
+                        ..
                     },
             }) => {
                 assert!(q.is_none());
                 assert_eq!(
-                    query.as_deref(),
+                    positional_query.as_deref(),
                     Some("implicit feedback skip recommendation systems")
                 );
                 assert_eq!(limit, Some(5));

@@ -150,6 +150,7 @@ impl PaperseedApi {
             .into_iter()
             .take(limit)
             .map(|(entry, score)| PaperHit {
+                hit_id: None,
                 source: PaperSource::Paperseed,
                 title: entry.paper.metadata.title.clone(),
                 authors: entry.paper.metadata.authors.clone(),
@@ -172,6 +173,10 @@ impl PaperseedApi {
                     has_full_text: entry.full_text.is_some(),
                 }),
                 relevance_score: score,
+                ids: None,
+                match_info: None,
+                access: None,
+                next: Vec::new(),
             })
             .collect())
     }

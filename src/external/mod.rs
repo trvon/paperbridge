@@ -26,7 +26,9 @@ pub use unpaywall::UnpaywallClient;
 
 use crate::crossref::CrossrefClient;
 use crate::error::{Result, ZoteroMcpError};
-use crate::models::{PaperHit, PaperSource, SearchCacheMode};
+use crate::models::{
+    PaperHit, PaperSource, SearchCacheMode, SearchDetail, SearchDiagnostics, SourceDiagnostic,
+};
 use futures::future::BoxFuture;
 use futures::future::FutureExt;
 use reqwest::header::{HeaderMap, RETRY_AFTER};
@@ -36,6 +38,9 @@ use tokio::time::timeout;
 
 const DEFAULT_LIMIT_PER_SOURCE: u32 = 10;
 const DEFAULT_TIMEOUT_MS: u64 = 8000;
+/// Default page size for agent-facing search (never unbounded).
+pub const DEFAULT_PAGE_LIMIT: u32 = 10;
+pub const MAX_PAGE_LIMIT: u32 = 50;
 
 #[derive(Debug, Clone)]
 pub struct SearchOptions {
@@ -44,8 +49,12 @@ pub struct SearchOptions {
     pub sources: Option<Vec<PaperSource>>,
     pub timeout_ms: u64,
     pub offset: u32,
+    /// Page size. 0 is treated as [`DEFAULT_PAGE_LIMIT`] (not "all").
     pub limit: u32,
     pub cache_mode: SearchCacheMode,
+    pub detail: SearchDetail,
+    /// When set, truncate abstracts to this many chars (full detail). None = default 280 in compact.
+    pub abstract_max_chars: Option<usize>,
 }
 
 impl SearchOptions {
@@ -56,9 +65,20 @@ impl SearchOptions {
             sources: None,
             timeout_ms: DEFAULT_TIMEOUT_MS,
             offset: 0,
-            limit: 0,
+            limit: DEFAULT_PAGE_LIMIT,
             cache_mode: SearchCacheMode::Auto,
+            detail: SearchDetail::Compact,
+            abstract_max_chars: None,
         }
+    }
+
+    pub fn page_limit(&self) -> u32 {
+        let lim = if self.limit == 0 {
+            DEFAULT_PAGE_LIMIT
+        } else {
+            self.limit
+        };
+        lim.min(MAX_PAGE_LIMIT)
     }
 
     fn enabled(&self, source: PaperSource) -> bool {
@@ -67,6 +87,26 @@ impl SearchOptions {
             Some(v) => v.contains(&source),
         }
     }
+}
+
+/// Outcome of a multi-source external search.
+#[derive(Debug, Clone, Default)]
+pub struct PaperSearchOutcome {
+    pub hits: Vec<PaperHit>,
+    pub diagnostics: SearchDiagnostics,
+}
+
+#[derive(Debug, Clone)]
+enum SourceRunResult {
+    /// Source was not in the enabled set for this request.
+    Disabled,
+    Ok(Vec<PaperHit>),
+    Skipped {
+        reason: String,
+    },
+    Failed {
+        reason: String,
+    },
 }
 
 #[derive(Clone)]
@@ -150,14 +190,13 @@ impl PaperSearch {
         }
     }
 
-    pub async fn search(&self, opts: SearchOptions) -> Result<Vec<PaperHit>> {
+    pub async fn search(&self, opts: SearchOptions) -> Result<PaperSearchOutcome> {
         let timeout_duration = Duration::from_millis(opts.timeout_ms);
         let limit = opts.limit_per_source;
         let query = opts.query.clone();
 
-        let mut futs: Vec<BoxFuture<'_, Vec<PaperHit>>> = Vec::new();
+        let mut futs: Vec<BoxFuture<'_, (PaperSource, SourceRunResult)>> = Vec::new();
 
-        // Always-on sources
         futs.push(
             run_source(
                 PaperSource::SemanticScholar,
@@ -166,16 +205,13 @@ impl PaperSearch {
                 async {
                     match self.s2.as_ref() {
                         Some(c) => c.search(&query, limit).await,
-                        None => {
-                            tracing::debug!(
-                                source = ?PaperSource::SemanticScholar,
-                                reason = "no semantic_scholar_api_key/SEMANTIC_SCHOLAR_API_KEY configured",
-                                "source skipped"
-                            );
-                            Ok(Vec::new())
-                        }
+                        None => Err(ZoteroMcpError::MissingConfig(
+                            "no semantic_scholar_api_key/SEMANTIC_SCHOLAR_API_KEY configured"
+                                .into(),
+                        )),
                     }
                 },
+                self.s2.is_none(),
             )
             .boxed(),
         );
@@ -185,6 +221,7 @@ impl PaperSearch {
                 opts.enabled(PaperSource::Crossref),
                 timeout_duration,
                 self.crossref.search(&query, limit),
+                false,
             )
             .boxed(),
         );
@@ -196,16 +233,12 @@ impl PaperSearch {
                 async {
                     match self.hf.as_ref() {
                         Some(c) => c.search(&query, limit).await,
-                        None => {
-                            tracing::debug!(
-                                source = ?PaperSource::HuggingFace,
-                                reason = "no hf_token/HF_TOKEN configured",
-                                "source skipped"
-                            );
-                            Ok(Vec::new())
-                        }
+                        None => Err(ZoteroMcpError::MissingConfig(
+                            "no hf_token/HF_TOKEN configured".into(),
+                        )),
                     }
                 },
+                self.hf.is_none(),
             )
             .boxed(),
         );
@@ -215,6 +248,7 @@ impl PaperSearch {
                 opts.enabled(PaperSource::Arxiv),
                 timeout_duration,
                 self.arxiv.search(&query, limit),
+                false,
             )
             .boxed(),
         );
@@ -224,6 +258,7 @@ impl PaperSearch {
                 opts.enabled(PaperSource::OpenAlex),
                 timeout_duration,
                 self.openalex.search(&query, limit),
+                false,
             )
             .boxed(),
         );
@@ -233,6 +268,7 @@ impl PaperSearch {
                 opts.enabled(PaperSource::EuropePmc),
                 timeout_duration,
                 self.europe_pmc.search(&query, limit),
+                false,
             )
             .boxed(),
         );
@@ -242,6 +278,7 @@ impl PaperSearch {
                 opts.enabled(PaperSource::Dblp),
                 timeout_duration,
                 self.dblp.search(&query, limit),
+                false,
             )
             .boxed(),
         );
@@ -251,6 +288,7 @@ impl PaperSearch {
                 opts.enabled(PaperSource::OpenReview),
                 timeout_duration,
                 self.openreview.search(&query, limit),
+                false,
             )
             .boxed(),
         );
@@ -262,16 +300,12 @@ impl PaperSearch {
                 async {
                     match self.core.as_ref() {
                         Some(c) => c.search(&query, limit).await,
-                        None => {
-                            tracing::debug!(
-                                source = ?PaperSource::Core,
-                                reason = "no core_api_key/CORE_API_KEY configured",
-                                "source skipped"
-                            );
-                            Ok(Vec::new())
-                        }
+                        None => Err(ZoteroMcpError::MissingConfig(
+                            "no core_api_key/CORE_API_KEY configured".into(),
+                        )),
                     }
                 },
+                self.core.is_none(),
             )
             .boxed(),
         );
@@ -283,16 +317,12 @@ impl PaperSearch {
                 async {
                     match self.ads.as_ref() {
                         Some(c) => c.search(&query, limit).await,
-                        None => {
-                            tracing::debug!(
-                                source = ?PaperSource::Ads,
-                                reason = "no ads_api_token/ADS_API_TOKEN configured",
-                                "source skipped"
-                            );
-                            Ok(Vec::new())
-                        }
+                        None => Err(ZoteroMcpError::MissingConfig(
+                            "no ads_api_token/ADS_API_TOKEN configured".into(),
+                        )),
                     }
                 },
+                self.ads.is_none(),
             )
             .boxed(),
         );
@@ -302,6 +332,7 @@ impl PaperSearch {
                 opts.enabled(PaperSource::Pubmed),
                 timeout_duration,
                 self.pubmed.search(&query, limit),
+                false,
             )
             .boxed(),
         );
@@ -313,23 +344,45 @@ impl PaperSearch {
                 async {
                     match self.scholarapi.as_ref() {
                         Some(c) => c.search(&query, limit).await,
-                        None => {
-                            tracing::debug!(
-                                source = ?PaperSource::ScholarApi,
-                                reason = "no scholarapi_key/SCHOLARAPI_KEY configured",
-                                "source skipped"
-                            );
-                            Ok(Vec::new())
-                        }
+                        None => Err(ZoteroMcpError::MissingConfig(
+                            "no scholarapi_key/SCHOLARAPI_KEY configured".into(),
+                        )),
                     }
                 },
+                self.scholarapi.is_none(),
             )
             .boxed(),
         );
 
         let results = futures::future::join_all(futs).await;
-        let merged: Vec<PaperHit> = results.into_iter().flatten().collect();
-        Ok(dedupe(merged))
+        let mut diagnostics = SearchDiagnostics::default();
+        let mut merged: Vec<PaperHit> = Vec::new();
+        for (source, outcome) in results {
+            let name = source_wire_name(source);
+            match outcome {
+                SourceRunResult::Disabled => {}
+                SourceRunResult::Ok(hits) => {
+                    diagnostics.sources_ok.push(name);
+                    merged.extend(hits);
+                }
+                SourceRunResult::Skipped { reason } => {
+                    diagnostics.sources_skipped.push(SourceDiagnostic {
+                        source: name,
+                        reason,
+                    });
+                }
+                SourceRunResult::Failed { reason } => {
+                    diagnostics.sources_failed.push(SourceDiagnostic {
+                        source: name,
+                        reason,
+                    });
+                }
+            }
+        }
+        Ok(PaperSearchOutcome {
+            hits: dedupe(merged),
+            diagnostics,
+        })
     }
 }
 
@@ -345,29 +398,69 @@ impl std::fmt::Debug for PaperSearch {
     }
 }
 
-async fn run_source<F>(source: PaperSource, enabled: bool, dur: Duration, fut: F) -> Vec<PaperHit>
+fn source_wire_name(source: PaperSource) -> String {
+    serde_json::to_value(source)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{source:?}").to_ascii_lowercase())
+}
+
+async fn run_source<F>(
+    source: PaperSource,
+    enabled: bool,
+    dur: Duration,
+    fut: F,
+    missing_key: bool,
+) -> (PaperSource, SourceRunResult)
 where
     F: std::future::Future<Output = Result<Vec<PaperHit>>>,
 {
     if !enabled {
-        return Vec::new();
+        return (source, SourceRunResult::Disabled);
+    }
+    if missing_key {
+        return (
+            source,
+            SourceRunResult::Skipped {
+                reason: "missing_api_key".into(),
+            },
+        );
     }
     match timeout(dur, fut).await {
-        Ok(Ok(hits)) => hits,
+        Ok(Ok(hits)) => (source, SourceRunResult::Ok(hits)),
+        Ok(Err(ZoteroMcpError::MissingConfig(reason))) => {
+            tracing::debug!(?source, %reason, "source skipped");
+            (source, SourceRunResult::Skipped { reason })
+        }
         Ok(Err(ZoteroMcpError::Api {
             status: 429,
             message,
         })) => {
             tracing::debug!(?source, status = 429, reason = "rate_limited", %message, "source rate-limited after retry");
-            Vec::new()
+            (
+                source,
+                SourceRunResult::Failed {
+                    reason: format!("rate_limited: {message}"),
+                },
+            )
         }
         Ok(Err(e)) => {
             tracing::debug!(?source, error = %e, "source search failed");
-            Vec::new()
+            (
+                source,
+                SourceRunResult::Failed {
+                    reason: e.to_string(),
+                },
+            )
         }
         Err(_) => {
             tracing::debug!(?source, "source search timed out");
-            Vec::new()
+            (
+                source,
+                SourceRunResult::Failed {
+                    reason: "timeout".into(),
+                },
+            )
         }
     }
 }
@@ -661,6 +754,7 @@ mod tests {
         author: Option<&str>,
     ) -> PaperHit {
         PaperHit {
+            hit_id: None,
             source,
             title: title.to_string(),
             authors: author.map(|a| vec![a.to_string()]).unwrap_or_default(),
@@ -676,6 +770,10 @@ mod tests {
             citation_count: None,
             cache: None,
             relevance_score: None,
+            ids: None,
+            match_info: None,
+            access: None,
+            next: Vec::new(),
         }
     }
 
@@ -827,10 +925,12 @@ mod tests {
                 offset: 0,
                 limit: 0,
                 cache_mode: SearchCacheMode::Auto,
+                detail: crate::models::SearchDetail::Compact,
+                abstract_max_chars: None,
             })
             .await
             .unwrap();
-        assert!(hits.is_empty());
+        assert!(hits.hits.is_empty());
     }
 
     #[test]
@@ -917,8 +1017,10 @@ mod tests {
             offset: 0,
             limit: 0,
             cache_mode: SearchCacheMode::Auto,
+            detail: crate::models::SearchDetail::Compact,
+            abstract_max_chars: None,
         };
-        let hits = paper_search.search(opts).await.unwrap();
+        let hits = paper_search.search(opts).await.unwrap().hits;
 
         // S2 (Shared) + Crossref (Unique). Crossref's duplicate Shared dropped by DOI dedup.
         assert_eq!(hits.len(), 2, "got {:?}", hits);
@@ -989,8 +1091,10 @@ mod tests {
             offset: 0,
             limit: 0,
             cache_mode: SearchCacheMode::Auto,
+            detail: crate::models::SearchDetail::Compact,
+            abstract_max_chars: None,
         };
-        let hits = paper_search.search(opts).await.unwrap();
+        let hits = paper_search.search(opts).await.unwrap().hits;
 
         // S2 was rate-limited; Crossref + HF should still contribute.
         assert_eq!(hits.len(), 2, "got {:?}", hits);

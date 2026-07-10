@@ -76,7 +76,17 @@ impl CrossrefClient {
         }
 
         let encoded = urlencoding::encode(trimmed);
-        let url = format!("{}/works?query={encoded}&rows={limit}", self.base_url);
+        // Prefer bibliographic query for title-like phrases; falls back more
+        // cleanly than bare `query=` for well-known paper titles.
+        let words = trimmed.split_whitespace().count();
+        let url = if words >= 3 {
+            format!(
+                "{}/works?query.bibliographic={encoded}&rows={limit}",
+                self.base_url
+            )
+        } else {
+            format!("{}/works?query={encoded}&rows={limit}", self.base_url)
+        };
 
         let response = send_with_retry(self.client.get(&url)).await?;
         let status = response.status();
@@ -211,6 +221,7 @@ fn convert_message_to_hit(msg: RawCrossrefMessage) -> PaperHit {
     let abstract_note = msg.abstract_text.as_deref().map(strip_xml_tags);
 
     PaperHit {
+        hit_id: None,
         source: PaperSource::Crossref,
         title,
         authors,
@@ -226,6 +237,10 @@ fn convert_message_to_hit(msg: RawCrossrefMessage) -> PaperHit {
         citation_count: None,
         cache: None,
         relevance_score: None,
+        ids: None,
+        match_info: None,
+        access: None,
+        next: Vec::new(),
     }
 }
 

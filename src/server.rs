@@ -1,8 +1,8 @@
-use crate::external::SearchOptions;
+use crate::external::{DEFAULT_PAGE_LIMIT, SearchOptions};
 use crate::models::{
     CollectionUpdateRequest, CollectionWriteRequest, DeleteCollectionRequest, DeleteItemRequest,
     ItemUpdateRequest, ItemWriteRequest, ListCollectionsQuery, PaperSource, SearchCacheMode,
-    SearchItemsQuery,
+    SearchDetail, SearchItemsQuery,
 };
 use crate::service::{
     DEFAULT_CHUNK_SIZE, DEFAULT_PIPELINE_SEARCH_LIMIT, PaperbridgeService,
@@ -28,8 +28,11 @@ const SKILL_PROMPT_NAME: &str = "paperbridge_skill";
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct SearchItemsParams {
-    #[schemars(description = "Quick search query")]
+    #[schemars(description = "Quick search query (alias of query)")]
     pub q: Option<String>,
+
+    #[schemars(description = "Quick search query (canonical; alias: q)")]
+    pub query: Option<String>,
 
     #[schemars(description = "Query mode (e.g. titleCreatorYear, everything)")]
     pub qmode: Option<String>,
@@ -40,10 +43,13 @@ pub struct SearchItemsParams {
     #[schemars(description = "Tag filter")]
     pub tag: Option<String>,
 
-    #[schemars(description = "Result limit (1-100, default 25)")]
+    #[schemars(description = "Page size (1-100, default 10)")]
     pub limit: Option<u32>,
 
-    #[schemars(description = "Pagination start index (default 0)")]
+    #[schemars(description = "Pagination offset (canonical; alias: start)")]
+    pub offset: Option<u32>,
+
+    #[schemars(description = "Pagination offset alias (prefer offset)")]
     pub start: Option<u32>,
 }
 
@@ -52,11 +58,49 @@ pub struct ListCollectionsParams {
     #[schemars(description = "If true, list only top-level collections")]
     pub top_only: Option<bool>,
 
-    #[schemars(description = "Result limit (1-100, default 50)")]
+    #[schemars(description = "Page size (1-100, default 10)")]
     pub limit: Option<u32>,
 
-    #[schemars(description = "Pagination start index (default 0)")]
+    #[schemars(description = "Pagination offset (canonical; alias: start)")]
+    pub offset: Option<u32>,
+
+    #[schemars(description = "Pagination offset alias (prefer offset)")]
     pub start: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct OpenPaperParams {
+    #[schemars(description = "Stable hit_id from search_papers (arxiv:…, doi:…, paperseed:…)")]
+    pub hit_id: Option<String>,
+
+    #[schemars(description = "DOI to open")]
+    pub doi: Option<String>,
+
+    #[schemars(description = "arXiv id to open")]
+    pub arxiv_id: Option<String>,
+
+    #[schemars(description = "Zotero item key")]
+    pub item_key: Option<String>,
+
+    #[schemars(description = "Paperseed / cache paper id")]
+    pub paper_id: Option<String>,
+
+    #[schemars(description = "Zotero attachment key (low-level)")]
+    pub attachment_key: Option<String>,
+
+    #[schemars(
+        description = "What to return: metadata | fulltext | structure | chunks (default metadata)"
+    )]
+    pub want: Option<Vec<String>>,
+
+    #[schemars(description = "Max characters of fulltext (default 8000)")]
+    pub max_chars: Option<usize>,
+
+    #[schemars(description = "Optional PaperStructure selector when want includes structure")]
+    pub selector: Option<String>,
+
+    #[schemars(description = "Chunk size when want includes chunks (default 1200)")]
+    pub max_chars_per_chunk: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -85,6 +129,17 @@ pub struct QueryPaperParams {
         description = "Dotted-path selector against the PaperStructure JSON. Examples: 'metadata.title', 'sections[0].heading', 'references[3].doi'."
     )]
     pub selector: String,
+
+    #[schemars(description = "Optional attachment key override")]
+    pub attachment_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct PreparePaperForSkillParams {
+    #[schemars(
+        description = "Zotero item key or cached Paperseed paper ID for the paper to scaffold"
+    )]
+    pub item_key: String,
 
     #[schemars(description = "Optional attachment key override")]
     pub attachment_key: Option<String>,
@@ -208,14 +263,17 @@ pub struct DeleteItemParams {
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct SearchPapersParams {
-    #[schemars(description = "Free-text search query")]
-    pub query: String,
+    #[schemars(description = "Free-text search query (canonical)")]
+    pub query: Option<String>,
+
+    #[schemars(description = "Free-text search query alias of query")]
+    pub q: Option<String>,
 
     #[schemars(description = "Max hits per source (default 10)")]
     pub limit_per_source: Option<u32>,
 
     #[schemars(
-        description = "Optional scoping to specific sources; defaults to all enabled sources (arxiv, crossref, openalex, europe_pmc, dblp, openreview, pubmed, hugging_face, semantic_scholar, core, ads)"
+        description = "Optional scoping to specific sources; defaults to all enabled sources. Canonical names: arxiv, paperseed, crossref, openalex, europe_pmc, dblp, openreview, pubmed, hugging_face, semantic_scholar, core, ads, scholarapi"
     )]
     pub sources: Option<Vec<PaperSource>>,
 
@@ -228,8 +286,16 @@ pub struct SearchPapersParams {
     #[schemars(description = "Zero-based offset into the merged result list (default 0)")]
     pub offset: Option<u32>,
 
-    #[schemars(description = "Maximum results to return; 0 means all (default 0)")]
+    #[schemars(
+        description = "Page size (default 10, max 50). Not per-source — use limit_per_source for that."
+    )]
     pub limit: Option<u32>,
+
+    #[schemars(description = "compact (default) omits full abstracts; full includes them")]
+    pub detail: Option<SearchDetail>,
+
+    #[schemars(description = "Truncate abstracts in full detail (chars); ignored in compact")]
+    pub abstract_max_chars: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -249,7 +315,8 @@ impl PaperbridgeServer {
     }
 
     fn ok_json<T: Serialize>(value: &T) -> std::result::Result<CallToolResult, McpError> {
-        let json = serde_json::to_string_pretty(value)
+        // Compact JSON for MCP to reduce agent token cost (pretty remains on CLI).
+        let json = serde_json::to_string(value)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
@@ -266,23 +333,25 @@ impl PaperbridgeServer {
 impl PaperbridgeServer {
     #[tool(
         name = "search_items",
-        description = "Search items in the configured Zotero library by query and filters"
+        description = "Search items in the configured Zotero library. Returns a paginated envelope {query,total_count,offset,limit,has_more,next_offset,hits}."
     )]
     async fn search_items(
         &self,
         Parameters(params): Parameters<SearchItemsParams>,
     ) -> std::result::Result<CallToolResult, McpError> {
+        let q = params.query.or(params.q);
+        let start = params.offset.or(params.start).unwrap_or(0);
         let query = SearchItemsQuery {
-            q: params.q,
+            q,
             qmode: params.qmode,
             item_type: params.item_type,
             tag: params.tag,
-            limit: params.limit.unwrap_or(25),
-            start: params.start.unwrap_or(0),
+            limit: params.limit.unwrap_or(10),
+            start,
         };
         let results = self
             .service
-            .search_items(query)
+            .search_items_page(query)
             .await
             .map_err(Self::map_error)?;
         Self::ok_json(&results)
@@ -290,18 +359,19 @@ impl PaperbridgeServer {
 
     #[tool(
         name = "list_collections",
-        description = "List collections in the configured Zotero library"
+        description = "List collections in the configured Zotero library. Returns {total_count,offset,limit,has_more,next_offset,hits}."
     )]
     async fn list_collections(
         &self,
         Parameters(params): Parameters<ListCollectionsParams>,
     ) -> std::result::Result<CallToolResult, McpError> {
+        let start = params.offset.or(params.start).unwrap_or(0);
         let results = self
             .service
-            .list_collections(ListCollectionsQuery {
+            .list_collections_page(ListCollectionsQuery {
                 top_only: params.top_only.unwrap_or(false),
-                limit: params.limit.unwrap_or(50),
-                start: params.start.unwrap_or(0),
+                limit: params.limit.unwrap_or(10),
+                start,
             })
             .await
             .map_err(Self::map_error)?;
@@ -393,6 +463,22 @@ impl PaperbridgeServer {
     }
 
     #[tool(
+        name = "prepare_paper_for_skill",
+        description = "Generate a deterministic SKILL.md scaffold (YAML frontmatter + markdown body) from a paper's parsed structure. Maps abstract → 'When to use', method/design/implementation → 'Method', evaluation/results → 'Evaluation', plus limitations and key references. Accepts a Zotero item key or a cached Paperseed paper ID. The output is a scaffold for an agent to refine into a real operating procedure, not a finished skill."
+    )]
+    async fn prepare_paper_for_skill(
+        &self,
+        Parameters(params): Parameters<PreparePaperForSkillParams>,
+    ) -> std::result::Result<CallToolResult, McpError> {
+        let payload = self
+            .service
+            .prepare_paper_for_skill(&params.item_key, params.attachment_key.as_deref())
+            .await
+            .map_err(Self::map_error)?;
+        Self::ok_json(&payload)
+    }
+
+    #[tool(
         name = "prepare_vox_text",
         description = "Prepare normalized text chunks for Vox read-aloud without calling Vox directly"
     )]
@@ -435,7 +521,7 @@ impl PaperbridgeServer {
 
     #[tool(
         name = "prepare_search_result_for_vox",
-        description = "Search Zotero, pick one result, and return Vox-ready chunks from its best attachment"
+        description = "Search external papers (then cache/Zotero fallback), pick one result by index, and return Vox-ready chunks. Prefer open_paper for plain fulltext/structure."
     )]
     async fn prepare_search_result_for_vox(
         &self,
@@ -603,24 +689,65 @@ impl PaperbridgeServer {
 
     #[tool(
         name = "search_papers",
-        description = "Search external paper sources (arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed, HuggingFace, Semantic Scholar, CORE, NASA ADS, ScholarAPI) and optionally the local Paperseed cache. By default cached papers surface only for strong matches or duplicate live hits; use cache=include/only for explicit cache blending."
+        description = "Search external paper sources and optional Paperseed cache. Returns compact hits by default with hit_id, match, access, next, diagnostics, has_more. Use detail=full for abstracts. Page with limit (default 10) + offset; use limit_per_source for fan-out."
     )]
     async fn search_papers(
         &self,
         Parameters(params): Parameters<SearchPapersParams>,
     ) -> std::result::Result<CallToolResult, McpError> {
+        let query = params
+            .query
+            .or(params.q)
+            .ok_or_else(|| McpError::invalid_params("query (or q) is required".to_string(), None))?
+            .trim()
+            .to_string();
+        if query.is_empty() {
+            return Err(McpError::invalid_params(
+                "query must not be empty".to_string(),
+                None,
+            ));
+        }
         let opts = SearchOptions {
-            query: params.query,
+            query,
             limit_per_source: params.limit_per_source.unwrap_or(10),
             sources: params.sources,
             timeout_ms: params.timeout_ms.unwrap_or(8000),
             offset: params.offset.unwrap_or(0),
-            limit: params.limit.unwrap_or(0),
+            limit: params.limit.unwrap_or(DEFAULT_PAGE_LIMIT),
             cache_mode: params.cache.unwrap_or(SearchCacheMode::Auto),
+            detail: params.detail.unwrap_or(SearchDetail::Compact),
+            abstract_max_chars: params.abstract_max_chars,
         };
         let result = self
             .service
             .search_papers(opts)
+            .await
+            .map_err(Self::map_error)?;
+        Self::ok_json(&result)
+    }
+
+    #[tool(
+        name = "open_paper",
+        description = "Open a paper by hit_id, DOI, arXiv id, Zotero item_key, paperseed paper_id, or attachment_key. want: metadata|fulltext|structure|chunks. Fulltext is truncated (default max_chars=8000). Prefer this after search_papers."
+    )]
+    async fn open_paper(
+        &self,
+        Parameters(params): Parameters<OpenPaperParams>,
+    ) -> std::result::Result<CallToolResult, McpError> {
+        let result = self
+            .service
+            .open_paper(crate::service::OpenPaperRequest {
+                hit_id: params.hit_id,
+                doi: params.doi,
+                arxiv_id: params.arxiv_id,
+                item_key: params.item_key,
+                paper_id: params.paper_id,
+                attachment_key: params.attachment_key,
+                want: params.want.unwrap_or_else(|| vec!["metadata".into()]),
+                max_chars: params.max_chars,
+                selector: params.selector,
+                max_chars_per_chunk: params.max_chars_per_chunk,
+            })
             .await
             .map_err(Self::map_error)?;
         Self::ok_json(&result)
@@ -643,7 +770,7 @@ impl ServerHandler for PaperbridgeServer {
         .with_protocol_version(rmcp::model::ProtocolVersion::V_2024_11_05)
         .with_server_info(rmcp::model::Implementation::from_build_env())
         .with_instructions(
-            "Search Zotero libraries, retrieve full-text content, search external paper sources, and access the local Paperseed cache. Use prepare_vox_text to build read-aloud chunks for Vox. Fetch the prompt 'paperbridge_skill' for the full operating guide.",
+            "Agent spine: search_items (library), search_papers (external/cache), open_paper (metadata/fulltext/structure/chunks by hit_id/DOI/arXiv/item_key), query_paper, resolve_doi, backend_info. Prefer compact search_papers then open_paper. Fetch prompt 'paperbridge_skill' for the full guide. Vox prepare_* tools are optional read-aloud helpers.",
         )
     }
 
@@ -753,7 +880,7 @@ mod tests {
     fn search_papers_params_deserializes() {
         let json = serde_json::json!({"query": "transformers"});
         let params: SearchPapersParams = serde_json::from_value(json).unwrap();
-        assert_eq!(params.query, "transformers");
+        assert_eq!(params.query.as_deref(), Some("transformers"));
         assert!(params.limit_per_source.is_none());
         assert!(params.sources.is_none());
         assert!(params.timeout_ms.is_none());
@@ -776,7 +903,7 @@ mod tests {
     // ---- Phase B2: MCP handler round-trip coverage ----
 
     use crate::config::{BackendModeConfig, Config, LibraryType};
-    use crate::models::{ItemDetail, ItemSummary};
+    use crate::models::ItemDetail;
     use crate::service::PaperbridgeService;
     use crate::zotero_api::build_backend;
     use serde::de::DeserializeOwned;
@@ -897,17 +1024,19 @@ mod tests {
         let result = srv
             .search_items(Parameters(SearchItemsParams {
                 q: Some("graph".to_string()),
+                query: None,
                 qmode: None,
                 item_type: None,
                 tag: None,
                 limit: Some(10),
+                offset: None,
                 start: None,
             }))
             .await
             .unwrap();
-        let items: Vec<ItemSummary> = parse_call_tool_result(&result);
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].key, "ITEMA");
+        let page: crate::models::ItemListResult = parse_call_tool_result(&result);
+        assert_eq!(page.hits.len(), 1);
+        assert_eq!(page.hits[0].key, "ITEMA");
     }
 
     #[tokio::test]
@@ -917,14 +1046,14 @@ mod tests {
             .list_collections(Parameters(ListCollectionsParams {
                 top_only: Some(true),
                 limit: None,
+                offset: None,
                 start: None,
             }))
             .await
             .unwrap();
-        let json: serde_json::Value = parse_call_tool_result(&result);
-        let arr = json.as_array().expect("array");
-        assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["key"], "COLL1");
+        let page: crate::models::CollectionListResult = parse_call_tool_result(&result);
+        assert_eq!(page.hits.len(), 1);
+        assert_eq!(page.hits[0].key, "COLL1");
     }
 
     #[tokio::test]
