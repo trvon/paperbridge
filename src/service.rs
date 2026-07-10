@@ -61,6 +61,7 @@ pub struct OpenPaperRequest {
     pub item_key: Option<String>,
     pub paper_id: Option<String>,
     pub attachment_key: Option<String>,
+    pub url: Option<String>,
     pub want: Vec<String>,
     pub max_chars: Option<usize>,
     pub selector: Option<String>,
@@ -153,6 +154,7 @@ impl PaperbridgeService {
         let detail = opts.detail;
         let abstract_max_chars = opts.abstract_max_chars;
         let mut opts = opts;
+        opts.validate_source_fetch_limit()?;
         if let Some(doi) = normalize_doi(&opts.query) {
             opts.query = doi;
         } else if let Some(arxiv) = normalize_arxiv_id(&opts.query) {
@@ -174,7 +176,7 @@ impl PaperbridgeService {
             && let Some(api) = &self.paperseed
         {
             let cache_start = hits.len();
-            match api.search_cached_papers(&opts.query, opts.limit_per_source as usize) {
+            match api.search_cached_papers(&opts.query, opts.source_fetch_limit() as usize) {
                 Ok(mut cached_hits) => {
                     if cache_mode == SearchCacheMode::Auto {
                         cached_hits.retain(|hit| should_surface_cached_hit(&original_query, hit));
@@ -246,17 +248,6 @@ impl PaperbridgeService {
         }
 
         let mut out = serde_json::Map::new();
-        out.insert(
-            "resolved".into(),
-            serde_json::json!({
-                "hit_id": req.hit_id,
-                "doi": resolved.doi,
-                "arxiv_id": resolved.arxiv_id,
-                "item_key": resolved.item_key,
-                "paper_id": resolved.paper_id,
-                "attachment_key": resolved.attachment_key,
-            }),
-        );
 
         let wants: Vec<String> = if req.want.is_empty() {
             vec!["metadata".into()]
@@ -280,11 +271,14 @@ impl PaperbridgeService {
             } else if let Some(key) = resolved.item_key.as_deref() {
                 let item = self.get_item(key).await?;
                 out.insert("metadata".into(), serde_json::to_value(item)?);
-            } else if let Some(pid) = resolved.paper_id.as_deref()
-                && let Some(api) = &self.paperseed
-                && let Ok(detail) = api.get_cached_paper(pid)
-            {
-                out.insert("metadata".into(), serde_json::to_value(detail)?);
+            } else if let Some(pid) = resolved.paper_id.as_deref() {
+                if let Some(api) = &self.paperseed
+                    && let Ok(detail) = api.get_cached_paper(pid)
+                {
+                    out.insert("metadata".into(), serde_json::to_value(detail)?);
+                } else {
+                    out.insert("metadata".into(), serde_json::json!({"paper_id": pid}));
+                }
             } else if let Some(arxiv) = resolved.arxiv_id.as_deref() {
                 out.insert(
                     "metadata".into(),
@@ -294,11 +288,13 @@ impl PaperbridgeService {
                         "pdf_url": format!("https://arxiv.org/pdf/{arxiv}"),
                     }),
                 );
+            } else if let Some(url) = resolved.url.as_deref() {
+                out.insert("metadata".into(), serde_json::json!({"url": url}));
             }
         }
 
         if wants.iter().any(|w| w == "fulltext" || w == "chunks") {
-            let fulltext = self.resolve_fulltext_for_open(&resolved).await?;
+            let fulltext = self.resolve_fulltext_for_open(&mut resolved).await?;
             let truncated = truncate_fulltext(&fulltext, max_chars);
             if wants.iter().any(|w| w == "fulltext") {
                 out.insert("fulltext".into(), serde_json::to_value(&truncated)?);
@@ -315,40 +311,43 @@ impl PaperbridgeService {
         }
 
         if wants.iter().any(|w| w == "structure") {
-            let key = resolved
-                .item_key
-                .clone()
-                .or(resolved.paper_id.clone())
-                .or(resolved.arxiv_id.clone())
-                .or(resolved.doi.clone())
-                .ok_or_else(|| {
-                    ZoteroMcpError::InvalidInput(
-                        "open_paper structure requires item_key, paper_id, DOI, or arXiv id. Try: search_papers then pass hit_id.".into(),
-                    )
-                })?;
+            let structure = self
+                .resolve_structure_for_open(&mut resolved, max_chars)
+                .await?;
             if let Some(selector) = req.selector.as_deref() {
-                let value = self
-                    .query_paper(&key, selector, resolved.attachment_key.as_deref())
-                    .await?;
+                let value = paper::query(&structure, selector)?;
                 out.insert("structure".into(), value);
             } else {
-                let structure = self
-                    .get_paper_structure(&key, resolved.attachment_key.as_deref())
-                    .await?;
                 out.insert("structure".into(), serde_json::to_value(structure)?);
             }
         }
 
-        if out.len() <= 1 {
+        if out.is_empty() {
             return Err(ZoteroMcpError::InvalidInput(
-                "open_paper could not produce content. Provide hit_id, doi, arxiv_id, item_key, paper_id, or attachment_key. Try: search_papers { query } then open_paper { hit_id }.".into(),
+                "open_paper could not produce content. Provide hit_id, doi, arxiv_id, item_key, paper_id, attachment_key, or url. Try: search_papers { query } then open_paper { hit_id }.".into(),
             ));
         }
+
+        out.insert(
+            "resolved".into(),
+            serde_json::json!({
+                "hit_id": req.hit_id,
+                "doi": resolved.doi,
+                "arxiv_id": resolved.arxiv_id,
+                "item_key": resolved.item_key,
+                "paper_id": resolved.paper_id,
+                "attachment_key": resolved.attachment_key,
+                "url": resolved.url,
+            }),
+        );
 
         Ok(serde_json::Value::Object(out))
     }
 
-    async fn resolve_fulltext_for_open(&self, resolved: &OpenResolved) -> Result<FulltextContent> {
+    async fn resolve_fulltext_for_open(
+        &self,
+        resolved: &mut OpenResolved,
+    ) -> Result<FulltextContent> {
         if let Some(att) = resolved.attachment_key.as_deref() {
             return self.get_pdf_text(att).await;
         }
@@ -372,6 +371,7 @@ impl PaperbridgeService {
             resolved.doi.as_deref(),
             resolved.arxiv_id.as_deref(),
             resolved.paper_id.as_deref(),
+            resolved.url.as_deref(),
         ]
         .into_iter()
         .flatten()
@@ -380,9 +380,177 @@ impl PaperbridgeService {
                 return Ok(ft);
             }
         }
+
+        // Agent path: await OA mirror when possible instead of racing background threads.
+        if let Some(api) = &self.paperseed {
+            let hit = paper_hit_from_resolved(resolved);
+            if let Err(e) = mirror_open_access_hit(api, &hit, MirrorMode::Awaited).await {
+                debug!("open_paper OA mirror failed: {e}");
+            } else {
+                // Prefer newly cached paper_id if annotate can find it.
+                if let Some(entry) = api.find_cached_hit(&hit) {
+                    resolved.paper_id = Some(entry.paper.metadata.id.clone());
+                }
+                for q in [
+                    resolved.doi.as_deref(),
+                    resolved.arxiv_id.as_deref(),
+                    resolved.paper_id.as_deref(),
+                    resolved.url.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if let Some(ft) = self.try_cached_fulltext_by_query(q)? {
+                        return Ok(ft);
+                    }
+                }
+            }
+        }
+
+        if let Some(fulltext) = self.download_open_fulltext(resolved).await? {
+            return Ok(fulltext);
+        }
+
         Err(ZoteroMcpError::InvalidInput(
             "No fulltext available yet. For external hits, ensure paperseed cache has the PDF (or use a Zotero attachment_key). Try: open_paper with paper_id after papers search, or library read for Zotero items.".into(),
         ))
+    }
+
+    async fn resolve_structure_for_open(
+        &self,
+        resolved: &mut OpenResolved,
+        max_chars: usize,
+    ) -> Result<PaperStructure> {
+        if let Some(item_key) = resolved.item_key.as_deref() {
+            return self
+                .get_paper_structure(item_key, resolved.attachment_key.as_deref())
+                .await;
+        }
+        if let Some(paper_id) = resolved.paper_id.as_deref()
+            && let Some(structure) = self.try_cached_paper_structure(paper_id)?
+        {
+            return Ok(structure);
+        }
+
+        for query in [
+            resolved.doi.as_deref(),
+            resolved.arxiv_id.as_deref(),
+            resolved.url.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some((paper_id, structure)) = self.try_cached_paper_structure_by_query(query)? {
+                resolved.paper_id = Some(paper_id);
+                return Ok(structure);
+            }
+        }
+
+        let fulltext =
+            truncate_fulltext(&self.resolve_fulltext_for_open(resolved).await?, max_chars);
+        if let Some(paper_id) = resolved.paper_id.as_deref()
+            && let Some(structure) = self.try_cached_paper_structure(paper_id)?
+        {
+            return Ok(structure);
+        }
+
+        let metadata = self.open_paper_metadata(resolved).await;
+        Ok(PaperStructure {
+            item_key: fulltext.item_key.clone(),
+            attachment_key: None,
+            metadata,
+            sections: crate::paper::fallback::build_sections(None, &fulltext.content),
+            references: Vec::new(),
+            figures: Vec::new(),
+            source: crate::models::PaperStructureSource::GrobidUnavailable {
+                reason: "built from directly downloaded PDF text".into(),
+            },
+        })
+    }
+
+    async fn open_paper_metadata(&self, resolved: &OpenResolved) -> crate::models::PaperMetadata {
+        if let Some(doi) = resolved.doi.as_deref()
+            && let Ok(work) = self.resolve_doi(doi).await
+        {
+            return crate::models::PaperMetadata {
+                title: work.title,
+                authors: work.authors,
+                abstract_note: work.abstract_note,
+                doi: Some(work.doi),
+                year: work.year,
+            };
+        }
+        crate::models::PaperMetadata {
+            title: None,
+            authors: Vec::new(),
+            abstract_note: None,
+            doi: resolved.doi.clone(),
+            year: None,
+        }
+    }
+
+    async fn download_open_fulltext(
+        &self,
+        resolved: &OpenResolved,
+    ) -> Result<Option<FulltextContent>> {
+        let Some(url) = self.resolve_open_pdf_url(resolved).await else {
+            return Ok(None);
+        };
+        let response = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?
+            .get(&url)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(ZoteroMcpError::Api {
+                status: status.as_u16(),
+                message: format!("open_paper PDF download failed at {url}"),
+            });
+        }
+        let bytes = response.bytes().await?;
+        let content = paperseed::app::extract_pdf_text_from_bytes(&bytes).ok_or_else(|| {
+            ZoteroMcpError::InvalidInput(format!(
+                "Downloaded paper from {url}, but no extractable PDF text was found. Try a cached/OCR copy or a Zotero attachment."
+            ))
+        })?;
+        let chars = u32::try_from(content.chars().count()).ok();
+        let item_key = resolved
+            .paper_id
+            .clone()
+            .or(resolved.arxiv_id.clone())
+            .or(resolved.doi.clone())
+            .or(resolved.url.clone())
+            .unwrap_or_else(|| "open_paper".into());
+        Ok(Some(FulltextContent {
+            item_key,
+            content,
+            indexed_pages: None,
+            total_pages: None,
+            indexed_chars: chars,
+            total_chars: chars,
+        }))
+    }
+
+    async fn resolve_open_pdf_url(&self, resolved: &OpenResolved) -> Option<String> {
+        if let Some(url) = resolved.url.clone() {
+            return Some(url);
+        }
+        if let Some(arxiv) = resolved.arxiv_id.as_deref() {
+            return Some(format!("https://arxiv.org/pdf/{arxiv}"));
+        }
+        let doi = resolved.doi.as_deref()?;
+        if let Ok(work) = self.resolve_doi(doi).await
+            && let Some(url) = work.oa_pdf_url
+        {
+            return Some(url);
+        }
+        paperseed::resolver::ResolverClient::new(None)
+            .resolve_doi(doi, None)
+            .await
+            .ok()
+            .and_then(|paper| paper.open_pdf_url)
     }
 
     fn mirror_open_access_hits(&self, hits: &[PaperHit]) {
@@ -416,7 +584,9 @@ impl PaperbridgeService {
                     Err(_) => return,
                 };
                 rt.block_on(async {
-                    if let Err(error) = mirror_open_access_hit(&api, &hit).await {
+                    if let Err(error) =
+                        mirror_open_access_hit(&api, &hit, MirrorMode::Background).await
+                    {
                         debug!("paperseed OA mirror skipped '{}': {}", hit.title, error);
                     }
                 });
@@ -1115,6 +1285,29 @@ impl PaperbridgeService {
         Ok(Some(cached_paper_structure(&paper, &fulltext)))
     }
 
+    fn try_cached_paper_structure_by_query(
+        &self,
+        query: &str,
+    ) -> Result<Option<(String, PaperStructure)>> {
+        let Some(api) = &self.paperseed else {
+            return Ok(None);
+        };
+        let hits = match api.search_cached_papers(query, 1) {
+            Ok(hits) => hits,
+            Err(_) => return Ok(None),
+        };
+        let Some(paper_id) = hits
+            .first()
+            .and_then(|hit| hit.cache.as_ref())
+            .map(|cache| cache.paper_id.clone())
+        else {
+            return Ok(None);
+        };
+        Ok(self
+            .try_cached_paper_structure(&paper_id)?
+            .map(|structure| (paper_id, structure)))
+    }
+
     fn try_prepare_cached_item_for_vox(
         &self,
         item_key: &str,
@@ -1187,6 +1380,7 @@ struct OpenResolved {
     item_key: Option<String>,
     paper_id: Option<String>,
     attachment_key: Option<String>,
+    url: Option<String>,
 }
 
 fn resolve_open_targets(req: &OpenPaperRequest) -> Result<OpenResolved> {
@@ -1196,6 +1390,7 @@ fn resolve_open_targets(req: &OpenPaperRequest) -> Result<OpenResolved> {
         item_key: req.item_key.clone(),
         paper_id: req.paper_id.clone(),
         attachment_key: req.attachment_key.clone(),
+        url: req.url.as_deref().map(normalize_open_url).transpose()?,
     };
 
     if let Some(hit_id) = req.hit_id.as_deref() {
@@ -1210,6 +1405,8 @@ fn resolve_open_targets(req: &OpenPaperRequest) -> Result<OpenResolved> {
             r.paper_id = Some(rest.to_string());
         } else if let Some(rest) = hit_id.strip_prefix("zotero:") {
             r.item_key = Some(rest.to_string());
+        } else if let Some(rest) = hit_id.strip_prefix("url:") {
+            r.url = Some(normalize_open_url(rest)?);
         } else if hit_id.contains('/') {
             // bare DOI in hit_id
             r.doi = r.doi.or_else(|| normalize_doi(hit_id));
@@ -1221,13 +1418,29 @@ fn resolve_open_targets(req: &OpenPaperRequest) -> Result<OpenResolved> {
         && r.item_key.is_none()
         && r.paper_id.is_none()
         && r.attachment_key.is_none()
+        && r.url.is_none()
     {
         return Err(ZoteroMcpError::InvalidInput(
-            "open_paper requires hit_id, doi, arxiv_id, item_key, paper_id, or attachment_key."
+            "open_paper requires hit_id, doi, arxiv_id, item_key, paper_id, attachment_key, or url."
                 .into(),
         ));
     }
     Ok(r)
+}
+
+fn normalize_open_url(raw: &str) -> Result<String> {
+    let parsed = url::Url::parse(raw.trim()).map_err(|_| {
+        ZoteroMcpError::InvalidInput(format!(
+            "open_paper URL must be an absolute HTTP(S) URL, got '{raw}'"
+        ))
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(ZoteroMcpError::InvalidInput(format!(
+            "open_paper URL must use HTTP(S), got '{}': {raw}",
+            parsed.scheme()
+        )));
+    }
+    Ok(parsed.to_string())
 }
 
 fn strip_arxiv_version_local(id: &str) -> String {
@@ -1238,6 +1451,56 @@ fn strip_arxiv_version_local(id: &str) -> String {
         }
     }
     id.to_string()
+}
+
+fn paper_hit_from_resolved(resolved: &OpenResolved) -> PaperHit {
+    let arxiv = resolved.arxiv_id.clone();
+    let doi = resolved.doi.clone();
+    let (url, pdf_url, oa_pdf_url) = if let Some(ref a) = arxiv {
+        (
+            Some(format!("https://arxiv.org/abs/{a}")),
+            Some(format!("https://arxiv.org/pdf/{a}")),
+            Some(format!("https://arxiv.org/pdf/{a}")),
+        )
+    } else if let Some(ref d) = doi {
+        (Some(format!("https://doi.org/{d}")), None, None)
+    } else if let Some(url) = resolved.url.clone() {
+        (Some(url.clone()), Some(url.clone()), Some(url))
+    } else {
+        (None, None, None)
+    };
+    let title = arxiv
+        .clone()
+        .or_else(|| doi.clone())
+        .or_else(|| resolved.url.clone())
+        .unwrap_or_else(|| "open_paper".into());
+    let mut hit = PaperHit::new(
+        if arxiv.is_some() {
+            PaperSource::Arxiv
+        } else {
+            PaperSource::Crossref
+        },
+        title,
+        Vec::new(),
+        None,
+        doi,
+        arxiv,
+        None,
+        None,
+        url,
+        pdf_url,
+        oa_pdf_url,
+        None,
+        None,
+    );
+    if let Some(pid) = resolved.paper_id.clone() {
+        hit.cache = Some(CachedPaperSummary {
+            paper_id: pid,
+            cached: true,
+            has_full_text: false,
+        });
+    }
+    hit
 }
 
 fn truncate_fulltext(fulltext: &FulltextContent, max_chars: usize) -> FulltextContent {
@@ -1697,7 +1960,17 @@ fn summarize_validation_report(report: &ValidationReport) -> String {
         .join("; ")
 }
 
-async fn mirror_open_access_hit(api: &PaperseedApi, hit: &PaperHit) -> Result<()> {
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum MirrorMode {
+    Background,
+    Awaited,
+}
+
+async fn mirror_open_access_hit(
+    api: &PaperseedApi,
+    hit: &PaperHit,
+    mode: MirrorMode,
+) -> Result<()> {
     // Prefer the hit's own OA url; otherwise resolve one from its DOI.
     let url = match hit.oa_pdf_url.clone() {
         Some(url) => url,
@@ -1712,15 +1985,18 @@ async fn mirror_open_access_hit(api: &PaperseedApi, hit: &PaperHit) -> Result<()
         ZoteroMcpError::Config(format!("Failed to create Paperseed incoming dir: {e}"))
     })?;
     let file = incoming.join(format!("{}.pdf", paperseed_safe_name(hit)));
-    let yams_downloaded = api.download_with_yams_queue(
-        url,
-        Some(&hit.title),
-        hit.doi.as_deref(),
-        hit.url.as_deref().or(Some(url)),
-    );
-    // YAMS queue handles download + indexing, nothing else needed.
-    if yams_downloaded.is_some() {
-        return Ok(());
+    if mode == MirrorMode::Background {
+        let yams_downloaded = api.download_with_yams_queue(
+            url,
+            Some(&hit.title),
+            hit.doi.as_deref(),
+            hit.url.as_deref().or(Some(url)),
+        );
+        // Background mirroring may hand work to YAMS. The awaited agent path
+        // deliberately bypasses the queue and ingests synchronously below.
+        if yams_downloaded.is_some() {
+            return Ok(());
+        }
     }
 
     // Manual path: download then index into local corpus.
@@ -1891,7 +2167,9 @@ mod tests {
             next: Vec::new(),
         };
 
-        mirror_open_access_hit(&api, &hit).await.unwrap();
+        mirror_open_access_hit(&api, &hit, MirrorMode::Awaited)
+            .await
+            .unwrap();
         let db = api.corpus_status().unwrap();
         assert_eq!(db.papers.len(), 1);
         assert_eq!(db.papers[0].paper.metadata.title, "Open Paper");
@@ -3011,5 +3289,247 @@ mod tests {
         let cfg = service.paper_config.as_ref().expect("paper_config set");
         assert_eq!(cfg.grobid_url.as_deref(), Some("http://localhost:8070"));
         assert!(!cfg.grobid_auto_spawn);
+    }
+
+    #[test]
+    fn resolve_open_targets_parses_hit_ids() {
+        let r = resolve_open_targets(&OpenPaperRequest {
+            hit_id: Some("arxiv:1706.03762v7".into()),
+            doi: None,
+            arxiv_id: None,
+            item_key: None,
+            paper_id: None,
+            attachment_key: None,
+            url: None,
+            want: vec![],
+            max_chars: None,
+            selector: None,
+            max_chars_per_chunk: None,
+        })
+        .unwrap();
+        assert_eq!(r.arxiv_id.as_deref(), Some("1706.03762"));
+
+        let r = resolve_open_targets(&OpenPaperRequest {
+            hit_id: Some("doi:10.5555/3295222.3295349".into()),
+            doi: None,
+            arxiv_id: None,
+            item_key: None,
+            paper_id: None,
+            attachment_key: None,
+            url: None,
+            want: vec![],
+            max_chars: None,
+            selector: None,
+            max_chars_per_chunk: None,
+        })
+        .unwrap();
+        assert_eq!(r.doi.as_deref(), Some("10.5555/3295222.3295349"));
+
+        let r = resolve_open_targets(&OpenPaperRequest {
+            hit_id: Some("paperseed:abc123".into()),
+            doi: None,
+            arxiv_id: None,
+            item_key: None,
+            paper_id: None,
+            attachment_key: None,
+            url: None,
+            want: vec![],
+            max_chars: None,
+            selector: None,
+            max_chars_per_chunk: None,
+        })
+        .unwrap();
+        assert_eq!(r.paper_id.as_deref(), Some("abc123"));
+
+        let r = resolve_open_targets(&OpenPaperRequest {
+            hit_id: Some("url:https://openreview.net/pdf?id=abc123".into()),
+            doi: None,
+            arxiv_id: None,
+            item_key: None,
+            paper_id: None,
+            attachment_key: None,
+            url: None,
+            want: vec![],
+            max_chars: None,
+            selector: None,
+            max_chars_per_chunk: None,
+        })
+        .unwrap();
+        assert_eq!(
+            r.url.as_deref(),
+            Some("https://openreview.net/pdf?id=abc123")
+        );
+    }
+
+    #[test]
+    fn truncate_fulltext_sets_total_and_indexed_chars() {
+        let full = FulltextContent {
+            item_key: "k".into(),
+            content: "abcdefghij".into(),
+            indexed_pages: None,
+            total_pages: None,
+            indexed_chars: None,
+            total_chars: None,
+        };
+        let t = truncate_fulltext(&full, 4);
+        assert_eq!(t.content, "abcd");
+        assert_eq!(t.indexed_chars, Some(4));
+        assert_eq!(t.total_chars, Some(10));
+    }
+
+    #[tokio::test]
+    async fn open_paper_returns_arxiv_metadata_without_backend() {
+        let service = PaperbridgeService::new(Arc::new(StubLocalReadOnlyBackend));
+        let value = service
+            .open_paper(OpenPaperRequest {
+                hit_id: Some("arxiv:1706.03762".into()),
+                doi: None,
+                arxiv_id: None,
+                item_key: None,
+                paper_id: None,
+                attachment_key: None,
+                url: None,
+                want: vec!["metadata".into()],
+                max_chars: None,
+                selector: None,
+                max_chars_per_chunk: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(value["metadata"]["arxiv_id"].as_str(), Some("1706.03762"));
+        assert!(
+            value["metadata"]["pdf_url"]
+                .as_str()
+                .unwrap()
+                .contains("arxiv.org/pdf/1706.03762")
+        );
+    }
+
+    #[tokio::test]
+    async fn open_paper_fulltext_from_cached_paper_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let api = PaperseedApi::with_yams(
+            dir.path().join("corpus"),
+            None,
+            paperseed::yams::YamsConfig::disabled(),
+        );
+        let src = dir.path().join("body.txt");
+        std::fs::write(&src, "hello open paper fulltext body").unwrap();
+        let paper = api
+            .ingest_with_metadata(
+                &src,
+                paperseed::sources::PaperbridgeMetadata {
+                    title: Some("Open Paper Cache".into()),
+                    doi: Some("10.1/open-paper".into()),
+                    authors: vec!["Test".into()],
+                    year: Some(2024),
+                    venue: None,
+                    license: Some("cc-by".into()),
+                    source_url: None,
+                },
+                Some("cc-by".into()),
+            )
+            .unwrap();
+
+        let service = PaperbridgeService::new(Arc::new(StubLocalReadOnlyBackend)).with_paperseed(
+            PaperseedMirrorConfig {
+                corpus_root: Some(dir.path().join("corpus").display().to_string()),
+                unpaywall_email: None,
+                auto_download: false,
+                yams_enabled: false,
+            },
+        );
+
+        let value = service
+            .open_paper(OpenPaperRequest {
+                hit_id: None,
+                doi: None,
+                arxiv_id: None,
+                item_key: None,
+                paper_id: Some(paper.metadata.id.clone()),
+                attachment_key: None,
+                url: None,
+                want: vec!["fulltext".into()],
+                max_chars: Some(12),
+                selector: None,
+                max_chars_per_chunk: None,
+            })
+            .await
+            .unwrap();
+
+        let content = value["fulltext"]["content"].as_str().unwrap();
+        assert_eq!(content, "hello open p");
+        assert_eq!(value["fulltext"]["indexed_chars"], 12);
+        assert!(value["fulltext"]["total_chars"].as_u64().unwrap() > 12);
+    }
+
+    #[tokio::test]
+    async fn open_url_builds_structure_without_paperseed() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let fixture = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("crates/paperseed/tests/fixtures/arxiv_1408_5939_planar_subgraphs.pdf"),
+        )
+        .unwrap();
+        Mock::given(method("GET"))
+            .and(path("/paper.pdf"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(fixture))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let value = service()
+            .open_paper(OpenPaperRequest {
+                hit_id: Some(format!("url:{}/paper.pdf", server.uri())),
+                doi: None,
+                arxiv_id: None,
+                item_key: None,
+                paper_id: None,
+                attachment_key: None,
+                url: None,
+                want: vec!["structure".into()],
+                max_chars: Some(2_000),
+                selector: None,
+                max_chars_per_chunk: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            value["structure"]["sections"]
+                .as_array()
+                .is_some_and(|s| !s.is_empty())
+        );
+        assert_eq!(
+            value["resolved"]["url"].as_str(),
+            Some(format!("{}/paper.pdf", server.uri()).as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn open_paper_errors_without_identifiers() {
+        let err = service()
+            .open_paper(OpenPaperRequest {
+                hit_id: None,
+                doi: None,
+                arxiv_id: None,
+                item_key: None,
+                paper_id: None,
+                attachment_key: None,
+                url: None,
+                want: vec!["metadata".into()],
+                max_chars: None,
+                selector: None,
+                max_chars_per_chunk: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("requires hit_id"),
+            "unexpected: {err}"
+        );
     }
 }

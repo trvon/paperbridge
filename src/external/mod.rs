@@ -41,6 +41,7 @@ const DEFAULT_TIMEOUT_MS: u64 = 8000;
 /// Default page size for agent-facing search (never unbounded).
 pub const DEFAULT_PAGE_LIMIT: u32 = 10;
 pub const MAX_PAGE_LIMIT: u32 = 50;
+pub const MAX_SOURCE_FETCH_LIMIT: u32 = 200;
 
 #[derive(Debug, Clone)]
 pub struct SearchOptions {
@@ -79,6 +80,28 @@ impl SearchOptions {
             self.limit
         };
         lim.min(MAX_PAGE_LIMIT)
+    }
+
+    /// Fetch enough of each source's ranked prefix to cover the requested
+    /// merged page plus one sentinel candidate. This keeps offset pagination
+    /// moving beyond the initial fan-out window even though source adapters do
+    /// not yet expose a uniform offset API.
+    pub fn source_fetch_limit(&self) -> u32 {
+        self.limit_per_source.max(
+            self.offset
+                .saturating_add(self.page_limit())
+                .saturating_add(1),
+        )
+    }
+
+    pub fn validate_source_fetch_limit(&self) -> Result<()> {
+        let fetch_limit = self.source_fetch_limit();
+        if fetch_limit > MAX_SOURCE_FETCH_LIMIT {
+            return Err(ZoteroMcpError::InvalidInput(format!(
+                "search window requires {fetch_limit} hits per source, above the safe maximum of {MAX_SOURCE_FETCH_LIMIT}. Narrow the query or use a smaller offset."
+            )));
+        }
+        Ok(())
     }
 
     fn enabled(&self, source: PaperSource) -> bool {
@@ -191,8 +214,9 @@ impl PaperSearch {
     }
 
     pub async fn search(&self, opts: SearchOptions) -> Result<PaperSearchOutcome> {
+        opts.validate_source_fetch_limit()?;
         let timeout_duration = Duration::from_millis(opts.timeout_ms);
-        let limit = opts.limit_per_source;
+        let limit = opts.source_fetch_limit();
         let query = opts.query.clone();
 
         let mut futs: Vec<BoxFuture<'_, (PaperSource, SourceRunResult)>> = Vec::new();
@@ -509,7 +533,7 @@ fn dedupe(hits: Vec<PaperHit>) -> Vec<PaperHit> {
 
     for hit in hits {
         if let Some(doi) = hit.doi.as_deref() {
-            let key = doi.trim().to_ascii_lowercase();
+            let key = normalize_doi_key(doi).unwrap_or_default();
             if !key.is_empty() && !seen_doi.insert(key) {
                 continue;
             }
@@ -940,6 +964,22 @@ mod tests {
         opts.sources = Some(vec![PaperSource::Crossref]);
         assert!(opts.enabled(PaperSource::Crossref));
         assert!(!opts.enabled(PaperSource::Arxiv));
+    }
+
+    #[test]
+    fn source_fetch_limit_expands_for_later_pages() {
+        let mut opts = SearchOptions::new("q");
+        opts.limit_per_source = 10;
+        opts.offset = 10;
+        opts.limit = 5;
+        assert_eq!(opts.source_fetch_limit(), 16);
+    }
+
+    #[test]
+    fn source_fetch_limit_rejects_unsafe_windows() {
+        let mut opts = SearchOptions::new("q");
+        opts.offset = MAX_SOURCE_FETCH_LIMIT;
+        assert!(opts.validate_source_fetch_limit().is_err());
     }
 
     #[tokio::test]

@@ -46,8 +46,16 @@ pub fn enrich_hit_identity(hit: &mut PaperHit) {
         format!("pmid:{p}")
     } else if let Some(ref p) = paper_id {
         format!("paperseed:{p}")
-    } else if let Some(url) = hit.url.as_deref().filter(|u| !u.is_empty()) {
-        format!("url:{}", short_hash(url))
+    } else if let Some(url) = hit
+        .oa_pdf_url
+        .as_deref()
+        .or(hit.pdf_url.as_deref())
+        .or(hit.url.as_deref())
+        .filter(|u| !u.is_empty())
+    {
+        // URL-only hits must remain openable without server-side search state.
+        // Prefer a PDF URL so `open_paper { hit_id }` can retrieve content.
+        format!("url:{url}")
     } else {
         format!("title:{}", short_hash(&hit.title))
     });
@@ -103,12 +111,18 @@ pub fn apply_detail(hit: &mut PaperHit, detail: SearchDetail, abstract_max_chars
             }
         }
         SearchDetail::Full => {
-            let max = abstract_max_chars.unwrap_or(usize::MAX);
-            if max != usize::MAX
+            // Full detail remains token-bounded by default. An explicit zero
+            // opts into the complete abstract, matching the wire contract.
+            let max = abstract_max_chars.unwrap_or(280);
+            if max != 0
                 && let Some(abs) = hit.abstract_note.as_mut()
                 && abs.chars().count() > max
             {
-                *abs = abs.chars().take(max).collect::<String>() + "…";
+                *abs = abs
+                    .chars()
+                    .take(max.saturating_sub(1))
+                    .chain(std::iter::once('…'))
+                    .collect();
             }
         }
     }
@@ -292,5 +306,73 @@ mod tests {
         apply_detail(&mut hit, SearchDetail::Compact, None);
         assert!(hit.abstract_note.is_none());
         assert_eq!(hit.authors.len(), 3);
+    }
+
+    #[test]
+    fn full_detail_caps_abstract_by_default() {
+        let mut hit = PaperHit::new(
+            PaperSource::Arxiv,
+            "T".into(),
+            vec![],
+            None,
+            None,
+            None,
+            None,
+            Some("a".repeat(300)),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        apply_detail(&mut hit, SearchDetail::Full, None);
+        assert_eq!(hit.abstract_note.unwrap().chars().count(), 280);
+    }
+
+    #[test]
+    fn full_detail_zero_keeps_complete_abstract() {
+        let abstract_note = "complete abstract".repeat(30);
+        let mut hit = PaperHit::new(
+            PaperSource::Arxiv,
+            "T".into(),
+            vec![],
+            None,
+            None,
+            None,
+            None,
+            Some(abstract_note.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        apply_detail(&mut hit, SearchDetail::Full, Some(0));
+        assert_eq!(hit.abstract_note.as_deref(), Some(abstract_note.as_str()));
+    }
+
+    #[test]
+    fn url_only_pdf_hit_has_openable_hit_id() {
+        let mut hit = PaperHit::new(
+            PaperSource::OpenReview,
+            "T".into(),
+            vec![],
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("https://openreview.net/forum?id=abc".into()),
+            Some("https://openreview.net/pdf?id=abc".into()),
+            Some("https://openreview.net/pdf?id=abc".into()),
+            None,
+            None,
+        );
+        enrich_hit_identity(&mut hit);
+        assert_eq!(
+            hit.hit_id.as_deref(),
+            Some("url:https://openreview.net/pdf?id=abc")
+        );
+        assert_eq!(hit.next, vec!["open_paper"]);
     }
 }

@@ -447,12 +447,14 @@ fn extract_full_text(path: &Path, mime: &str) -> Result<Option<String>> {
     }
     if mime == "application/pdf" {
         let bytes = fs::read(path)?;
-        return Ok(extract_text_from_pdf_bytes(&bytes));
+        return Ok(extract_pdf_text_from_bytes(&bytes));
     }
     Ok(None)
 }
 
-fn extract_text_from_pdf_bytes(bytes: &[u8]) -> Option<String> {
+/// Extract normalized text directly from PDF bytes without importing them.
+/// Used by Paperbridge's stateless `open_paper` fallback.
+pub fn extract_pdf_text_from_bytes(bytes: &[u8]) -> Option<String> {
     let text = pdf_extract::extract_text_from_mem(bytes).ok()?;
     let trimmed = text.trim();
     if trimmed.is_empty() {

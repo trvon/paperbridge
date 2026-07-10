@@ -262,15 +262,37 @@ pub(crate) fn build_arxiv_search_query(raw: &str) -> String {
         let inner = &trimmed[1..trimmed.len() - 1];
         return format!("ti:\"{inner}\"");
     }
-    let words: Vec<&str> = trimmed.split_whitespace().collect();
-    // Title-like multi-word queries: prefer title field phrase search.
-    if words.len() >= 3 {
-        return format!("ti:\"{trimmed}\"");
-    }
-    if words.len() == 2 {
-        return format!("ti:\"{trimmed}\" OR all:{trimmed}");
+    if looks_like_title_phrase(trimmed) {
+        // Title-primary with a broad fallback preserves recall when the
+        // heuristic guessed wrong.
+        return format!("ti:\"{trimmed}\" OR all:\"{trimmed}\"");
     }
     format!("all:{trimmed}")
+}
+
+fn looks_like_title_phrase(raw: &str) -> bool {
+    let words: Vec<&str> = raw.split_whitespace().collect();
+    if words.len() < 3 {
+        return false;
+    }
+
+    let title_case_words = words
+        .iter()
+        .filter(|word| word.chars().next().is_some_and(char::is_uppercase))
+        .count();
+    if title_case_words * 2 >= words.len() {
+        return true;
+    }
+
+    // Lower-case paper titles commonly contain connective words, unlike terse
+    // topic queries such as "retrieval augmented generation".
+    words.len() >= 4
+        && words.iter().any(|word| {
+            matches!(
+                word.to_ascii_lowercase().as_str(),
+                "a" | "an" | "and" | "are" | "for" | "is" | "of" | "the" | "to" | "with"
+            )
+        })
 }
 
 fn looks_like_arxiv_id(raw: &str) -> bool {
@@ -472,5 +494,25 @@ mod tests {
         let client = ArxivClient::new(Some(&server.uri()));
         let err = client.search("q", 1).await.unwrap_err();
         assert!(err.to_string().to_lowercase().contains("xml parse error"));
+    }
+
+    #[test]
+    fn topic_queries_remain_broad() {
+        assert_eq!(
+            build_arxiv_search_query("retrieval augmented generation"),
+            "all:retrieval augmented generation"
+        );
+    }
+
+    #[test]
+    fn title_queries_use_title_primary_with_fallback() {
+        assert_eq!(
+            build_arxiv_search_query("Attention Is All You Need"),
+            "ti:\"Attention Is All You Need\" OR all:\"Attention Is All You Need\""
+        );
+        assert_eq!(
+            build_arxiv_search_query("attention is all you need"),
+            "ti:\"attention is all you need\" OR all:\"attention is all you need\""
+        );
     }
 }

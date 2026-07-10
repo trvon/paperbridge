@@ -70,7 +70,9 @@ pub struct ListCollectionsParams {
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct OpenPaperParams {
-    #[schemars(description = "Stable hit_id from search_papers (arxiv:…, doi:…, paperseed:…)")]
+    #[schemars(
+        description = "Stable hit_id from search_papers (arxiv:…, doi:…, paperseed:…, url:…)"
+    )]
     pub hit_id: Option<String>,
 
     #[schemars(description = "DOI to open")]
@@ -87,6 +89,9 @@ pub struct OpenPaperParams {
 
     #[schemars(description = "Zotero attachment key (low-level)")]
     pub attachment_key: Option<String>,
+
+    #[schemars(description = "Direct HTTP(S) paper or PDF URL")]
+    pub url: Option<String>,
 
     #[schemars(
         description = "What to return: metadata | fulltext | structure | chunks (default metadata)"
@@ -269,7 +274,7 @@ pub struct SearchPapersParams {
     #[schemars(description = "Free-text search query alias of query")]
     pub q: Option<String>,
 
-    #[schemars(description = "Max hits per source (default 10)")]
+    #[schemars(description = "Initial hits per source (default 10; page window maximum 200)")]
     pub limit_per_source: Option<u32>,
 
     #[schemars(
@@ -294,7 +299,9 @@ pub struct SearchPapersParams {
     #[schemars(description = "compact (default) omits full abstracts; full includes them")]
     pub detail: Option<SearchDetail>,
 
-    #[schemars(description = "Truncate abstracts in full detail (chars); ignored in compact")]
+    #[schemars(
+        description = "Abstract cap in full detail (default 280 chars; 0 means unlimited; ignored in compact)"
+    )]
     pub abstract_max_chars: Option<usize>,
 }
 
@@ -728,7 +735,7 @@ impl PaperbridgeServer {
 
     #[tool(
         name = "open_paper",
-        description = "Open a paper by hit_id, DOI, arXiv id, Zotero item_key, paperseed paper_id, or attachment_key. want: metadata|fulltext|structure|chunks. Fulltext is truncated (default max_chars=8000). Prefer this after search_papers."
+        description = "Open a paper by hit_id, DOI, arXiv id, Zotero item_key, paperseed paper_id, attachment_key, or HTTP(S) URL. want: metadata|fulltext|structure|chunks. Fulltext is truncated (default max_chars=8000). Prefer this after search_papers."
     )]
     async fn open_paper(
         &self,
@@ -743,6 +750,7 @@ impl PaperbridgeServer {
                 item_key: params.item_key,
                 paper_id: params.paper_id,
                 attachment_key: params.attachment_key,
+                url: params.url,
                 want: params.want.unwrap_or_else(|| vec!["metadata".into()]),
                 max_chars: params.max_chars,
                 selector: params.selector,

@@ -130,7 +130,7 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` cancelled
 ### C1 — `open_paper` tool + CLI
 
 - [x] **T-C1.1** Service API: resolve hit_id | doi | arxiv | item_key | paper_id | attachment_key
-- [ ] **T-C1.2** Await OA/cache materialization (replace racey fire-and-forget as the agent path) — open uses cache if present; auto-mirror still background
+- [x] **T-C1.2** Await OA/cache materialization (agent path uses synchronous ingestion/direct extraction; auto-mirror remains background)
 - [x] **T-C1.3** MCP tool `open_paper` with `want`, `max_chars`, `selector`
 - [x] **T-C1.4** CLI `papers open` (canonical) mirroring MCP
 - [x] **T-C1.5** Errors with recovery text when id not openable

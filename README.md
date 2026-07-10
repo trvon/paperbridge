@@ -51,15 +51,16 @@ HuggingFace Papers, Semantic Scholar, CORE, NASA ADS, and ScholarAPI in parallel
 Local cached results from Paperseed are used conservatively: cached duplicates are annotated/preferred, and cache-only hits surface only for strong matches unless you explicitly include `paperseed`.
 
 ```bash
-paperbridge papers search -q "intrusion detection" --limit 3 --max-results 10
+paperbridge papers search --query "intrusion detection" --per-source 3 --limit 10
 paperbridge papers search -q "attention is all you need" --sources arxiv,semantic_scholar
 paperbridge papers search -q "attention is all you need" --sources paperseed  # cache only
 paperbridge papers resolve-doi --doi 10.1038/nature12373
 ```
 
-Results are paginated (`--offset`, `--max-results`) and deduplicated by DOI,
-arXiv ID, PMID, and normalized title+author. Unconfigured key-gated sources are
-silently skipped.
+Results are paginated (`--offset`, `--limit`) and deduplicated by DOI, arXiv
+ID, PMID, and normalized title+author. Later pages expand the per-source fetch
+window as needed. Unconfigured key-gated sources appear in
+`diagnostics.sources_skipped`.
 
 If `paperseed_enabled` and `paperseed_auto_download` are on, open-access PDFs
 are mirrored into the local corpus in background threads so they become

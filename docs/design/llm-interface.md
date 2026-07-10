@@ -35,7 +35,7 @@ Companion backlog: [llm-interface-tasks.md](llm-interface-tasks.md).
 |---------|----------------|--------------------------|---------|--------|
 | Free-text / id query | `query` | `q` | required when searching | Same for library + papers |
 | Page size | `limit` | — | **10** (search/list) | Max 50 for agent defaults; never default 0=all |
-| Per-source fan-out | `limit_per_source` | CLI legacy `--limit` | 10 | CLI flag rename: prefer `--per-source`; keep `--limit` as alias with deprecation path |
+| Per-source fan-out | `limit_per_source` | CLI legacy `--limit` | 10 | Initial source prefix; later offset pages expand it as needed, up to a safe window of 200. CLI prefers `--per-source`. |
 | Pagination offset | `offset` | `start` | 0 | Library + papers |
 | Source filter | `sources` | — | all enabled | Canonical wire names below |
 | Cache mode | `cache` | — | `auto` | `auto` \| `include` \| `only` \| `off` |
@@ -130,7 +130,8 @@ Stable, deterministic, preferred order of minting:
 3. `pmid:{pmid}`
 4. `zotero:{item_key}`
 5. `paperseed:{paper_id}`
-6. `url:{sha256_12 of canonical url}` last resort
+6. `url:{canonical_url}` last resort. This is intentionally reversible so a
+   stateless `open_paper { hit_id }` call can retrieve URL-only hits.
 
 Same logical paper from different sources should prefer the same id when an
 identifier is shared (dedupe merge must promote best id set onto the kept hit).

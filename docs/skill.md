@@ -60,6 +60,7 @@ paperbridge papers search --query "transformers" --limit 5 --offset 10 --detail 
 # Open a hit after search (await-friendly path)
 paperbridge papers open --hit-id "arxiv:1706.03762" --want metadata,structure
 paperbridge papers open --doi "10.1038/nature12373" --want metadata
+paperbridge papers open --url "https://example.org/paper.pdf" --want fulltext
 ```
 
 Results are deduplicated by DOI → arXiv ID → PMID → normalized
@@ -70,7 +71,7 @@ title+first-author. Each hit includes `hit_id`, `ids`, `match`, `access`, and
 MCP tools:
 - `search_papers { query|q, limit?, limit_per_source?, sources?, cache?, offset?, detail?, abstract_max_chars? }`
   → `{ query, total_count, offset, limit, has_more, next_offset, detail, hits, diagnostics }`
-- `open_paper { hit_id?|doi?|arxiv_id?|item_key?|paper_id?|attachment_key?, want?, max_chars? }`
+- `open_paper { hit_id?|doi?|arxiv_id?|item_key?|paper_id?|attachment_key?|url?, want?, max_chars? }`
 - `search_items` / `list_collections` → paginated envelopes (`hits`, not bare arrays)
 
 Canonical source wire names: `arxiv`, `paperseed`, `crossref`, `openalex`,
@@ -106,7 +107,7 @@ paperbridge library read-search -q "sparse attention" --result-index 0 --search-
 `query_paper` / `resolve_doi`. Use Vox `prepare_*` tools only for read-aloud.
 
 MCP tools:
-- `open_paper { hit_id|doi|arxiv_id|item_key|paper_id|attachment_key, want, max_chars? }` — preferred
+- `open_paper { hit_id|doi|arxiv_id|item_key|paper_id|attachment_key|url, want, max_chars? }` — preferred
 - `get_pdf_text` / `get_item_fulltext` — low-level attachment/cache paths
 - `prepare_vox_text` / `prepare_item_for_vox` / `prepare_search_result_for_vox` — Vox chunks only
 
@@ -224,8 +225,8 @@ paperbridge config snippet --target opencode
 
 - **Cloud api_base must be HTTPS** (or `http://localhost` for local mode).
 - **`--limit` is page size** (default 10). Fan-out uses `--per-source` / MCP `limit_per_source`.
-- **Search is compact by default** — pass `--detail full` / `detail: "full"` for abstracts.
-- **Search results are paginated** — use `offset`/`limit`; check `has_more` / `next_offset`.
+- **Search is compact by default** — pass `--detail full` / `detail: "full"` for abstracts. Full abstracts default to 280 characters; set `abstract_max_chars=0` for unlimited text.
+- **Search results are paginated** — use `offset`/`limit`; check `has_more` / `next_offset`. Later pages expand the per-source fetch window automatically, up to a safe window of 200.
 - **Key-gated sources skip loudly** — see `diagnostics.sources_skipped` / `sources_failed`.
 - **Cached papers are conservative by default**: default cache-only hits need strong relevance, and `--sources` without `paperseed` excludes cache hits. Use `--sources paperseed` for explicit cache-only search.
 - **PDF text extraction** happens automatically during local corpus import — no separate step needed.

@@ -394,7 +394,7 @@ pub enum PapersAction {
         /// Free-text search query (positional shorthand for --query)
         #[arg(value_name = "QUERY")]
         positional_query: Option<String>,
-        /// Max hits per source during fan-out (default 10)
+        /// Initial hits per source (default 10; page window maximum 200)
         #[arg(long = "per-source")]
         per_source: Option<u32>,
         /// Subset of sources (comma-separated); default is all enabled
@@ -415,13 +415,13 @@ pub enum PapersAction {
         /// compact (default) or full (include abstracts)
         #[arg(long, value_enum)]
         detail: Option<SearchDetail>,
-        /// Truncate abstracts when --detail full
+        /// Abstract cap for --detail full (default 280; 0 means unlimited)
         #[arg(long)]
         abstract_max_chars: Option<usize>,
     },
     /// Open a paper by hit_id / DOI / arXiv / Zotero key / cache id
     Open {
-        /// hit_id from papers search (arxiv:…, doi:…, paperseed:…)
+        /// hit_id from papers search (arxiv:…, doi:…, paperseed:…, url:…)
         #[arg(long)]
         hit_id: Option<String>,
         /// DOI
@@ -439,6 +439,9 @@ pub enum PapersAction {
         /// Zotero attachment key
         #[arg(long)]
         attachment_key: Option<String>,
+        /// Direct HTTP(S) paper or PDF URL
+        #[arg(long)]
+        url: Option<String>,
         /// Comma-separated: metadata,fulltext,structure,chunks (default metadata)
         #[arg(long, value_delimiter = ',')]
         want: Option<Vec<String>>,
@@ -781,6 +784,8 @@ mod tests {
             "papers",
             "search",
             "implicit feedback skip recommendation systems",
+            "--per-source",
+            "3",
             "--limit",
             "5",
         ])
@@ -791,6 +796,7 @@ mod tests {
                     PapersAction::Search {
                         q,
                         positional_query,
+                        per_source,
                         limit,
                         ..
                     },
@@ -800,6 +806,7 @@ mod tests {
                     positional_query.as_deref(),
                     Some("implicit feedback skip recommendation systems")
                 );
+                assert_eq!(per_source, Some(3));
                 assert_eq!(limit, Some(5));
             }
             other => panic!("unexpected: {other:?}"),
