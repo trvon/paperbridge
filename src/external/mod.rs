@@ -408,6 +408,13 @@ impl PaperSearch {
             diagnostics,
         })
     }
+
+    /// Resolve an exact DOI through the same Crossref client used by the
+    /// search fan-out. This keeps test/custom endpoints and production
+    /// behavior aligned.
+    pub async fn resolve_doi(&self, doi: &str) -> Result<crate::models::CrossrefWork> {
+        self.crossref.resolve_doi(doi).await
+    }
 }
 
 impl Default for PaperSearch {

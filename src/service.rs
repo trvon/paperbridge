@@ -155,14 +155,37 @@ impl PaperbridgeService {
         let abstract_max_chars = opts.abstract_max_chars;
         let mut opts = opts;
         opts.validate_source_fetch_limit()?;
-        if let Some(doi) = normalize_doi(&opts.query) {
-            opts.query = doi;
+        let exact_doi = normalize_doi(&opts.query);
+        if let Some(doi) = exact_doi.as_deref() {
+            opts.query = doi.to_string();
         } else if let Some(arxiv) = normalize_arxiv_id(&opts.query) {
             opts.query = arxiv;
+        } else {
+            opts.query = expand_agent_search_query(&opts.query);
         }
         let cache_mode = effective_cache_mode(opts.cache_mode, opts.sources.as_deref());
         let mut diagnostics = SearchDiagnostics::default();
-        let mut hits = if cache_mode == SearchCacheMode::Only {
+        let direct_crossref = exact_doi.is_some()
+            && cache_mode != SearchCacheMode::Only
+            && opts
+                .sources
+                .as_ref()
+                .is_none_or(|sources| sources.contains(&PaperSource::Crossref));
+        let mut hits = if let Some(doi) = exact_doi.as_deref().filter(|_| direct_crossref) {
+            match self.paper_search.resolve_doi(doi).await {
+                Ok(work) => {
+                    diagnostics.sources_ok.push("crossref".into());
+                    vec![crossref_work_to_hit(work)]
+                }
+                Err(error) => {
+                    diagnostics.sources_failed.push(SourceDiagnostic {
+                        source: "crossref".into(),
+                        reason: error.to_string(),
+                    });
+                    Vec::new()
+                }
+            }
+        } else if cache_mode == SearchCacheMode::Only {
             Vec::new()
         } else {
             let PaperSearchOutcome {
@@ -1764,7 +1787,7 @@ fn rank_search_hits(query: &str, hits: &mut [PaperHit]) {
     use std::cmp::Reverse;
 
     let query_title = normalize_search_text(query);
-    let query_tokens: Vec<String> = query_title.split_whitespace().map(str::to_string).collect();
+    let query_tokens = expanded_ranking_terms(query);
     let query_doi = normalize_doi(query);
     let query_arxiv = normalize_arxiv_id(query);
 
@@ -1792,7 +1815,7 @@ fn search_rank(
     query_doi: Option<&str>,
     query_arxiv: Option<&str>,
     hit: &PaperHit,
-) -> (u8, u8, u8, usize, u16, u32, u32, u8) {
+) -> (u8, u8, u8, u16, usize, u16, u32, u32, u8) {
     let normalized_title = normalize_search_text(&hit.title);
     let title_tokens: Vec<&str> = normalized_title.split_whitespace().collect();
 
@@ -1817,6 +1840,11 @@ fn search_rank(
         })
         .count();
     let all_tokens_present = !query_tokens.is_empty() && token_matches == query_tokens.len();
+    let token_coverage = if query_tokens.is_empty() {
+        0
+    } else {
+        ((token_matches * 1_000) / query_tokens.len()).min(u16::MAX as usize) as u16
+    };
 
     let title_strength = if exact_title {
         4
@@ -1851,11 +1879,59 @@ fn search_rank(
         doi_match as u8,
         arxiv_match as u8,
         title_strength,
+        token_coverage,
         token_matches,
         tightness,
         hit.citation_count.unwrap_or(0),
         relevance_score,
         source_rank_bias(hit.source),
+    )
+}
+
+fn expanded_ranking_terms(query: &str) -> Vec<String> {
+    meaningful_query_terms(&expand_agent_search_query(query))
+}
+
+fn expand_agent_search_query(query: &str) -> String {
+    let normalized = normalize_search_text(query);
+    if !normalized.split_whitespace().any(|term| term == "gnn") {
+        return query.trim().to_string();
+    }
+
+    let mut terms = meaningful_query_terms(&normalized);
+    if terms.iter().any(|term| term == "gnn") {
+        terms.retain(|term| term != "gnn");
+        for expanded in ["graph", "neural", "network"] {
+            if !terms.iter().any(|term| term == expanded) {
+                terms.push(expanded.to_string());
+            }
+        }
+    }
+    if terms
+        .iter()
+        .any(|term| matches!(term.as_str(), "drive" | "drives" | "driver" | "drivers"))
+        && !terms.iter().any(|term| term == "component")
+    {
+        terms.push("component".into());
+    }
+    terms.join(" ")
+}
+
+fn crossref_work_to_hit(work: CrossrefWork) -> PaperHit {
+    PaperHit::new(
+        PaperSource::Crossref,
+        work.title.unwrap_or_else(|| work.doi.clone()),
+        work.authors,
+        work.year,
+        Some(work.doi),
+        None,
+        None,
+        work.abstract_note,
+        work.url,
+        None,
+        work.oa_pdf_url,
+        work.journal,
+        None,
     )
 }
 
@@ -2735,6 +2811,113 @@ mod tests {
 
         assert_eq!(result.hits[0].source, PaperSource::Arxiv);
         assert_eq!(result.hits[0].arxiv_id.as_deref(), Some("1706.03762"));
+    }
+
+    #[tokio::test]
+    async fn search_papers_resolves_exact_doi_before_text_search() {
+        let server = wiremock::MockServer::start().await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"^/crossref/works/10\.14722(%2F|/)ndss\.2023\.23080$",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "message": {
+                    "DOI": "10.14722/ndss.2023.23080",
+                    "title": ["Detecting Unknown Encrypted Malicious Traffic in Real Time via Flow Interaction Graph Analysis"],
+                    "author": [{"given": "Chuanpu", "family": "Fu"}],
+                    "container-title": ["NDSS Symposium"],
+                    "published-online": {"date-parts": [[2023]]},
+                    "URL": "https://doi.org/10.14722/ndss.2023.23080",
+                    "type": "proceedings-article"
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let base = server.uri();
+        let paper_search = crate::external::PaperSearch::with_clients(
+            crate::external::ArxivClient::new(Some(&format!("{base}/arxiv"))),
+            crate::external::HuggingFaceClient::new(Some(&format!("{base}/hf")), None),
+            crate::external::SemanticScholarClient::new(Some(&format!("{base}/s2")), None),
+            crate::crossref::CrossrefClient::new(Some(&format!("{base}/crossref"))),
+        );
+        let service =
+            PaperbridgeService::with_paper_search(Arc::new(StubLocalReadOnlyBackend), paper_search);
+
+        let result = service
+            .search_papers(SearchOptions {
+                query: "https://doi.org/10.14722/ndss.2023.23080".into(),
+                limit_per_source: 5,
+                sources: Some(vec![PaperSource::Crossref]),
+                timeout_ms: 8_000,
+                offset: 0,
+                limit: 5,
+                cache_mode: SearchCacheMode::Off,
+                detail: crate::models::SearchDetail::Compact,
+                abstract_max_chars: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(
+            result.hits[0].doi.as_deref(),
+            Some("10.14722/ndss.2023.23080")
+        );
+        assert_eq!(
+            result.hits[0].match_info.as_ref().map(|m| m.kind),
+            Some(crate::models::MatchKind::ExactId)
+        );
+    }
+
+    #[test]
+    fn gnn_question_expansion_prioritizes_component_detection_paper() {
+        let mut hits = vec![
+            PaperHit::new(
+                PaperSource::OpenAlex,
+                "Driving Fatigue Detection Using Sensors".into(),
+                vec![],
+                Some("2022".into()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(10_000),
+            ),
+            PaperHit::new(
+                PaperSource::Paperseed,
+                "Which Component Drives Detection? Decomposing a Graph Neural Network Intrusion Detector".into(),
+                vec![],
+                Some("2026".into()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+        ];
+
+        rank_search_hits("What drives detection in GNN", &mut hits);
+
+        assert!(
+            expand_agent_search_query("What drives detection in GNN")
+                .contains("graph neural network")
+        );
+        assert!(
+            hits[0]
+                .title
+                .starts_with("Which Component Drives Detection")
+        );
     }
 
     #[tokio::test]

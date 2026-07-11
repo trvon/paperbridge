@@ -169,7 +169,7 @@ fn classify_match(query: &str, hit: &PaperHit) -> MatchKind {
         if matches == q_tokens.len() {
             return MatchKind::Tokens;
         }
-        if matches > 0 {
+        if matches.saturating_mul(2) >= q_tokens.len() {
             return MatchKind::Tokens;
         }
     }
