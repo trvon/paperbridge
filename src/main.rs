@@ -20,11 +20,23 @@ use paperbridge::zotero_api::build_backend;
 use rmcp::ServiceExt;
 use serde::Serialize;
 use std::io::{self, Write};
+use std::process::ExitCode;
 use tracing::warn;
 
-fn main() -> paperbridge::Result<()> {
+fn main() -> ExitCode {
     let cli = Cli::parse();
+    let output = OutputFormat::new(cli.json);
 
+    match run(cli) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            print_runtime_error(&error, output);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run(cli: Cli) -> paperbridge::Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -33,6 +45,8 @@ fn main() -> paperbridge::Result<()> {
 }
 
 async fn async_main(cli: Cli) -> paperbridge::Result<()> {
+    let output = OutputFormat::new(cli.json);
+
     if let Some(Command::Completions { shell }) = &cli.command {
         let mut cmd = Cli::command();
         let name = cmd.get_name().to_string();
@@ -43,7 +57,16 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
     if let Some(Command::Config { action }) = &cli.command {
         match action {
             ConfigAction::Path => {
-                println!("{}", Config::config_path().display());
+                if output.is_json() {
+                    print_output(
+                        &serde_json::json!({
+                            "config_path": Config::config_path().display().to_string()
+                        }),
+                        output,
+                    )?;
+                } else {
+                    println!("{}", Config::config_path().display());
+                }
                 return Ok(());
             }
             ConfigAction::Snippet {
@@ -58,7 +81,7 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
                 return Ok(());
             }
             ConfigAction::Get { key, show_secret } => {
-                handle_config_get(key.as_deref(), *show_secret)?;
+                handle_config_get(key.as_deref(), *show_secret, output)?;
                 return Ok(());
             }
             ConfigAction::Set { key, value } => {
@@ -70,16 +93,17 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
                 api_key,
                 api_base,
             } => {
-                handle_config_resolve_user_id(login, api_key.as_deref(), api_base.as_deref())
-                    .await?;
+                handle_config_resolve_user_id(
+                    login,
+                    api_key.as_deref(),
+                    api_base.as_deref(),
+                    output,
+                )
+                .await?;
                 return Ok(());
             }
-            ConfigAction::Doctor {
-                json,
-                verbose,
-                setup,
-            } => {
-                handle_config_doctor(*json, *verbose, *setup)?;
+            ConfigAction::Doctor { verbose, setup } => {
+                handle_config_doctor(output, *verbose, *setup)?;
                 return Ok(());
             }
             ConfigAction::Validate => {}
@@ -100,7 +124,17 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
         Some(Command::Config {
             action: ConfigAction::Validate,
         }) => {
-            println!("Config valid.\n\n{}", config.display_safe());
+            if output.is_json() {
+                print_output(
+                    &serde_json::json!({
+                        "valid": true,
+                        "config": safe_config_value(&config)?,
+                    }),
+                    output,
+                )?;
+            } else {
+                println!("Config valid.\n\n{}", config.display_safe());
+            }
         }
         Some(Command::Skill) => {
             println!("{}", paperbridge::server::SKILL_MD);
@@ -108,7 +142,7 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
         Some(Command::Update) => {
             paperbridge::update::run_update().await?;
         }
-        Some(Command::Status) => handle_status(config).await?,
+        Some(Command::Status) => handle_status(config, output).await?,
         Some(Command::Library { action }) => match action {
             LibraryAction::Query {
                 q,
@@ -117,17 +151,29 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
                 tag,
                 limit,
                 offset,
-            } => handle_library_query(config, q, qmode, item_type, tag, limit, offset).await?,
+            } => {
+                handle_library_query(config, q, qmode, item_type, tag, limit, offset, output)
+                    .await?
+            }
             LibraryAction::Collections {
                 top_only,
                 limit,
                 offset,
-            } => handle_library_collections(config, top_only, limit, offset).await?,
+            } => handle_library_collections(config, top_only, limit, offset, output).await?,
             LibraryAction::Read {
                 item_key,
                 attachment_key,
                 max_chars_per_chunk,
-            } => handle_library_read(config, item_key, attachment_key, max_chars_per_chunk).await?,
+            } => {
+                handle_library_read(
+                    config,
+                    item_key,
+                    attachment_key,
+                    max_chars_per_chunk,
+                    output,
+                )
+                .await?
+            }
             LibraryAction::ReadSearch {
                 q,
                 qmode,
@@ -146,25 +192,30 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
                     result_index,
                     search_limit,
                     max_chars_per_chunk,
+                    output,
                 )
                 .await?
             }
         },
         Some(Command::Item { action }) => match action {
             ItemAction::Validate { file, online } => {
-                handle_item_validate(config, file, online).await?
+                handle_item_validate(config, file, online, output).await?
             }
-            ItemAction::Create { file } => handle_item_create(config, file).await?,
-            ItemAction::Update { file } => handle_item_update(config, file).await?,
-            ItemAction::Delete { file } => handle_item_delete(config, file).await?,
+            ItemAction::Create { file } => handle_item_create(config, file, output).await?,
+            ItemAction::Update { file } => handle_item_update(config, file, output).await?,
+            ItemAction::Delete { file } => handle_item_delete(config, file, output).await?,
         },
         Some(Command::Collection { action }) => match action {
             CollectionAction::Create {
                 name,
                 parent_collection,
-            } => handle_collection_create(config, name, parent_collection).await?,
-            CollectionAction::Update { file } => handle_collection_update(config, file).await?,
-            CollectionAction::Delete { file } => handle_collection_delete(config, file).await?,
+            } => handle_collection_create(config, name, parent_collection, output).await?,
+            CollectionAction::Update { file } => {
+                handle_collection_update(config, file, output).await?
+            }
+            CollectionAction::Delete { file } => {
+                handle_collection_delete(config, file, output).await?
+            }
         },
         Some(Command::Papers { action }) => match action {
             PapersAction::Search {
@@ -192,6 +243,7 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
                         detail,
                         abstract_max_chars,
                     },
+                    output,
                 )
                 .await?
             }
@@ -219,18 +271,21 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
                     want,
                     max_chars,
                     selector,
+                    output,
                 )
                 .await?
             }
-            PapersAction::ResolveDoi { doi } => handle_papers_resolve_doi(config, doi).await?,
+            PapersAction::ResolveDoi { doi } => {
+                handle_papers_resolve_doi(config, doi, output).await?
+            }
             PapersAction::Structure { key, attachment } => {
-                handle_paper_structure(config, key, attachment).await?
+                handle_paper_structure(config, key, attachment, output).await?
             }
             PapersAction::Query {
                 key,
                 selector,
                 attachment,
-            } => handle_paper_query(config, key, selector, attachment).await?,
+            } => handle_paper_query(config, key, selector, attachment, output).await?,
             PapersAction::Skill { key, attachment } => {
                 handle_paper_skill(config, key, attachment).await?
             }
@@ -242,17 +297,17 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
             );
             match action {
                 PaperAction::Structure { key, attachment } => {
-                    handle_paper_structure(config, key, attachment).await?
+                    handle_paper_structure(config, key, attachment, output).await?
                 }
                 PaperAction::Query {
                     key,
                     selector,
                     attachment,
-                } => handle_paper_query(config, key, selector, attachment).await?,
+                } => handle_paper_query(config, key, selector, attachment, output).await?,
             }
         }
 
-        Some(Command::Paperseed { action }) => handle_paperseed(config, action).await?,
+        Some(Command::Paperseed { action }) => handle_paperseed(config, action, output).await?,
 
         // ---------- Hidden legacy aliases (delegate + deprecation warning) ----------
         Some(Command::Query {
@@ -264,7 +319,7 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
             start,
         }) => {
             warn!("'query' is deprecated; use 'paperbridge library query' instead");
-            handle_library_query(config, q, qmode, item_type, tag, limit, start).await?;
+            handle_library_query(config, q, qmode, item_type, tag, limit, start, output).await?;
         }
         Some(Command::Collections {
             top_only,
@@ -272,7 +327,7 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
             start,
         }) => {
             warn!("'collections' is deprecated; use 'paperbridge library collections' instead");
-            handle_library_collections(config, top_only, limit, start).await?;
+            handle_library_collections(config, top_only, limit, start, output).await?;
         }
         Some(Command::Read {
             item_key,
@@ -280,7 +335,14 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
             max_chars_per_chunk,
         }) => {
             warn!("'read' is deprecated; use 'paperbridge library read' instead");
-            handle_library_read(config, item_key, attachment_key, max_chars_per_chunk).await?;
+            handle_library_read(
+                config,
+                item_key,
+                attachment_key,
+                max_chars_per_chunk,
+                output,
+            )
+            .await?;
         }
         Some(Command::ReadSearch {
             q,
@@ -301,6 +363,7 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
                 result_index,
                 search_limit,
                 max_chars_per_chunk,
+                output,
             )
             .await?;
         }
@@ -309,35 +372,35 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
             parent_collection,
         }) => {
             warn!("'create-collection' is deprecated; use 'paperbridge collection create' instead");
-            handle_collection_create(config, name, parent_collection).await?;
+            handle_collection_create(config, name, parent_collection, output).await?;
         }
         Some(Command::UpdateCollection { file }) => {
             warn!("'update-collection' is deprecated; use 'paperbridge collection update' instead");
-            handle_collection_update(config, file).await?;
+            handle_collection_update(config, file, output).await?;
         }
         Some(Command::DeleteCollection { file }) => {
             warn!("'delete-collection' is deprecated; use 'paperbridge collection delete' instead");
-            handle_collection_delete(config, file).await?;
+            handle_collection_delete(config, file, output).await?;
         }
         Some(Command::ValidateItem { file, online }) => {
             warn!("'validate-item' is deprecated; use 'paperbridge item validate' instead");
-            handle_item_validate(config, file, online).await?;
+            handle_item_validate(config, file, online, output).await?;
         }
         Some(Command::CreateItem { file }) => {
             warn!("'create-item' is deprecated; use 'paperbridge item create' instead");
-            handle_item_create(config, file).await?;
+            handle_item_create(config, file, output).await?;
         }
         Some(Command::UpdateItem { file }) => {
             warn!("'update-item' is deprecated; use 'paperbridge item update' instead");
-            handle_item_update(config, file).await?;
+            handle_item_update(config, file, output).await?;
         }
         Some(Command::DeleteItem { file }) => {
             warn!("'delete-item' is deprecated; use 'paperbridge item delete' instead");
-            handle_item_delete(config, file).await?;
+            handle_item_delete(config, file, output).await?;
         }
         Some(Command::BackendInfo) => {
             warn!("'backend-info' is deprecated; use 'paperbridge status' instead");
-            handle_status(config).await?;
+            handle_status(config, output).await?;
         }
         Some(Command::SearchPapers {
             q,
@@ -361,12 +424,13 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
                     detail: None,
                     abstract_max_chars: None,
                 },
+                output,
             )
             .await?;
         }
         Some(Command::ResolveDoi { doi }) => {
             warn!("'resolve-doi' is deprecated; use 'paperbridge papers resolve-doi' instead");
-            handle_papers_resolve_doi(config, doi).await?;
+            handle_papers_resolve_doi(config, doi, output).await?;
         }
 
         Some(Command::Serve) | None => {
@@ -433,7 +497,11 @@ enum DoctorLevel {
     Error,
 }
 
-fn handle_config_doctor(json: bool, verbose: bool, setup: bool) -> paperbridge::Result<()> {
+fn handle_config_doctor(
+    output: OutputFormat,
+    verbose: bool,
+    setup: bool,
+) -> paperbridge::Result<()> {
     let path = Config::config_path();
     let mut config_exists = path.exists();
     let mut raw = if config_exists {
@@ -452,7 +520,11 @@ fn handle_config_doctor(json: bool, verbose: bool, setup: bool) -> paperbridge::
         config.write_to_file()?;
         raw = Some(toml::to_string_pretty(&config)?);
         config_exists = true;
-        println!("Updated {}", path.display());
+        if output.is_json() {
+            eprintln!("Updated {}", path.display());
+        } else {
+            println!("Updated {}", path.display());
+        }
     }
     let mut checks = Vec::new();
 
@@ -593,8 +665,8 @@ fn handle_config_doctor(json: bool, verbose: bool, setup: bool) -> paperbridge::
         checks,
     };
 
-    if json {
-        print_json(&report)?;
+    if output.is_json() {
+        print_output(&report, output)?;
     } else {
         print_doctor_report(&report, verbose);
     }
@@ -741,10 +813,10 @@ fn print_doctor_report(report: &DoctorReport, verbose: bool) {
 
 // ---------- Shared handlers (used by canonical + legacy dispatch arms) ----------
 
-async fn handle_status(config: Config) -> paperbridge::Result<()> {
+async fn handle_status(config: Config, output: OutputFormat) -> paperbridge::Result<()> {
     let update_check_enabled = config.update_check_enabled;
     let service = build_service(config)?;
-    print_json(&service.backend_info())?;
+    print_output(&service.backend_info(), output)?;
     if update_check_enabled {
         let info = paperbridge::update::check_for_update().await;
         paperbridge::update::print_nag(info.as_ref());
@@ -761,6 +833,7 @@ async fn handle_library_query(
     tag: Option<String>,
     limit: Option<u32>,
     start: Option<u32>,
+    output: OutputFormat,
 ) -> paperbridge::Result<()> {
     let service = build_service(config)?;
     let results = service
@@ -773,7 +846,7 @@ async fn handle_library_query(
             start: start.unwrap_or(0),
         })
         .await?;
-    print_json(&results)
+    print_output(&results, output)
 }
 
 async fn handle_library_collections(
@@ -781,6 +854,7 @@ async fn handle_library_collections(
     top_only: bool,
     limit: Option<u32>,
     start: Option<u32>,
+    output: OutputFormat,
 ) -> paperbridge::Result<()> {
     let service = build_service(config)?;
     let results = service
@@ -790,7 +864,7 @@ async fn handle_library_collections(
             start: start.unwrap_or(0),
         })
         .await?;
-    print_json(&results)
+    print_output(&results, output)
 }
 
 async fn handle_library_read(
@@ -798,6 +872,7 @@ async fn handle_library_read(
     item_key: String,
     attachment_key: Option<String>,
     max_chars_per_chunk: Option<usize>,
+    output: OutputFormat,
 ) -> paperbridge::Result<()> {
     let service = build_service(config)?;
     let payload = service
@@ -807,7 +882,7 @@ async fn handle_library_read(
             max_chars_per_chunk,
         })
         .await?;
-    print_json(&payload)
+    print_output(&payload, output)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -820,6 +895,7 @@ async fn handle_library_read_search(
     result_index: Option<usize>,
     search_limit: Option<u32>,
     max_chars_per_chunk: Option<usize>,
+    output: OutputFormat,
 ) -> paperbridge::Result<()> {
     let service = build_service(config)?;
     let payload = service
@@ -833,13 +909,14 @@ async fn handle_library_read_search(
             max_chars_per_chunk,
         })
         .await?;
-    print_json(&payload)
+    print_output(&payload, output)
 }
 
 async fn handle_item_validate(
     config: Config,
     file: String,
     online: bool,
+    output: OutputFormat,
 ) -> paperbridge::Result<()> {
     let service = build_service(config)?;
     let payload: ItemWriteRequest = read_json_file(&file)?;
@@ -848,34 +925,47 @@ async fn handle_item_validate(
     } else {
         service.validate_item_request(&payload)
     };
-    print_json(&report)
+    print_output(&report, output)
 }
 
-async fn handle_item_create(config: Config, file: String) -> paperbridge::Result<()> {
+async fn handle_item_create(
+    config: Config,
+    file: String,
+    output: OutputFormat,
+) -> paperbridge::Result<()> {
     let service = build_service(config)?;
     let payload: ItemWriteRequest = read_json_file(&file)?;
     let created = service.create_item(payload).await?;
-    print_json(&created)
+    print_output(&created, output)
 }
 
-async fn handle_item_update(config: Config, file: String) -> paperbridge::Result<()> {
+async fn handle_item_update(
+    config: Config,
+    file: String,
+    output: OutputFormat,
+) -> paperbridge::Result<()> {
     let service = build_service(config)?;
     let payload: ItemUpdateRequest = read_json_file(&file)?;
     let updated = service.update_item(payload).await?;
-    print_json(&updated)
+    print_output(&updated, output)
 }
 
-async fn handle_item_delete(config: Config, file: String) -> paperbridge::Result<()> {
+async fn handle_item_delete(
+    config: Config,
+    file: String,
+    output: OutputFormat,
+) -> paperbridge::Result<()> {
     let service = build_service(config)?;
     let payload: DeleteItemRequest = read_json_file(&file)?;
     service.delete_item(payload).await?;
-    print_json(&serde_json::json!({"deleted": true}))
+    print_output(&serde_json::json!({"deleted": true}), output)
 }
 
 async fn handle_collection_create(
     config: Config,
     name: String,
     parent_collection: Option<String>,
+    output: OutputFormat,
 ) -> paperbridge::Result<()> {
     let service = build_service(config)?;
     let payload = service
@@ -884,21 +974,29 @@ async fn handle_collection_create(
             parent_collection,
         })
         .await?;
-    print_json(&payload)
+    print_output(&payload, output)
 }
 
-async fn handle_collection_update(config: Config, file: String) -> paperbridge::Result<()> {
+async fn handle_collection_update(
+    config: Config,
+    file: String,
+    output: OutputFormat,
+) -> paperbridge::Result<()> {
     let service = build_service(config)?;
     let payload: CollectionUpdateRequest = read_json_file(&file)?;
     let updated = service.update_collection(payload).await?;
-    print_json(&updated)
+    print_output(&updated, output)
 }
 
-async fn handle_collection_delete(config: Config, file: String) -> paperbridge::Result<()> {
+async fn handle_collection_delete(
+    config: Config,
+    file: String,
+    output: OutputFormat,
+) -> paperbridge::Result<()> {
     let service = build_service(config)?;
     let payload: DeleteCollectionRequest = read_json_file(&file)?;
     service.delete_collection(payload).await?;
-    print_json(&serde_json::json!({"deleted": true}))
+    print_output(&serde_json::json!({"deleted": true}), output)
 }
 
 struct PapersSearchArgs {
@@ -913,7 +1011,11 @@ struct PapersSearchArgs {
     abstract_max_chars: Option<usize>,
 }
 
-async fn handle_papers_search(config: Config, args: PapersSearchArgs) -> paperbridge::Result<()> {
+async fn handle_papers_search(
+    config: Config,
+    args: PapersSearchArgs,
+    output: OutputFormat,
+) -> paperbridge::Result<()> {
     let service = build_service(config)?;
     let opts = SearchOptions {
         query: args.q,
@@ -929,7 +1031,7 @@ async fn handle_papers_search(config: Config, args: PapersSearchArgs) -> paperbr
         abstract_max_chars: args.abstract_max_chars,
     };
     let result = service.search_papers(opts).await?;
-    print_json(&result)
+    print_output(&result, output)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -945,6 +1047,7 @@ async fn handle_papers_open(
     want: Option<Vec<String>>,
     max_chars: Option<usize>,
     selector: Option<String>,
+    output: OutputFormat,
 ) -> paperbridge::Result<()> {
     let service = build_service(config)?;
     let result = service
@@ -962,7 +1065,7 @@ async fn handle_papers_open(
             max_chars_per_chunk: None,
         })
         .await?;
-    print_json(&result)
+    print_output(&result, output)
 }
 
 fn normalize_papers_query(
@@ -983,22 +1086,27 @@ fn normalize_papers_query(
     Ok(query)
 }
 
-async fn handle_papers_resolve_doi(config: Config, doi: String) -> paperbridge::Result<()> {
+async fn handle_papers_resolve_doi(
+    config: Config,
+    doi: String,
+    output: OutputFormat,
+) -> paperbridge::Result<()> {
     let service = build_service(config)?;
     let work = service.resolve_doi(&doi).await?;
-    print_json(&work)
+    print_output(&work, output)
 }
 
 async fn handle_paper_structure(
     config: Config,
     key: String,
     attachment: Option<String>,
+    output: OutputFormat,
 ) -> paperbridge::Result<()> {
     let service = build_service(config)?;
     let structure = service
         .get_paper_structure(&key, attachment.as_deref())
         .await?;
-    print_json(&structure)
+    print_output(&structure, output)
 }
 
 async fn handle_paper_query(
@@ -1006,12 +1114,13 @@ async fn handle_paper_query(
     key: String,
     selector: String,
     attachment: Option<String>,
+    output: OutputFormat,
 ) -> paperbridge::Result<()> {
     let service = build_service(config)?;
     let value = service
         .query_paper(&key, &selector, attachment.as_deref())
         .await?;
-    print_json(&value)
+    print_output(&value, output)
 }
 
 async fn handle_paper_skill(
@@ -1028,12 +1137,16 @@ async fn handle_paper_skill(
     Ok(())
 }
 
-async fn handle_paperseed(config: Config, action: PaperseedAction) -> paperbridge::Result<()> {
+async fn handle_paperseed(
+    config: Config,
+    action: PaperseedAction,
+    output: OutputFormat,
+) -> paperbridge::Result<()> {
     let api = build_paperseed_api(&config);
     match action {
         PaperseedAction::Corpus { action } => match action {
             PaperseedCorpusAction::Status => {
-                print_json(&api.corpus_status()?)?;
+                print_output(&api.corpus_status()?, output)?;
             }
             PaperseedCorpusAction::Import {
                 file,
@@ -1041,7 +1154,7 @@ async fn handle_paperseed(config: Config, action: PaperseedAction) -> paperbridg
                 license,
             } => {
                 let paper = api.import_local_file(file, title, license)?;
-                print_json(&paper)?;
+                print_output(&paper, output)?;
             }
             PaperseedCorpusAction::Ingest {
                 metadata,
@@ -1055,17 +1168,31 @@ async fn handle_paperseed(config: Config, action: PaperseedAction) -> paperbridg
                 })?;
                 let metadata = paperseed::sources::metadata_from_paperbridge_json(&raw)?;
                 let paper = api.ingest_with_metadata(file, metadata, license)?;
-                print_json(&paper)?;
+                print_output(&paper, output)?;
             }
             PaperseedCorpusAction::Query { q } => {
-                print_json(&api.query_corpus(&q)?)?;
+                print_output(&api.query_corpus(&q)?, output)?;
             }
             PaperseedCorpusAction::Export { format } => {
                 let db = api.corpus_status()?;
-                match format {
-                    PaperseedExportFormat::Json => print_json(&db)?,
-                    PaperseedExportFormat::Bibtex => {
+                match (format, output) {
+                    (None | Some(PaperseedExportFormat::Json), OutputFormat::Json) => {
+                        print_json(&db)?
+                    }
+                    (None | Some(PaperseedExportFormat::Bibtex), OutputFormat::Human) => {
                         println!("{}", paperseed::app::export_bibtex(&db));
+                    }
+                    (Some(PaperseedExportFormat::Json), OutputFormat::Human) => {
+                        return Err(paperbridge::ZoteroMcpError::InvalidInput(
+                            "JSON corpus export requires --json. Try: paperbridge paperseed corpus export --json"
+                                .to_string(),
+                        ));
+                    }
+                    (Some(PaperseedExportFormat::Bibtex), OutputFormat::Json) => {
+                        return Err(paperbridge::ZoteroMcpError::InvalidInput(
+                            "--format bibtex conflicts with --json. Remove one of those flags."
+                                .to_string(),
+                        ));
                     }
                 }
             }
@@ -1074,14 +1201,17 @@ async fn handle_paperseed(config: Config, action: PaperseedAction) -> paperbridg
             PaperseedSeedAction::Check { paper_id } => {
                 let reason = paperseed::app::seed_check(api.paths(), &paper_id)
                     .map_err(paperbridge::paperseed_api::map_error)?;
-                print_json(&serde_json::json!({
-                    "paper_id": paper_id,
-                    "allowed": true,
-                    "reason": reason,
-                }))?;
+                print_output(
+                    &serde_json::json!({
+                        "paper_id": paper_id,
+                        "allowed": true,
+                        "reason": reason,
+                    }),
+                    output,
+                )?;
             }
             PaperseedSeedAction::Create { paper_id } => {
-                print_json(&api.create_seed_manifest(&paper_id)?)?;
+                print_output(&api.create_seed_manifest(&paper_id)?, output)?;
             }
         },
     }
@@ -1165,11 +1295,258 @@ async fn run_stdio(config: Config) -> paperbridge::Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum OutputFormat {
+    Human,
+    Json,
+}
+
+#[derive(Debug, Serialize, Eq, PartialEq)]
+struct CliErrorEnvelope {
+    error: &'static str,
+    reason: String,
+    #[serde(rename = "try")]
+    suggestions: Vec<String>,
+}
+
+fn print_runtime_error(error: &paperbridge::ZoteroMcpError, output: OutputFormat) {
+    if output.is_json() {
+        let envelope = cli_error_envelope(error);
+        match serde_json::to_string_pretty(&envelope) {
+            Ok(json) => eprintln!("{json}"),
+            Err(_) => eprintln!(
+                "{}",
+                serde_json::json!({
+                    "error": "serialization_error",
+                    "reason": "Failed to render the structured runtime error.",
+                    "try": [],
+                })
+            ),
+        }
+    } else {
+        eprintln!("Error: {error}");
+    }
+}
+
+fn cli_error_envelope(error: &paperbridge::ZoteroMcpError) -> CliErrorEnvelope {
+    use paperbridge::ZoteroMcpError;
+
+    let (code, reason, suggestions): (&'static str, String, Vec<String>) = match error {
+        ZoteroMcpError::Config(reason) => (
+            "configuration_error",
+            reason.clone(),
+            commands(&["paperbridge config doctor", "paperbridge config validate"]),
+        ),
+        ZoteroMcpError::MissingConfig(key) => (
+            "missing_configuration",
+            format!("Required configuration key '{key}' is not set."),
+            vec![
+                format!("paperbridge config set {key} <value>"),
+                "paperbridge config init --interactive".to_string(),
+            ],
+        ),
+        ZoteroMcpError::InvalidInput(reason) => (
+            "invalid_input",
+            reason.clone(),
+            invalid_input_suggestions(reason),
+        ),
+        ZoteroMcpError::Http(reason) => (
+            "http_error",
+            reason.clone(),
+            commands(&["paperbridge status", "paperbridge config doctor"]),
+        ),
+        ZoteroMcpError::Api { status, message } => (
+            "zotero_api_error",
+            format!("Zotero API returned HTTP {status}: {message}"),
+            commands(api_error_suggestions(*status)),
+        ),
+        ZoteroMcpError::Serde(reason) => (
+            "serialization_error",
+            reason.clone(),
+            commands(&["paperbridge config doctor", "paperbridge --help"]),
+        ),
+    };
+
+    CliErrorEnvelope {
+        error: code,
+        reason: redact_sensitive_values(&reason),
+        suggestions,
+    }
+}
+
+fn commands(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| (*value).to_string()).collect()
+}
+
+fn invalid_input_suggestions(reason: &str) -> Vec<String> {
+    if reason.contains("Unknown config key") {
+        commands(&["paperbridge config get", "paperbridge config --help"])
+    } else if reason.contains("JSON corpus export requires --json") {
+        commands(&["paperbridge paperseed corpus export --json"])
+    } else if reason.contains("--format bibtex conflicts with --json") {
+        commands(&[
+            "paperbridge paperseed corpus export --format bibtex",
+            "paperbridge paperseed corpus export --json",
+        ])
+    } else if reason.contains("search query") || reason.contains("Search query") {
+        commands(&["paperbridge papers search --help"])
+    } else {
+        commands(&["paperbridge --help"])
+    }
+}
+
+fn api_error_suggestions(status: u16) -> &'static [&'static str] {
+    match status {
+        401 | 403 => &[
+            "paperbridge config set api_key <your-key>",
+            "paperbridge config validate",
+        ],
+        404 => &[
+            "paperbridge papers search --help",
+            "paperbridge library query --help",
+        ],
+        412 => &[
+            "paperbridge library query --help",
+            "paperbridge item update --help",
+        ],
+        429 => &["paperbridge status"],
+        _ => &["paperbridge status", "paperbridge config doctor"],
+    }
+}
+
+fn redact_sensitive_values(reason: &str) -> String {
+    const SECRET_ENV_KEYS: &[&str] = &[
+        "PAPERBRIDGE_API_KEY",
+        "PAPERBRIDGE_HF_TOKEN",
+        "PAPERBRIDGE_SEMANTIC_SCHOLAR_API_KEY",
+        "PAPERBRIDGE_CORE_API_KEY",
+        "PAPERBRIDGE_ADS_API_TOKEN",
+        "PAPERBRIDGE_NCBI_API_KEY",
+        "PAPERBRIDGE_SCHOLARAPI_KEY",
+        "ZOTERO_MCP_API_KEY",
+        "HF_TOKEN",
+        "SEMANTIC_SCHOLAR_API_KEY",
+        "CORE_API_KEY",
+        "ADS_API_TOKEN",
+        "NCBI_API_KEY",
+        "SCHOLARAPI_KEY",
+    ];
+
+    let mut redacted = reason.to_string();
+    for key in SECRET_ENV_KEYS {
+        if let Ok(secret) = std::env::var(key)
+            && !secret.is_empty()
+        {
+            redacted = redacted.replace(&secret, "<redacted>");
+        }
+    }
+    redacted
+}
+
+impl OutputFormat {
+    fn new(json: bool) -> Self {
+        if json { Self::Json } else { Self::Human }
+    }
+
+    fn is_json(self) -> bool {
+        self == Self::Json
+    }
+}
+
+fn print_output<T: Serialize>(value: &T, output: OutputFormat) -> paperbridge::Result<()> {
+    if output.is_json() {
+        return print_json(value);
+    }
+
+    let value = serde_json::to_value(value)
+        .map_err(|e| paperbridge::ZoteroMcpError::Serde(e.to_string()))?;
+    print!("{}", render_human(&value));
+    Ok(())
+}
+
 fn print_json<T: Serialize>(value: &T) -> paperbridge::Result<()> {
     let json = serde_json::to_string_pretty(value)
         .map_err(|e| paperbridge::ZoteroMcpError::Serde(e.to_string()))?;
     println!("{json}");
     Ok(())
+}
+
+fn render_human(value: &serde_json::Value) -> String {
+    let mut output = String::new();
+    render_human_value(value, 0, &mut output);
+    output
+}
+
+fn render_human_value(value: &serde_json::Value, indent: usize, output: &mut String) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            if fields.is_empty() {
+                push_indented_line(output, indent, "(none)");
+                return;
+            }
+            for (key, value) in fields {
+                if is_inline_value(value) {
+                    push_indented_line(output, indent, &format!("{key}: {}", inline_value(value)));
+                } else if is_empty_collection(value) {
+                    push_indented_line(output, indent, &format!("{key}: (none)"));
+                } else {
+                    push_indented_line(output, indent, &format!("{key}:"));
+                    render_human_value(value, indent + 2, output);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            if values.is_empty() {
+                push_indented_line(output, indent, "(none)");
+                return;
+            }
+            for value in values {
+                if is_inline_value(value) {
+                    push_indented_line(output, indent, &format!("- {}", inline_value(value)));
+                } else {
+                    push_indented_line(output, indent, "-");
+                    render_human_value(value, indent + 2, output);
+                }
+            }
+        }
+        serde_json::Value::String(text) if text.contains('\n') => {
+            for line in text.lines() {
+                push_indented_line(output, indent, line);
+            }
+        }
+        _ => push_indented_line(output, indent, &inline_value(value)),
+    }
+}
+
+fn is_inline_value(value: &serde_json::Value) -> bool {
+    !matches!(
+        value,
+        serde_json::Value::Array(_) | serde_json::Value::Object(_)
+    ) && !matches!(value, serde_json::Value::String(text) if text.contains('\n'))
+}
+
+fn is_empty_collection(value: &serde_json::Value) -> bool {
+    matches!(value, serde_json::Value::Array(values) if values.is_empty())
+        || matches!(value, serde_json::Value::Object(fields) if fields.is_empty())
+}
+
+fn inline_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "(none)".to_string(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::String(value) if value.is_empty() => "(empty)".to_string(),
+        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            unreachable!("collections are rendered recursively")
+        }
+    }
+}
+
+fn push_indented_line(output: &mut String, indent: usize, line: &str) {
+    output.push_str(&" ".repeat(indent));
+    output.push_str(line);
+    output.push('\n');
 }
 
 fn print_client_snippet(target: SnippetTarget, binary_path: Option<&str>) {
@@ -1402,7 +1779,28 @@ const SENSITIVE_CONFIG_KEYS: &[&str] = &[
     "scholarapi_key",
 ];
 
-fn handle_config_get(key: Option<&str>, show_secret: bool) -> paperbridge::Result<()> {
+fn safe_config_value(config: &Config) -> paperbridge::Result<serde_json::Value> {
+    let mut value = serde_json::to_value(config)
+        .map_err(|e| paperbridge::ZoteroMcpError::Serde(e.to_string()))?;
+    let fields = value.as_object_mut().ok_or_else(|| {
+        paperbridge::ZoteroMcpError::Serde("Config did not serialize to an object".to_string())
+    })?;
+    for key in SENSITIVE_CONFIG_KEYS {
+        let status = if fields.contains_key(*key) {
+            "<set>"
+        } else {
+            "<unset>"
+        };
+        fields.insert((*key).to_string(), serde_json::Value::String(status.into()));
+    }
+    Ok(value)
+}
+
+fn handle_config_get(
+    key: Option<&str>,
+    show_secret: bool,
+    output: OutputFormat,
+) -> paperbridge::Result<()> {
     let cfg = Config::load_file_or_default()?;
     if let Some(key) = key {
         let value = cfg.get_value(key).ok_or_else(|| {
@@ -1411,21 +1809,40 @@ fn handle_config_get(key: Option<&str>, show_secret: bool) -> paperbridge::Resul
             ))
         })?;
         if SENSITIVE_CONFIG_KEYS.contains(&key) && !show_secret {
-            if value.is_empty() {
-                println!("(unset)");
+            let value = if value.is_empty() || value == "<unset>" {
+                "(unset)".to_string()
             } else {
-                println!(
+                format!(
                     "(set, {} chars — pass --show-secret to reveal)",
                     value.len()
-                );
+                )
+            };
+            if output.is_json() {
+                print_output(
+                    &serde_json::json!({"key": key, "value": value, "redacted": true}),
+                    output,
+                )?;
+            } else {
+                println!("{value}");
             }
             return Ok(());
         }
-        println!("{value}");
+        if output.is_json() {
+            print_output(
+                &serde_json::json!({"key": key, "value": value, "redacted": false}),
+                output,
+            )?;
+        } else {
+            println!("{value}");
+        }
         return Ok(());
     }
 
-    println!("{}", cfg.display_safe());
+    if output.is_json() {
+        print_output(&safe_config_value(&cfg)?, output)?;
+    } else {
+        println!("{}", cfg.display_safe());
+    }
     Ok(())
 }
 
@@ -1445,13 +1862,18 @@ async fn handle_config_resolve_user_id(
     login: &str,
     api_key_override: Option<&str>,
     api_base_override: Option<&str>,
+    output: OutputFormat,
 ) -> paperbridge::Result<()> {
     let cfg = Config::load_file_or_default()?;
     let api_base = api_base_override.unwrap_or(cfg.active_cloud_api_base());
     let api_key = api_key_override.or(cfg.api_key.as_deref());
 
     let user_id = resolve_user_id_from_login_id(login, api_base, api_key).await?;
-    println!("{user_id}");
+    if output.is_json() {
+        print_output(&serde_json::json!({"user_id": user_id}), output)?;
+    } else {
+        println!("{user_id}");
+    }
     Ok(())
 }
 
@@ -1701,5 +2123,39 @@ paperseed_auto_download = true
         assert!(!toml_mentions_key(raw, "paperseed_enabled"));
         assert!(toml_mentions_key(raw, "paperseed_auto_download"));
         assert!(toml_mentions_key(raw, "paperseed_corpus_root"));
+    }
+
+    #[test]
+    fn human_output_renders_nested_values_without_json_syntax() {
+        let value = serde_json::json!({
+            "query": "attention",
+            "hits": [{"title": "Attention Is All You Need", "year": 2017}],
+            "diagnostics": {"sources_failed": []},
+            "next_offset": null
+        });
+
+        let rendered = render_human(&value);
+        assert!(rendered.contains("query: attention\n"));
+        assert!(rendered.contains("title: Attention Is All You Need\n"));
+        assert!(rendered.contains("sources_failed: (none)\n"));
+        assert!(rendered.contains("next_offset: (none)\n"));
+        assert!(!rendered.contains(['{', '}', '[', ']']));
+    }
+
+    #[test]
+    fn human_output_preserves_multiline_text() {
+        let rendered = render_human(&serde_json::json!({"content": "line one\nline two"}));
+        assert_eq!(rendered, "content:\n  line one\n  line two\n");
+    }
+
+    #[test]
+    fn safe_config_json_redacts_secrets_and_marks_unset_values() {
+        let mut config = Config::default();
+        config.api_key = Some("super-secret".to_string());
+
+        let value = safe_config_value(&config).unwrap();
+        assert_eq!(value["api_key"], "<set>");
+        assert_eq!(value["hf_token"], "<unset>");
+        assert!(!value.to_string().contains("super-secret"));
     }
 }

@@ -38,6 +38,23 @@ paperbridge papers search -q "retrieval augmented generation" --limit 5
 paperbridge papers query --key ABCD1234 --selector "metadata.doi"
 ```
 
+Structured CLI results are human-readable by default. Add the global `--json`
+flag for scripts and agents, either before or after the command:
+
+```bash
+paperbridge --json papers search -q "retrieval augmented generation" --limit 5
+paperbridge library query -q "machine learning" --limit 3 --json
+```
+
+With `--json`, runtime failures return `{ "error", "reason", "try" }` JSON on
+stderr and a non-zero exit code. Stdout remains empty on failure, so successful
+payload pipelines are not contaminated by error output.
+
+MCP tool results remain JSON. Content-native commands such as shell
+completions, `papers skill`, BibTeX export, and client configuration snippets
+keep their native output formats. `paperseed corpus export` defaults to BibTeX;
+pass `--json` to export the corpus as JSON.
+
 For Zotero Desktop local API mode:
 
 ```bash
@@ -62,6 +79,11 @@ ID, PMID, and normalized title+author. Later pages expand the per-source fetch
 window as needed. Unconfigured key-gated sources appear in
 `diagnostics.sources_skipped`.
 
+Springer journal articles can appear through Crossref, OpenAlex, and other
+indexes, but Paperbridge does not currently expose a dedicated `springer`
+source. Publisher-hosted full text still requires an open PDF URL, a Zotero
+attachment, or a cached Paperseed copy.
+
 If `paperseed_enabled` and `paperseed_auto_download` are on, open-access PDFs
 are mirrored into the local corpus in background threads so they become
 available to all existing paper routes over time.
@@ -77,8 +99,8 @@ paperbridge library read --item-key ABCD1234
 paperbridge library read-search -q "transformers" --result-index 0
 ```
 
-- `papers {structure,query}` returns structured JSON (metadata, sections,
-  references) suitable for section-aware agents.
+- `papers {structure,query}` returns structured metadata, sections, and
+  references suitable for section-aware agents; add `--json` for JSON output.
 - `library read...` returns Vox-ready text chunks from Zotero or a cached paper.
 
 Structured parsing uses Zotero's indexed full-text by default and can optionally

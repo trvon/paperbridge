@@ -6,6 +6,10 @@
 //! consuming agent is expected to promote the scaffold into a genuine
 //! operating procedure. Keeping this deterministic preserves paperbridge's
 //! "bridge, not brain" scope.
+//!
+//! The scaffold itself is Markdown and remains content-native CLI output;
+//! `--json` controls structured command results and runtime errors, not
+//! `papers skill` output.
 
 use crate::models::{
     PaperReference, PaperSection, PaperSectionKind, PaperStructure, PaperStructureSource,

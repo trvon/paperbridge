@@ -27,6 +27,11 @@ fn top_level_help_advertises_canonical_groups() {
             "top-level --help missing canonical group '{canonical}'\n--- help ---\n{help}"
         );
     }
+
+    assert!(
+        help.contains("--json"),
+        "top-level --help must advertise JSON opt-in\n--- help ---\n{help}"
+    );
 }
 
 #[test]

@@ -8,6 +8,10 @@ use clap::{Parser, Subcommand, ValueEnum};
     about = "Paperbridge MCP + CLI for paper discovery and reading"
 )]
 pub struct Cli {
+    /// Print structured command results as JSON
+    #[arg(long, global = true)]
+    pub json: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -251,7 +255,7 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum LibraryAction {
-    /// Search items in the local Zotero library and print JSON
+    /// Search items in the local Zotero library
     Query {
         /// Quick search query
         #[arg(short = 'q', long = "query", visible_alias = "q")]
@@ -272,7 +276,7 @@ pub enum LibraryAction {
         #[arg(long, visible_alias = "start")]
         offset: Option<u32>,
     },
-    /// List Zotero collections and print JSON
+    /// List Zotero collections
     Collections {
         /// If true, list only top-level collections
         #[arg(long)]
@@ -284,7 +288,7 @@ pub enum LibraryAction {
         #[arg(long, visible_alias = "start")]
         offset: Option<u32>,
     },
-    /// Prepare one item for read-aloud and print Vox-ready JSON
+    /// Prepare one item for read-aloud and print Vox-ready chunks
     Read {
         /// Zotero item key
         #[arg(long)]
@@ -333,13 +337,13 @@ pub enum ItemAction {
         #[arg(long)]
         online: bool,
     },
-    /// Create an item from a JSON payload file and print JSON
+    /// Create an item from a JSON payload file
     Create {
         /// Path to JSON file matching ItemWriteRequest
         #[arg(long)]
         file: String,
     },
-    /// Update an item from a JSON payload file (requires key + version) and print JSON
+    /// Update an item from a JSON payload file (requires key + version)
     Update {
         /// Path to JSON file matching ItemUpdateRequest
         #[arg(long)]
@@ -355,7 +359,7 @@ pub enum ItemAction {
 
 #[derive(Debug, Subcommand)]
 pub enum CollectionAction {
-    /// Create a collection and print JSON
+    /// Create a collection
     Create {
         /// Collection name
         #[arg(long)]
@@ -364,7 +368,7 @@ pub enum CollectionAction {
         #[arg(long)]
         parent_collection: Option<String>,
     },
-    /// Update a collection from a JSON payload file and print JSON
+    /// Update a collection from a JSON payload file
     Update {
         /// Path to JSON file matching CollectionUpdateRequest
         #[arg(long)]
@@ -452,13 +456,13 @@ pub enum PapersAction {
         #[arg(long)]
         selector: Option<String>,
     },
-    /// Resolve a DOI via Crossref and print structured metadata
+    /// Resolve a DOI via Crossref
     ResolveDoi {
         /// DOI to resolve (e.g. 10.1038/nature12373)
         #[arg(long)]
         doi: String,
     },
-    /// Fetch the full PaperStructure JSON for a Zotero item or cached paper
+    /// Fetch the full paper structure for a Zotero item or cached paper
     Structure {
         /// Zotero item key or cached paper id
         #[arg(long)]
@@ -492,7 +496,7 @@ pub enum PapersAction {
 
 #[derive(Debug, Subcommand)]
 pub enum PaperAction {
-    /// Fetch the full PaperStructure JSON for a Zotero item
+    /// Fetch the full paper structure for a Zotero item
     Structure {
         /// Zotero item key
         #[arg(long)]
@@ -567,11 +571,11 @@ pub enum PaperseedCorpusAction {
         q: String,
     },
 
-    /// Export the local Paperseed corpus
+    /// Export the local Paperseed corpus (BibTeX by default; use --json for JSON)
     Export {
-        /// Export format
-        #[arg(long, value_enum, default_value_t = PaperseedExportFormat::Json)]
-        format: PaperseedExportFormat,
+        /// Export format override (JSON also requires the global --json flag)
+        #[arg(long, value_enum)]
+        format: Option<PaperseedExportFormat>,
     },
 }
 
@@ -622,9 +626,6 @@ pub enum ConfigAction {
     Validate,
     /// Diagnose config drift, risky defaults, and Paperseed corpus/P2P settings
     Doctor {
-        /// Print structured JSON diagnostics
-        #[arg(long)]
-        json: bool,
         /// Print all checks, including informational advanced/setup hints
         #[arg(long)]
         verbose: bool,
@@ -683,7 +684,32 @@ mod tests {
     #[test]
     fn parse_default_command_none() {
         let cli = Cli::try_parse_from(["paperbridge"]).unwrap();
+        assert!(!cli.json);
         assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn parse_global_json_before_or_after_subcommands() {
+        let before = Cli::try_parse_from([
+            "paperbridge",
+            "--json",
+            "papers",
+            "search",
+            "--query",
+            "attention",
+        ])
+        .unwrap();
+        let after = Cli::try_parse_from([
+            "paperbridge",
+            "papers",
+            "search",
+            "--query",
+            "attention",
+            "--json",
+        ])
+        .unwrap();
+        assert!(before.json);
+        assert!(after.json);
     }
 
     #[test]
@@ -700,13 +726,27 @@ mod tests {
     #[test]
     fn parse_config_doctor() {
         let cli = Cli::try_parse_from(["paperbridge", "config", "doctor", "--json"]).unwrap();
+        assert!(cli.json);
         assert!(matches!(
             cli.command,
             Some(Command::Config {
                 action: ConfigAction::Doctor {
-                    json: true,
                     verbose: false,
                     setup: false,
+                }
+            })
+        ));
+    }
+
+    #[test]
+    fn parse_paperseed_export_defaults_to_native_output() {
+        let cli = Cli::try_parse_from(["paperbridge", "paperseed", "corpus", "export"]).unwrap();
+        assert!(!cli.json);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Paperseed {
+                action: PaperseedAction::Corpus {
+                    action: PaperseedCorpusAction::Export { format: None }
                 }
             })
         ));

@@ -28,8 +28,10 @@ for downstream agents.
 
 - **MCP (preferred in agent contexts):** use the registered `paperbridge` MCP
   server tools directly — they mirror the CLI commands below.
-- **CLI:** `paperbridge <domain> <action>`. All data commands print JSON on
-  stdout; errors go to stderr. Pipe through `| jq` for inspection.
+- **CLI:** `paperbridge <domain> <action>`. Structured commands print readable
+  text by default; add the global `--json` flag for machine-readable JSON.
+  Runtime errors also use JSON with `--json` and always stay on stderr, so
+  stdout remains safe for automation.
 
 ## First-time setup
 
@@ -82,6 +84,12 @@ Always-on (no key): arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, Pub
 Key-gated (appear in `diagnostics.sources_skipped` when unset): HuggingFace,
 Semantic Scholar, CORE, NASA ADS, ScholarAPI.
 
+Springer journal articles are discoverable indirectly when indexed by
+Crossref, OpenAlex, or another configured index. There is no dedicated
+`springer` source adapter, and publisher-hosted full text is available only
+when an open PDF URL, Zotero attachment, or cached Paperseed copy can be
+resolved.
+
 ### Resolve a DOI
 
 ```bash
@@ -113,7 +121,8 @@ MCP tools:
 
 ### Structured paper content
 
-Returns a typed JSON structure with sections, references, and figures.
+Returns a typed structure with sections, references, and figures. Add
+`--json` to CLI calls when the structure will be consumed programmatically.
 Works with both Zotero items and cached paper IDs.
 
 ```bash
@@ -164,6 +173,9 @@ paperbridge paperseed corpus export --format bibtex
 paperbridge paperseed seed check --paper-id <id>
 paperbridge paperseed seed create --paper-id <id>
 ```
+
+`paperseed corpus export` defaults to BibTeX. Pass the global `--json` flag to
+export the corpus as JSON; `--format json` is accepted only with `--json`.
 
 Imported PDFs have their text automatically extracted and stored in the
 corpus for full-text search. YAMS provides an experimental
@@ -222,6 +234,11 @@ paperbridge config snippet --target opencode
 `paperbridge config get` masks secrets by default. Pass `--show-secret` to reveal.
 
 ## Gotchas
+
+- **CLI output is human-readable by default** — pass the global `--json` flag
+  for stable structured output (for example, `paperbridge --json papers search
+  --query "transformers"`). Runtime failures use `{ error, reason, try }` JSON
+  on stderr with a non-zero exit code. MCP tool results remain JSON.
 
 - **Cloud api_base must be HTTPS** (or `http://localhost` for local mode).
 - **`--limit` is page size** (default 10). Fan-out uses `--per-source` / MCP `limit_per_source`.
