@@ -188,6 +188,23 @@ impl PaperseedApi {
         })
     }
 
+    /// Resolve an agent-supplied identifier against the corpus without using
+    /// full-text ranking. Identifier lookup must never turn a nearby BM25 hit
+    /// into the requested paper.
+    pub fn find_cached_identity(
+        &self,
+        doi: Option<&str>,
+        arxiv_id: Option<&str>,
+        url: Option<&str>,
+    ) -> Option<IndexedPaper> {
+        let db = self.corpus_status().ok()?;
+        db.papers.into_iter().find(|entry| {
+            doi.is_some_and(|doi| entry_doi_matches(entry, doi))
+                || arxiv_id.is_some_and(|id| entry_arxiv_matches(entry, id))
+                || url.is_some_and(|url| entry_url_matches(entry, url))
+        })
+    }
+
     pub fn get_cached_paper(&self, paper_id: &str) -> Result<CachedPaperDetail> {
         let entry = paperseed::app::get_entry(&self.paths, paper_id).map_err(map_error)?;
         Ok(cached_paper_detail(entry))
@@ -233,6 +250,110 @@ fn doi_matches(entry: &IndexedPaper, hit: &PaperHit) -> bool {
         (entry.paper.metadata.doi.as_deref(), hit.doi.as_deref()),
         (Some(left), Some(right)) if left.eq_ignore_ascii_case(right)
     )
+}
+
+fn entry_doi_matches(entry: &IndexedPaper, expected: &str) -> bool {
+    entry
+        .paper
+        .metadata
+        .doi
+        .as_deref()
+        .and_then(normalize_doi)
+        .zip(normalize_doi(expected))
+        .is_some_and(|(actual, expected)| actual == expected)
+}
+
+fn entry_arxiv_matches(entry: &IndexedPaper, expected: &str) -> bool {
+    let expected = normalize_arxiv_id(expected);
+    if expected.is_empty() {
+        return false;
+    }
+    if entry
+        .paper
+        .metadata
+        .doi
+        .as_deref()
+        .and_then(normalize_doi)
+        .is_some_and(|doi| doi == format!("10.48550/arxiv.{expected}"))
+    {
+        return true;
+    }
+    entry
+        .paper
+        .metadata
+        .source_url
+        .as_deref()
+        .is_some_and(|url| arxiv_id_from_url(url).as_deref() == Some(expected.as_str()))
+}
+
+fn entry_url_matches(entry: &IndexedPaper, expected: &str) -> bool {
+    entry
+        .paper
+        .metadata
+        .source_url
+        .as_deref()
+        .and_then(canonical_url)
+        .zip(canonical_url(expected))
+        .is_some_and(|(actual, expected)| actual == expected)
+}
+
+fn normalize_doi(raw: &str) -> Option<String> {
+    let lower = raw.trim().to_ascii_lowercase();
+    let value = lower
+        .strip_prefix("https://doi.org/")
+        .or_else(|| lower.strip_prefix("http://doi.org/"))
+        .or_else(|| lower.strip_prefix("doi:"))
+        .unwrap_or(&lower)
+        .trim();
+    value.starts_with("10.").then(|| value.to_string())
+}
+
+fn normalize_arxiv_id(raw: &str) -> String {
+    let lower = raw.trim().to_ascii_lowercase();
+    let value = lower
+        .strip_prefix("https://arxiv.org/abs/")
+        .or_else(|| lower.strip_prefix("http://arxiv.org/abs/"))
+        .or_else(|| lower.strip_prefix("https://arxiv.org/pdf/"))
+        .or_else(|| lower.strip_prefix("http://arxiv.org/pdf/"))
+        .or_else(|| lower.strip_prefix("arxiv:"))
+        .unwrap_or(&lower)
+        .trim_end_matches(".pdf");
+    strip_arxiv_version(value).to_string()
+}
+
+fn strip_arxiv_version(id: &str) -> &str {
+    id.rfind('v')
+        .and_then(|index| {
+            let suffix = &id[index + 1..];
+            (!suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
+                .then_some(&id[..index])
+        })
+        .unwrap_or(id)
+}
+
+fn arxiv_id_from_url(raw: &str) -> Option<String> {
+    let parsed = url::Url::parse(raw).ok()?;
+    if !parsed.host_str()?.eq_ignore_ascii_case("arxiv.org") {
+        return None;
+    }
+    let path = parsed.path().trim_start_matches('/');
+    let id = path
+        .strip_prefix("abs/")
+        .or_else(|| path.strip_prefix("pdf/"))?;
+    Some(normalize_arxiv_id(id))
+}
+
+fn canonical_url(raw: &str) -> Option<String> {
+    let mut parsed = url::Url::parse(raw.trim()).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    parsed.set_fragment(None);
+    if parsed.path() != "/" {
+        let path = parsed.path().trim_end_matches('/').to_string();
+        parsed.set_path(&path);
+    }
+    Some(parsed.to_string())
 }
 
 fn source_url_matches(entry: &IndexedPaper, hit: &PaperHit) -> bool {
@@ -282,5 +403,75 @@ pub fn map_error(error: paperseed::PaperseedError) -> ZoteroMcpError {
                 "Paperseed policy blocked this action: {reason}\nTry:\n  paperseed corpus import <file> --license cc-by\n  paperseed seed check --paper-id <id>"
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ingest(
+        api: &PaperseedApi,
+        dir: &Path,
+        name: &str,
+        doi: &str,
+        source_url: &str,
+    ) -> LocalPaper {
+        let path = dir.join(name);
+        std::fs::write(&path, format!("full text for {name}")).unwrap();
+        api.ingest_with_metadata(
+            &path,
+            PaperbridgeMetadata {
+                title: Some(name.to_string()),
+                doi: Some(doi.to_string()),
+                authors: vec!["Test Author".into()],
+                year: Some(2024),
+                venue: None,
+                license: Some("cc-by".into()),
+                source_url: Some(source_url.to_string()),
+            },
+            Some("cc-by".into()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn cached_identity_requires_exact_doi_not_shared_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let api = PaperseedApi::with_yams(dir.path().join("corpus"), None, YamsConfig::disabled());
+        ingest(
+            &api,
+            dir.path(),
+            "ability.txt",
+            "10.14722/futureg.2025.23099",
+            "https://example.test/ability.pdf",
+        );
+
+        assert!(
+            api.find_cached_identity(Some("10.14722/ndss.2023.23080"), None, None)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn cached_identity_canonicalizes_exact_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let api = PaperseedApi::with_yams(dir.path().join("corpus"), None, YamsConfig::disabled());
+        let paper = ingest(
+            &api,
+            dir.path(),
+            "hypervision.txt",
+            "10.14722/ndss.2023.23080",
+            "https://www.ndss-symposium.org/paper.pdf",
+        );
+
+        let found = api
+            .find_cached_identity(
+                None,
+                None,
+                Some("https://www.ndss-symposium.org/paper.pdf#page=2"),
+            )
+            .unwrap();
+        assert_eq!(found.paper.metadata.id, paper.metadata.id);
     }
 }

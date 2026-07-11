@@ -366,19 +366,9 @@ impl PaperbridgeService {
                 })?;
             return self.get_pdf_text(&att.key).await;
         }
-        // Cache query by DOI / arXiv / title-ish id
-        for q in [
-            resolved.doi.as_deref(),
-            resolved.arxiv_id.as_deref(),
-            resolved.paper_id.as_deref(),
-            resolved.url.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if let Some(ft) = self.try_cached_fulltext_by_query(q)? {
-                return Ok(ft);
-            }
+        if let Some((paper_id, fulltext)) = self.try_cached_fulltext_by_identity(resolved)? {
+            resolved.paper_id = Some(paper_id);
+            return Ok(fulltext);
         }
 
         // Agent path: await OA mirror when possible instead of racing background threads.
@@ -387,22 +377,11 @@ impl PaperbridgeService {
             if let Err(e) = mirror_open_access_hit(api, &hit, MirrorMode::Awaited).await {
                 debug!("open_paper OA mirror failed: {e}");
             } else {
-                // Prefer newly cached paper_id if annotate can find it.
-                if let Some(entry) = api.find_cached_hit(&hit) {
-                    resolved.paper_id = Some(entry.paper.metadata.id.clone());
-                }
-                for q in [
-                    resolved.doi.as_deref(),
-                    resolved.arxiv_id.as_deref(),
-                    resolved.paper_id.as_deref(),
-                    resolved.url.as_deref(),
-                ]
-                .into_iter()
-                .flatten()
+                if let Some((paper_id, fulltext)) =
+                    self.try_cached_fulltext_by_identity(resolved)?
                 {
-                    if let Some(ft) = self.try_cached_fulltext_by_query(q)? {
-                        return Ok(ft);
-                    }
+                    resolved.paper_id = Some(paper_id);
+                    return Ok(fulltext);
                 }
             }
         }
@@ -432,18 +411,11 @@ impl PaperbridgeService {
             return Ok(structure);
         }
 
-        for query in [
-            resolved.doi.as_deref(),
-            resolved.arxiv_id.as_deref(),
-            resolved.url.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
+        if let Some((paper_id, structure)) =
+            self.try_cached_paper_structure_by_identity(resolved)?
         {
-            if let Some((paper_id, structure)) = self.try_cached_paper_structure_by_query(query)? {
-                resolved.paper_id = Some(paper_id);
-                return Ok(structure);
-            }
+            resolved.paper_id = Some(paper_id);
+            return Ok(structure);
         }
 
         let fulltext =
@@ -1245,6 +1217,29 @@ impl PaperbridgeService {
         }
     }
 
+    fn try_cached_fulltext_by_identity(
+        &self,
+        resolved: &OpenResolved,
+    ) -> Result<Option<(String, FulltextContent)>> {
+        let Some(api) = &self.paperseed else {
+            return Ok(None);
+        };
+        let Some(entry) = api.find_cached_identity(
+            resolved.doi.as_deref(),
+            resolved.arxiv_id.as_deref(),
+            resolved.url.as_deref(),
+        ) else {
+            return Ok(None);
+        };
+        let paper_id = entry.paper.metadata.id;
+        Ok(self
+            .try_cached_fulltext(&paper_id)?
+            .map(|fulltext| (paper_id, fulltext)))
+    }
+
+    /// Compatibility fallback for legacy read commands that explicitly treat
+    /// their key argument as a natural-language cache query. `open_paper`
+    /// intentionally does not use this path for identifiers.
     fn try_cached_fulltext_by_query(&self, query: &str) -> Result<Option<FulltextContent>> {
         let Some(api) = &self.paperseed else {
             return Ok(None);
@@ -1285,24 +1280,21 @@ impl PaperbridgeService {
         Ok(Some(cached_paper_structure(&paper, &fulltext)))
     }
 
-    fn try_cached_paper_structure_by_query(
+    fn try_cached_paper_structure_by_identity(
         &self,
-        query: &str,
+        resolved: &OpenResolved,
     ) -> Result<Option<(String, PaperStructure)>> {
         let Some(api) = &self.paperseed else {
             return Ok(None);
         };
-        let hits = match api.search_cached_papers(query, 1) {
-            Ok(hits) => hits,
-            Err(_) => return Ok(None),
-        };
-        let Some(paper_id) = hits
-            .first()
-            .and_then(|hit| hit.cache.as_ref())
-            .map(|cache| cache.paper_id.clone())
-        else {
+        let Some(entry) = api.find_cached_identity(
+            resolved.doi.as_deref(),
+            resolved.arxiv_id.as_deref(),
+            resolved.url.as_deref(),
+        ) else {
             return Ok(None);
         };
+        let paper_id = entry.paper.metadata.id;
         Ok(self
             .try_cached_paper_structure(&paper_id)?
             .map(|structure| (paper_id, structure)))
@@ -3506,6 +3498,81 @@ mod tests {
         assert_eq!(
             value["resolved"]["url"].as_str(),
             Some(format!("{}/paper.pdf", server.uri()).as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn open_url_does_not_accept_unrelated_cached_search_result() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let fixture = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("crates/paperseed/tests/fixtures/arxiv_1408_5939_planar_subgraphs.pdf"),
+        )
+        .unwrap();
+        Mock::given(method("GET"))
+            .and(path("/paper.pdf"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(fixture))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let corpus_root = dir.path().join("corpus");
+        let api =
+            PaperseedApi::with_yams(&corpus_root, None, paperseed::yams::YamsConfig::disabled());
+        let wrong = dir.path().join("paper-pdf.txt");
+        std::fs::write(&wrong, "wrong cached document").unwrap();
+        let wrong_paper = api
+            .ingest_with_metadata(
+                &wrong,
+                paperseed::sources::PaperbridgeMetadata {
+                    title: Some("Paper PDF Download".into()),
+                    doi: Some("10.6028/NIST.AI.100-2e2023".into()),
+                    authors: vec!["NIST".into()],
+                    year: Some(2024),
+                    venue: None,
+                    license: Some("cc-by".into()),
+                    source_url: Some("https://example.test/unrelated.pdf".into()),
+                },
+                Some("cc-by".into()),
+            )
+            .unwrap();
+
+        let service = PaperbridgeService::new(Arc::new(StubLocalReadOnlyBackend)).with_paperseed(
+            PaperseedMirrorConfig {
+                corpus_root: Some(corpus_root.display().to_string()),
+                unpaywall_email: None,
+                auto_download: false,
+                yams_enabled: false,
+            },
+        );
+        let value = service
+            .open_paper(OpenPaperRequest {
+                hit_id: Some(format!("url:{}/paper.pdf", server.uri())),
+                doi: None,
+                arxiv_id: None,
+                item_key: None,
+                paper_id: None,
+                attachment_key: None,
+                url: None,
+                want: vec!["fulltext".into()],
+                max_chars: Some(2_000),
+                selector: None,
+                max_chars_per_chunk: None,
+            })
+            .await
+            .unwrap();
+
+        assert_ne!(
+            value["fulltext"]["content"].as_str(),
+            Some("wrong cached document")
+        );
+        assert_ne!(
+            value["resolved"]["paper_id"].as_str(),
+            Some(wrong_paper.metadata.id.as_str())
         );
     }
 
