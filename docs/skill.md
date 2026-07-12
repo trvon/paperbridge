@@ -1,6 +1,6 @@
 ---
 name: paperbridge
-description: Use when a task involves Zotero (search, collections, items, PDFs, full-text), DOI/Crossref resolution, searching external paper sources (arXiv, HuggingFace Papers, Semantic Scholar, OpenAlex, etc.), or retrieving locally cached papers from the Paperseed corpus. Provides both a CLI (`paperbridge ...`) and an MCP server (`paperbridge serve`). Prefer MCP tools when available; fall back to CLI invocation otherwise.
+description: Use when a task involves Zotero (search, collections, items, PDFs, full-text), DOI/Crossref resolution, searching the YAMS research workspace or external paper sources, or retrieving locally cached papers from the Paperseed corpus. Provides both a CLI (`paperbridge ...`) and an MCP server (`paperbridge serve`). Prefer MCP tools when available; fall back to CLI invocation otherwise.
 ---
 
 # paperbridge
@@ -18,7 +18,7 @@ for downstream agents.
 
 - Search a Zotero library or browse collections, tags, attachments.
 - Resolve a DOI to structured metadata (title, authors, year, journal, abstract).
-- Search external paper indexes: arXiv, Crossref, OpenAlex, Europe PMC, DBLP,
+- Search the local YAMS research workspace and external paper indexes: arXiv, Crossref, OpenAlex, Europe PMC, DBLP,
   OpenReview, PubMed, HuggingFace Papers, Semantic Scholar, CORE, NASA ADS, ScholarAPI.
 - Retrieve full-text or structured content from a Zotero attachment or a cached paper.
 - Validate, create, update, or delete Zotero items and collections.
@@ -57,6 +57,7 @@ paperbridge library query --query "diffusion models" --limit 10
 paperbridge papers search --query "intrusion detection" --per-source 3 --limit 10
 paperbridge papers search --query "attention is all you need" --sources arxiv,openalex
 paperbridge papers search --query "attention is all you need" --sources paperseed  # cache only
+paperbridge papers search --query "What drives detection in GNN" --sources research
 paperbridge papers search --query "transformers" --limit 5 --offset 10 --detail full
 
 # Open a hit after search (await-friendly path)
@@ -76,7 +77,7 @@ MCP tools:
 - `open_paper { hit_id?|doi?|arxiv_id?|item_key?|paper_id?|attachment_key?|url?, want?, max_chars? }`
 - `search_items` / `list_collections` → paginated envelopes (`hits`, not bare arrays)
 
-Canonical source wire names: `arxiv`, `paperseed`, `crossref`, `openalex`,
+Canonical source wire names: `research`, `arxiv`, `paperseed`, `crossref`, `openalex`,
 `europe_pmc`, `dblp`, `openreview`, `pubmed`, `hugging_face`,
 `semantic_scholar`, `core`, `ads`, `scholarapi` (aliases still accepted).
 
@@ -103,6 +104,7 @@ When `unpaywall_email` is configured, the response includes `oa_pdf_url`.
 ```bash
 # After search: open by hit_id / DOI / arXiv / Zotero key
 paperbridge papers open --hit-id "arxiv:1706.03762" --want fulltext --max-chars 8000
+paperbridge papers open --hit-id "research:<yams-hash>" --want structure --max-chars 30000
 paperbridge papers open --item-key ABCD1234 --want structure
 paperbridge papers structure --key ABCD1234
 
@@ -178,8 +180,18 @@ paperbridge paperseed seed create --paper-id <id>
 export the corpus as JSON; `--format json` is accepted only with `--json`.
 
 Imported PDFs have their text automatically extracted and stored in the
-corpus for full-text search. YAMS provides an experimental
-storage/search backend when `paperseed_yams_enabled = true`.
+corpus for full-text search. When `paperseed_yams_enabled = true`, imports and
+OA mirrors are synchronously added to YAMS with authoritative title, DOI,
+authors, venue, and source metadata. The returned hash is persisted as
+`yams_hash`; search cache summaries expose `yams_indexed`.
+
+The `research` source searches global YAMS documents under research paper
+projects independently of the Paperseed database. Related PDF/TeX fragments
+are collapsed into one paper hit with a stable `research:<hash>` ID. Opening
+that hit assembles readable abstract, introduction, design, evaluation/results,
+related-work, conclusion, and appendix blobs when available. Inspect
+`access.content_state`: `ready` is openable; `stale` means YAMS retained search
+metadata but neither its content blob nor the original file is readable.
 
 **OA auto-mirroring & DOI resolution.** With `paperseed_auto_download = true`,
 search hits are mirrored into the corpus. Hits that already carry an open-access
@@ -246,6 +258,7 @@ paperbridge config snippet --target opencode
 - **Search results are paginated** — use `offset`/`limit`; check `has_more` / `next_offset`. Later pages expand the per-source fetch window automatically, up to a safe window of 200.
 - **Key-gated sources skip loudly** — see `diagnostics.sources_skipped` / `sources_failed`.
 - **Cached papers are conservative by default**: default cache-only hits need strong relevance, and `--sources` without `paperseed` excludes cache hits. Use `--sources paperseed` for explicit cache-only search.
+- **Research hits report availability**: use `--sources research` for YAMS-only discovery. Do not attempt to open hits with `access.content_state: stale` until the source is re-indexed.
 - **PDF text extraction** happens automatically during local corpus import — no separate step needed.
 - **Fulltext can be large** — prefer `open_paper` with `max_chars` (default 8000) or structure selectors. Vox tools use `--max-chars-per-chunk`.
 - **Write operations need `version` on update/delete** (Zotero optimistic concurrency). Re-fetch if you get HTTP 412.

@@ -63,7 +63,7 @@ paperbridge config set backend_mode local
 
 ## Paper search & discovery
 
-Search across arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed,
+Search the local YAMS research workspace plus arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed,
 HuggingFace Papers, Semantic Scholar, CORE, NASA ADS, and ScholarAPI in parallel.
 Local cached results from Paperseed are used conservatively: cached duplicates are annotated/preferred, and cache-only hits surface only for strong matches unless you explicitly include `paperseed`.
 
@@ -71,6 +71,7 @@ Local cached results from Paperseed are used conservatively: cached duplicates a
 paperbridge papers search --query "intrusion detection" --per-source 3 --limit 10
 paperbridge papers search -q "attention is all you need" --sources arxiv,semantic_scholar
 paperbridge papers search -q "attention is all you need" --sources paperseed  # cache only
+paperbridge papers search -q "What drives detection in GNN" --sources research
 paperbridge papers resolve-doi --doi 10.1038/nature12373
 ```
 
@@ -143,9 +144,12 @@ allowed.
 
 ### YAMS experimental backend
 
-When `paperseed_yams_enabled = true` and the `yams` binary is available, Paperseed
-uses YAMS for storage, full-text indexing, and semantic search. If YAMS is
-unavailable, the system falls back to the local JSON corpus automatically.
+When `paperseed_yams_enabled = true` and the `yams` binary is available,
+Paperseed uses verified, synchronous YAMS indexing for imports and OA mirrors
+and stores the resulting `yams_hash`. `papers search --sources research` also
+searches off-disk YAMS paper projects, collapses project fragments, and reports
+`access.content_state` as `ready` or `stale`. If YAMS is unavailable, the system
+falls back to the local JSON corpus automatically.
 
 ```toml
 paperseed_enabled = false

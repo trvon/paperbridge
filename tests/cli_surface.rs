@@ -174,6 +174,17 @@ fn canonical_subtree_help_lists_actions() {
 
 #[test]
 fn papers_search_sources_validated_at_parse_time() {
+    Cli::try_parse_from([
+        "paperbridge",
+        "papers",
+        "search",
+        "--q",
+        "x",
+        "--sources",
+        "research,yams",
+    ])
+    .expect("research and yams source names must parse");
+
     let err = Cli::try_parse_from([
         "paperbridge",
         "papers",

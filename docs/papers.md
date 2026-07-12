@@ -22,11 +22,20 @@ When `unpaywall_email` is configured, `paperbridge papers resolve-doi` enriches 
 
 Search across arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed, HuggingFace Papers, Semantic Scholar, CORE, NASA ADS, and ScholarAPI in one call. Sources run in parallel; failures and timeouts per source are non-fatal and log only at `debug` level.
 
+Springer journal articles are covered indirectly through general scholarly
+indexes such as Crossref and OpenAlex. There is no dedicated `springer` value
+for `--sources`, and Springer-hosted full text is not guaranteed unless an open
+PDF, Zotero attachment, or Paperseed copy is available.
+
+CLI results are human-readable by default. Add the global `--json` flag for
+machine-readable output, for example `paperbridge --json papers search ...`.
+
 ```bash
 paperbridge papers search -q "vision transformers" --limit 5
 paperbridge papers search "vision transformers" --limit 5
 paperbridge papers search -q "attention is all you need" --sources arxiv,openalex,semantic_scholar
 paperbridge papers search -q "attention is all you need" --sources paperseed
+paperbridge papers search -q "What drives detection in GNN" --sources research
 paperbridge papers search -q "CRISPR Cas9" --sources europe_pmc,pubmed
 paperbridge papers search -q "graph neural networks" --sources dblp,openreview
 ```
@@ -35,7 +44,15 @@ paperbridge papers search -q "graph neural networks" --sources dblp,openreview
 
 Cache behavior: by default cache-only hits surface only for strong matches, while duplicate cached copies are annotated/preferred. `--sources paperseed` searches only the local cache; adding `paperseed` alongside live sources intentionally blends cache hits; `--cache off` disables cache lookup.
 
-Source values for `--sources`: `arxiv`, `paperseed`, `crossref`, `openalex` (alias `oa`), `europe_pmc` (alias `epmc`), `dblp`, `openreview` (alias `or`), `pubmed` (alias `pm`), `hugging_face` (alias `hf`), `semantic_scholar` (alias `s2`), `core`, `ads` (alias `nasa_ads`), `scholarapi` (aliases `scholar`, `scholar_api`, `scolarapi`).
+Source values for `--sources`: `research` (alias `yams`), `arxiv`, `paperseed`, `crossref`, `openalex` (alias `oa`), `europe_pmc` (alias `epmc`), `dblp`, `openreview` (alias `or`), `pubmed` (alias `pm`), `hugging_face` (alias `hf`), `semantic_scholar` (alias `s2`), `core`, `ads` (alias `nasa_ads`), `scholarapi` (aliases `scholar`, `scholar_api`, `scolarapi`).
+
+`research` searches paper projects in global YAMS memory, including source
+files whose original working-tree path is no longer on disk. Paper fragments
+are grouped into one hit; `access.content_state=ready` means `open_paper` can
+assemble readable source sections, while `stale` means only index metadata
+survives and the document must be re-indexed. Paperseed imports and OA mirrors
+use synchronous verified YAMS adds and persist `yams_hash`; cache summaries
+expose `yams_indexed`.
 
 Results are deduplicated by DOI → arXiv ID → PMID → normalized title+first-author.
 

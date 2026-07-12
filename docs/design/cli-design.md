@@ -55,8 +55,8 @@ narrow subtrees over adding more flags to a crowded root command.
   intents.
 - Retrieval answers "what exists?" (`library query`, `papers search`).
 - Disambiguate by noun when the verb is the same: `library query` returns
-  items already in the Zotero library; `papers search` hits external
-  indexes (arXiv, HuggingFace Papers, Semantic Scholar, Crossref).
+  items already in the Zotero library; `papers search` hits the YAMS research
+  workspace, external indexes, and the optional Paperseed cache.
 - Help text must explain the difference directly and briefly.
 
 ### 4. Help teaches the graph, not compensates for it
@@ -97,6 +97,9 @@ Rules:
   `config init`, or `--help`.
 - If valid candidates are known (collection keys, item keys, backend
   modes), print them.
+- With global `--json`, runtime failures emit a stable
+  `{ "error", "reason", "try" }` envelope on stderr and exit non-zero. Stdout
+  remains empty. Argument-parser failures remain Clap-native.
 
 ### 6. Validate at parse time when possible
 
@@ -124,13 +127,18 @@ convenience layer over an explicit non-interactive contract
 
 ### 8. Machine-readable output is stable and complete
 
-- JSON output (the default for data-returning commands like `library
-  query`, `library read`, `papers search`, `item create`) exposes
-  identifiers and state needed for follow-up automation.
+- Data-returning commands default to readable human output. The global
+  `--json` flag opts into stable machine-readable output and may appear before
+  or after nested subcommands.
+- JSON output exposes identifiers and state needed for follow-up automation.
 - Canonical IDs (Zotero item keys, collection keys, DOIs) are always
   present; display names alone are not enough.
 - If human output distinguishes local vs. remote, active vs. inactive, or
   cloud vs. local backend, JSON exposes that state explicitly.
+- Content-native outputs (shell completions, SKILL.md scaffolds, explicit
+  BibTeX exports, and client snippets) retain their requested format.
+- Runtime errors follow the same output selection: readable text by default,
+  structured JSON on stderr with `--json`.
 
 ### 9. Derive metadata from the real command graph
 
@@ -251,14 +259,13 @@ not blockers for this refactor.
 | 5. Guiding errors | 🟡 Partial | `try: ...` hints added in this refactor; further audit due in 0.3.x. |
 | 6. Parse-time validation | ✅ `--sources` promoted to `Vec<PaperSource>`. | |
 | 7. Non-interactive first-class | ✅ | All `config init` actions have non-interactive defaults. |
-| 8. JSON output complete | 🟡 Present for data commands; no explicit `--json` flag on diagnostic commands (`status`, `config validate`). | Follow-up: add `--json` to diagnostics. |
+| 8. JSON output complete | ✅ Human-readable by default; global `--json` covers structured data and diagnostics. | Native-format generators remain explicit exceptions. |
 | 9. Derive metadata from clap | ✅ | Completions via `CommandFactory`; no hand-maintained taxonomy. |
 | 10. Verify built surface | ✅ | `tests/cli_surface.rs` added. |
 | 11. Deliberate back-compat | ✅ | Legacy aliases time-bounded to 0.4.0. |
 
 ## Follow-ups (not in this refactor)
 
-- Add `--json` to `status` and `config validate` for machine consumers.
 - Build `paperbridge internal dump-graph` that emits a JSON description of
   the clap command tree for external doc generators.
 - Remove hidden legacy aliases in 0.4.0 (CHANGELOG entry required).

@@ -6,7 +6,10 @@
 
 * **agent interface:** compact paginated search envelopes with `hit_id`, `match`, `access`, `next`, and multi-source `diagnostics`
 * **agent interface:** `open_paper` MCP tool + `papers open` CLI for discover→read by hit_id/DOI/arXiv/item/paper id
+* **research:** first-class YAMS discovery with grouped paper projects, stable `research:` IDs, availability state, and off-disk TeX opening
+* **paperseed:** synchronous verified YAMS indexing with persisted content hashes for imports and OA mirrors
 * **search:** arXiv title/id query adapters; Crossref bibliographic query for multi-word titles
+* **search:** DOI-first resolution, conversational GNN query expansion, and query-coverage ranking
 * **search:** later offset pages expand the source prefix; URL-only hits now carry openable `url:` IDs
 * **open:** fresh DOI/arXiv/URL hits can produce fulltext or structure without enabling Paperseed
 * **skill:** `prepare_paper_for_skill` / `papers skill` scaffold from paper structure
@@ -14,11 +17,17 @@
 
 ### Breaking changes (agent/CLI consumers)
 
+* CLI data output is human-readable by default; pass the global `--json` flag for structured success and runtime-error envelopes
 * Library `search_items` / `list_collections` / `library query|collections` return envelopes (`hits`, `has_more`, …), not bare arrays
 * `papers search --limit` is **page size** (default 10); use `--per-source` for fan-out
 * Search defaults to **compact** hits (no full abstracts); pass `--detail full` / `detail: "full"` for abstracts
 * Source wire names: `openalex`, `openreview`, `scholarapi` (old snake_case aliases still deserialize)
 * Unbounded search (`limit=0` meaning “all”) removed — page size defaults to 10 (max 50)
+
+### Bug Fixes
+
+* **open:** require exact DOI, arXiv, or canonical URL identity before reusing cached content
+* **yams:** pass the JSON flag in the supported position, parse current result envelopes, and verify content before storing an index hash
 
 ### Security
 

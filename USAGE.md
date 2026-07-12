@@ -45,6 +45,13 @@ paperbridge config validate
 paperbridge query -q "machine learning" --limit 3
 ```
 
+CLI output is readable text by default. Put the global `--json` flag before
+the command when a script or agent needs the stable JSON envelope:
+
+```bash
+paperbridge --json library query -q "machine learning" --limit 3
+```
+
 4. Prepare read-aloud chunks:
 
 ```bash
@@ -126,6 +133,18 @@ paperbridge papers structure --key ITEMA
 paperbridge papers query --key ITEMA --selector "sections[0].heading"
 paperbridge backend-info
 ```
+
+Search the off-disk YAMS research workspace and open the selected paper in a
+second call:
+
+```bash
+paperbridge papers search -q "What drives detection in GNN" --sources research
+paperbridge papers open --hit-id "research:<yams-hash>" --want structure --max-chars 30000
+```
+
+`research` (alias `yams`) groups files from one paper project into a stable
+hit. `access.content_state=ready` means the hit is openable from YAMS;
+`stale` means the indexed content needs to be restored or re-indexed.
 
 Structured-paper output is powered by GROBID (optional, with Docker auto-spawn) and falls back to Zotero's stored full text. See [docs/structured-paper.md](docs/structured-paper.md) for configuration, precedence, timing, and troubleshooting.
 

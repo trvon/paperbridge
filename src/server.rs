@@ -71,7 +71,7 @@ pub struct ListCollectionsParams {
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct OpenPaperParams {
     #[schemars(
-        description = "Stable hit_id from search_papers (arxiv:…, doi:…, paperseed:…, url:…)"
+        description = "Stable hit_id from search_papers (research:…, arxiv:…, doi:…, paperseed:…, url:…)"
     )]
     pub hit_id: Option<String>,
 
@@ -278,7 +278,7 @@ pub struct SearchPapersParams {
     pub limit_per_source: Option<u32>,
 
     #[schemars(
-        description = "Optional scoping to specific sources; defaults to all enabled sources. Canonical names: arxiv, paperseed, crossref, openalex, europe_pmc, dblp, openreview, pubmed, hugging_face, semantic_scholar, core, ads, scholarapi"
+        description = "Optional scoping to specific sources; defaults to all enabled sources. Canonical names: research, arxiv, paperseed, crossref, openalex, europe_pmc, dblp, openreview, pubmed, hugging_face, semantic_scholar, core, ads, scholarapi"
     )]
     pub sources: Option<Vec<PaperSource>>,
 
@@ -696,7 +696,7 @@ impl PaperbridgeServer {
 
     #[tool(
         name = "search_papers",
-        description = "Search external paper sources and optional Paperseed cache. Returns compact hits by default with hit_id, match, access, next, diagnostics, has_more. Use detail=full for abstracts. Page with limit (default 10) + offset; use limit_per_source for fan-out."
+        description = "Search the YAMS research workspace, Paperseed cache, and external paper sources. Returns compact hits by default with hit_id, match, access/content_state, next, diagnostics, has_more. Use detail=full for abstracts. Page with limit (default 10) + offset; use limit_per_source for fan-out."
     )]
     async fn search_papers(
         &self,
@@ -735,7 +735,7 @@ impl PaperbridgeServer {
 
     #[tool(
         name = "open_paper",
-        description = "Open a paper by hit_id, DOI, arXiv id, Zotero item_key, paperseed paper_id, attachment_key, or HTTP(S) URL. want: metadata|fulltext|structure|chunks. Fulltext is truncated (default max_chars=8000). Prefer this after search_papers."
+        description = "Open a paper by hit_id (including research: YAMS hashes), DOI, arXiv id, Zotero item_key, paperseed paper_id, attachment_key, or HTTP(S) URL. want: metadata|fulltext|structure|chunks. Fulltext is truncated (default max_chars=8000). Prefer this after search_papers."
     )]
     async fn open_paper(
         &self,
@@ -866,6 +866,7 @@ mod tests {
         );
         assert!(SKILL_MD.contains("paperbridge library query"));
         assert!(SKILL_MD.contains("paperbridge papers search"));
+        assert!(SKILL_MD.contains("--sources research"));
     }
 
     #[test]
@@ -896,7 +897,7 @@ mod tests {
         let json = serde_json::json!({
             "query": "q",
             "limit_per_source": 3,
-            "sources": ["arxiv", "crossref"],
+            "sources": ["research", "arxiv", "crossref"],
             "timeout_ms": 5000
         });
         let params: SearchPapersParams = serde_json::from_value(json).unwrap();
@@ -904,7 +905,11 @@ mod tests {
         assert_eq!(params.timeout_ms, Some(5000));
         assert_eq!(
             params.sources,
-            Some(vec![PaperSource::Arxiv, PaperSource::Crossref])
+            Some(vec![
+                PaperSource::Research,
+                PaperSource::Arxiv,
+                PaperSource::Crossref,
+            ])
         );
     }
 

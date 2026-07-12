@@ -384,7 +384,7 @@ pub enum CollectionAction {
 
 #[derive(Debug, Subcommand)]
 pub enum PapersAction {
-    /// Search external paper indexes (arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed, HuggingFace Papers, Semantic Scholar, CORE, NASA ADS, ScholarAPI)
+    /// Search the YAMS research workspace, Paperseed cache, and external paper indexes
     Search {
         /// Free-text search query
         #[arg(
@@ -407,7 +407,7 @@ pub enum PapersAction {
         /// Per-source timeout in milliseconds (default 8000)
         #[arg(long)]
         timeout_ms: Option<u64>,
-        /// Local cache behavior (default auto; --sources paperseed implies only)
+        /// Local Paperseed cache behavior (default auto; --sources paperseed implies only)
         #[arg(long, value_enum)]
         cache: Option<SearchCacheMode>,
         /// Zero-based pagination offset (default 0)
@@ -423,9 +423,9 @@ pub enum PapersAction {
         #[arg(long)]
         abstract_max_chars: Option<usize>,
     },
-    /// Open a paper by hit_id / DOI / arXiv / Zotero key / cache id
+    /// Open a paper by hit_id / DOI / arXiv / research hash / Zotero key / cache id
     Open {
-        /// hit_id from papers search (arxiv:…, doi:…, paperseed:…, url:…)
+        /// hit_id from papers search (research:…, arxiv:…, doi:…, paperseed:…, url:…)
         #[arg(long)]
         hit_id: Option<String>,
         /// DOI
