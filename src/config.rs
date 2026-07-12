@@ -725,6 +725,18 @@ paperseed_corpus_root = {}",
                 "PAPERBRIDGE_UPDATE_CHECK" => {
                     self.update_check_enabled = parse_bool_env(key, value)?;
                 }
+                "PAPERBRIDGE_PAPERSEED_ENABLED" => {
+                    self.paperseed_enabled = parse_bool_env(key, value)?;
+                }
+                "PAPERBRIDGE_PAPERSEED_AUTO_DOWNLOAD" => {
+                    self.paperseed_auto_download = parse_bool_env(key, value)?;
+                }
+                "PAPERBRIDGE_PAPERSEED_YAMS_ENABLED" => {
+                    self.paperseed_yams_enabled = parse_bool_env(key, value)?;
+                }
+                "PAPERBRIDGE_PAPERSEED_CORPUS_ROOT" => {
+                    self.paperseed_corpus_root = optional_string(value);
+                }
                 _ => {}
             }
         }
@@ -877,6 +889,9 @@ mod tests {
             ("PAPERBRIDGE_LIBRARY_TYPE", "group"),
             ("PAPERBRIDGE_GROUP_ID", "777"),
             ("PAPERBRIDGE_TIMEOUT_SECS", "60"),
+            ("PAPERBRIDGE_PAPERSEED_ENABLED", "true"),
+            ("PAPERBRIDGE_PAPERSEED_YAMS_ENABLED", "false"),
+            ("PAPERBRIDGE_PAPERSEED_CORPUS_ROOT", "/tmp/research-corpus"),
         ])
         .unwrap();
 
@@ -884,6 +899,12 @@ mod tests {
         assert_eq!(cfg.library_type, LibraryType::Group);
         assert_eq!(cfg.group_id, Some(777));
         assert_eq!(cfg.timeout_secs, 60);
+        assert!(cfg.paperseed_enabled);
+        assert!(!cfg.paperseed_yams_enabled);
+        assert_eq!(
+            cfg.paperseed_corpus_root.as_deref(),
+            Some("/tmp/research-corpus")
+        );
     }
 
     #[test]

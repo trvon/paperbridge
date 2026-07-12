@@ -71,6 +71,20 @@ fn split_fulltext_sections(content: &str) -> Vec<PaperSection> {
             continue;
         }
 
+        if let Some((heading, kind, remainder)) = classify_latex_heading(line) {
+            flush_section(&mut sections, &mut current);
+            current = Some((heading, kind, Vec::new()));
+            if !remainder.is_empty()
+                && let Some((_, _, lines)) = current.as_mut()
+            {
+                lines.push(remainder);
+            }
+            continue;
+        }
+        if line == "\\end{abstract}" {
+            continue;
+        }
+
         if matches!(
             current.as_ref().map(|(_, kind, _)| kind),
             Some(PaperSectionKind::References)
@@ -116,6 +130,38 @@ fn split_fulltext_sections(content: &str) -> Vec<PaperSection> {
     }
 
     sections
+}
+
+fn classify_latex_heading(line: &str) -> Option<(String, PaperSectionKind, String)> {
+    if let Some(rest) = line.strip_prefix("\\begin{abstract}") {
+        return Some((
+            "Abstract".into(),
+            PaperSectionKind::Abstract,
+            rest.replace("\\end{abstract}", "").trim().to_string(),
+        ));
+    }
+    for command in ["section", "subsection", "subsubsection"] {
+        let prefix = format!("\\{command}{{");
+        let Some(rest) = line.strip_prefix(&prefix) else {
+            continue;
+        };
+        let end = rest.find('}')?;
+        let heading = rest[..end].trim();
+        let (_, kind) = classify_heading(heading)?;
+        let remainder = strip_latex_label(rest[end + 1..].trim());
+        return Some((canonical_heading(&kind, heading), kind, remainder));
+    }
+    None
+}
+
+fn strip_latex_label(text: &str) -> String {
+    let text = text.trim();
+    if let Some(rest) = text.strip_prefix("\\label{")
+        && let Some(end) = rest.find('}')
+    {
+        return rest[end + 1..].trim().to_string();
+    }
+    text.to_string()
 }
 
 fn flush_section(
@@ -541,5 +587,23 @@ Encerramento.
             structure.sections[4].kind,
             Some(PaperSectionKind::References)
         );
+    }
+
+    #[test]
+    fn fallback_recognizes_latex_abstract_and_sections() {
+        let sections = build_sections(
+            None,
+            "\\begin{abstract}Graph detector summary.\\end{abstract}\n\\section{Introduction} \\label{sec:intro}\nContext.\n\\section{Evaluation}\nAUC was 0.92.",
+        );
+
+        assert_eq!(
+            sections
+                .iter()
+                .map(|section| section.heading.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Abstract", "Introduction", "Evaluation"]
+        );
+        assert_eq!(sections[0].text, "Graph detector summary.");
+        assert!(sections[2].text.contains("AUC was 0.92"));
     }
 }

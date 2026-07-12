@@ -1,11 +1,19 @@
 //! Agent-facing enrichment for [`PaperHit`]: hit_id, ids, match, access, next, detail.
 
-use crate::models::{AccessInfo, MatchInfo, MatchKind, PaperHit, PaperIds, SearchDetail};
+use crate::models::{
+    AccessInfo, ContentState, MatchInfo, MatchKind, PaperHit, PaperIds, PaperSource, SearchDetail,
+};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Mint a stable `hit_id` and fill ids/access/next (match filled separately).
 pub fn enrich_hit_identity(hit: &mut PaperHit) {
+    let research_hash = hit
+        .hit_id
+        .as_deref()
+        .and_then(|id| id.strip_prefix("research:"))
+        .filter(|hash| !hash.is_empty())
+        .map(str::to_string);
     let arxiv = hit
         .arxiv_id
         .as_deref()
@@ -36,9 +44,12 @@ pub fn enrich_hit_identity(hit: &mut PaperHit) {
         pmid: pmid.clone(),
         zotero_key: None,
         paper_id: paper_id.clone(),
+        research_hash: research_hash.clone(),
     });
 
-    hit.hit_id = Some(if let Some(ref a) = arxiv {
+    hit.hit_id = Some(if let Some(ref hash) = research_hash {
+        format!("research:{hash}")
+    } else if let Some(ref a) = arxiv {
         format!("arxiv:{a}")
     } else if let Some(ref d) = doi {
         format!("doi:{d}")
@@ -60,13 +71,28 @@ pub fn enrich_hit_identity(hit: &mut PaperHit) {
         format!("title:{}", short_hash(&hit.title))
     });
 
-    let pdf = hit.pdf_url.is_some() || hit.oa_pdf_url.is_some();
-    let cached = hit.cache.as_ref().is_some_and(|c| c.cached);
-    let full_text = hit.cache.as_ref().is_some_and(|c| c.has_full_text);
+    let existing_access = hit.access.take();
+    let pdf = existing_access.as_ref().is_some_and(|a| a.pdf)
+        || hit.pdf_url.is_some()
+        || hit.oa_pdf_url.is_some();
+    let cached = existing_access.as_ref().is_some_and(|a| a.cached)
+        || hit.cache.as_ref().is_some_and(|c| c.cached);
+    let full_text = existing_access.as_ref().is_some_and(|a| a.full_text)
+        || hit.cache.as_ref().is_some_and(|c| c.has_full_text);
+    let content_state = existing_access
+        .and_then(|access| access.content_state)
+        .or_else(|| {
+            (hit.source == PaperSource::Research).then_some(if full_text {
+                ContentState::Ready
+            } else {
+                ContentState::Stale
+            })
+        });
     hit.access = Some(AccessInfo {
         pdf,
         cached,
         full_text,
+        content_state,
     });
 
     let mut next = Vec::new();
@@ -263,6 +289,45 @@ mod tests {
         enrich_hit_identity(&mut hit);
         assert_eq!(hit.hit_id.as_deref(), Some("arxiv:1706.03762"));
         assert!(hit.access.as_ref().is_some_and(|a| a.pdf));
+    }
+
+    #[test]
+    fn research_hit_preserves_hash_and_availability() {
+        let mut hit = PaperHit::new(
+            PaperSource::Research,
+            "Which Component Drives Detection?".into(),
+            vec![],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        hit.hit_id = Some("research:abc123".into());
+        hit.access = Some(AccessInfo {
+            pdf: false,
+            cached: true,
+            full_text: true,
+            content_state: Some(ContentState::Ready),
+        });
+
+        enrich_hit_identity(&mut hit);
+
+        assert_eq!(hit.hit_id.as_deref(), Some("research:abc123"));
+        assert_eq!(
+            hit.ids.and_then(|ids| ids.research_hash),
+            Some("abc123".into())
+        );
+        assert_eq!(
+            hit.access.and_then(|access| access.content_state),
+            Some(ContentState::Ready)
+        );
+        assert_eq!(hit.next, vec!["open_paper", "get_paper_structure"]);
     }
 
     #[test]

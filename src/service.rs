@@ -5,12 +5,12 @@ use crate::external::{PaperSearch, PaperSearchOutcome, SearchOptions, UnpaywallC
 use crate::hit_enrich::{apply_detail, enrich_hit_identity, enrich_match};
 use crate::models::{
     BackendInfo, CachedPaperDetail, CachedPaperSummary, CollectionListResult, CollectionSummary,
-    CollectionUpdateRequest, CollectionWriteRequest, CrossrefWork, DeleteCollectionRequest,
-    DeleteItemRequest, FulltextContent, ItemDetail, ItemListResult, ItemSummary, ItemUpdateRequest,
-    ItemVoxPayload, ItemWriteRequest, ListCollectionsQuery, PaperHit, PaperSource, PaperStructure,
-    SearchCacheMode, SearchDiagnostics, SearchItemsQuery, SearchPapersResult, SearchVoxPayload,
-    SkillPayload, SourceDiagnostic, ValidationIssue, ValidationIssueLevel, ValidationReport,
-    VoxTextPayload,
+    CollectionUpdateRequest, CollectionWriteRequest, ContentState, CrossrefWork,
+    DeleteCollectionRequest, DeleteItemRequest, FulltextContent, ItemDetail, ItemListResult,
+    ItemSummary, ItemUpdateRequest, ItemVoxPayload, ItemWriteRequest, ListCollectionsQuery,
+    PaperHit, PaperSource, PaperStructure, SearchCacheMode, SearchDiagnostics, SearchItemsQuery,
+    SearchPapersResult, SearchVoxPayload, SkillPayload, SourceDiagnostic, ValidationIssue,
+    ValidationIssueLevel, ValidationReport, VoxTextPayload,
 };
 use crate::paper;
 use crate::paper::docker::DEFAULT_PORT as GROBID_DEFAULT_PORT;
@@ -218,14 +218,40 @@ impl PaperbridgeService {
                 }
             }
         }
+        let research_requested = opts
+            .sources
+            .as_ref()
+            .is_none_or(|sources| sources.contains(&PaperSource::Research));
+        if research_requested {
+            match self.paperseed.as_ref() {
+                Some(api) if api.research_enabled() => match api.search_research_papers(
+                    &expand_agent_search_query(&original_query),
+                    opts.source_fetch_limit() as usize,
+                ) {
+                    Ok(research_hits) => {
+                        diagnostics.sources_ok.push("research".into());
+                        hits.extend(research_hits.into_iter().map(research_paper_to_hit));
+                    }
+                    Err(error) => diagnostics.sources_failed.push(SourceDiagnostic {
+                        source: "research".into(),
+                        reason: error.to_string(),
+                    }),
+                },
+                _ => diagnostics.sources_skipped.push(SourceDiagnostic {
+                    source: "research".into(),
+                    reason: "yams_not_ready".into(),
+                }),
+            }
+        }
         if cache_mode != SearchCacheMode::Off {
             self.annotate_cached_hits(&mut hits);
         }
         rank_search_hits(&original_query, &mut hits);
 
+        let match_query = expand_agent_search_query(&original_query);
         for hit in &mut hits {
             enrich_hit_identity(hit);
-            enrich_match(hit, &original_query);
+            enrich_match(hit, &match_query);
             apply_detail(hit, detail, abstract_max_chars);
         }
 
@@ -313,6 +339,11 @@ impl PaperbridgeService {
                 );
             } else if let Some(url) = resolved.url.as_deref() {
                 out.insert("metadata".into(), serde_json::json!({"url": url}));
+            } else if let Some(hash) = resolved.research_hash.as_deref() {
+                out.insert(
+                    "metadata".into(),
+                    serde_json::json!({"research_hash": hash, "source": "research"}),
+                );
             }
         }
 
@@ -361,6 +392,7 @@ impl PaperbridgeService {
                 "paper_id": resolved.paper_id,
                 "attachment_key": resolved.attachment_key,
                 "url": resolved.url,
+                "research_hash": resolved.research_hash,
             }),
         );
 
@@ -371,6 +403,24 @@ impl PaperbridgeService {
         &self,
         resolved: &mut OpenResolved,
     ) -> Result<FulltextContent> {
+        if let Some(hash) = resolved.research_hash.as_deref() {
+            let api = self.paperseed.as_ref().ok_or_else(|| {
+                ZoteroMcpError::MissingConfig(
+                    "Opening a research hit requires paperseed_enabled=true and a ready YAMS daemon"
+                        .into(),
+                )
+            })?;
+            let content = api.get_research_content(hash)?;
+            let chars = u32::try_from(content.chars().count()).ok();
+            return Ok(FulltextContent {
+                item_key: format!("research:{hash}"),
+                content,
+                indexed_pages: None,
+                total_pages: None,
+                indexed_chars: chars,
+                total_chars: chars,
+            });
+        }
         if let Some(att) = resolved.attachment_key.as_deref() {
             return self.get_pdf_text(att).await;
         }
@@ -397,7 +447,7 @@ impl PaperbridgeService {
         // Agent path: await OA mirror when possible instead of racing background threads.
         if let Some(api) = &self.paperseed {
             let hit = paper_hit_from_resolved(resolved);
-            if let Err(e) = mirror_open_access_hit(api, &hit, MirrorMode::Awaited).await {
+            if let Err(e) = mirror_open_access_hit(api, &hit).await {
                 debug!("open_paper OA mirror failed: {e}");
             } else {
                 if let Some((paper_id, fulltext)) =
@@ -441,16 +491,18 @@ impl PaperbridgeService {
             return Ok(structure);
         }
 
-        let fulltext =
-            truncate_fulltext(&self.resolve_fulltext_for_open(resolved).await?, max_chars);
+        let fulltext = self.resolve_fulltext_for_open(resolved).await?;
         if let Some(paper_id) = resolved.paper_id.as_deref()
             && let Some(structure) = self.try_cached_paper_structure(paper_id)?
         {
             return Ok(structure);
         }
 
-        let metadata = self.open_paper_metadata(resolved).await;
-        Ok(PaperStructure {
+        let mut metadata = self.open_paper_metadata(resolved).await;
+        if metadata.title.is_none() {
+            metadata.title = title_from_open_content(&fulltext.content);
+        }
+        let mut structure = PaperStructure {
             item_key: fulltext.item_key.clone(),
             attachment_key: None,
             metadata,
@@ -460,7 +512,9 @@ impl PaperbridgeService {
             source: crate::models::PaperStructureSource::GrobidUnavailable {
                 reason: "built from directly downloaded PDF text".into(),
             },
-        })
+        };
+        truncate_structure_sections(&mut structure.sections, max_chars);
+        Ok(structure)
     }
 
     async fn open_paper_metadata(&self, resolved: &OpenResolved) -> crate::models::PaperMetadata {
@@ -579,9 +633,7 @@ impl PaperbridgeService {
                     Err(_) => return,
                 };
                 rt.block_on(async {
-                    if let Err(error) =
-                        mirror_open_access_hit(&api, &hit, MirrorMode::Background).await
-                    {
+                    if let Err(error) = mirror_open_access_hit(&api, &hit).await {
                         debug!("paperseed OA mirror skipped '{}': {}", hit.title, error);
                     }
                 });
@@ -599,6 +651,7 @@ impl PaperbridgeService {
                     paper_id: entry.paper.metadata.id,
                     cached: true,
                     has_full_text: entry.full_text.is_some(),
+                    yams_indexed: entry.yams_hash.is_some(),
                 });
             }
         }
@@ -1396,6 +1449,7 @@ struct OpenResolved {
     paper_id: Option<String>,
     attachment_key: Option<String>,
     url: Option<String>,
+    research_hash: Option<String>,
 }
 
 fn resolve_open_targets(req: &OpenPaperRequest) -> Result<OpenResolved> {
@@ -1406,6 +1460,7 @@ fn resolve_open_targets(req: &OpenPaperRequest) -> Result<OpenResolved> {
         paper_id: req.paper_id.clone(),
         attachment_key: req.attachment_key.clone(),
         url: req.url.as_deref().map(normalize_open_url).transpose()?,
+        research_hash: None,
     };
 
     if let Some(hit_id) = req.hit_id.as_deref() {
@@ -1418,6 +1473,10 @@ fn resolve_open_targets(req: &OpenPaperRequest) -> Result<OpenResolved> {
             r.paper_id = r.paper_id.or_else(|| Some(rest.to_string()));
         } else if let Some(rest) = hit_id.strip_prefix("paperseed:") {
             r.paper_id = Some(rest.to_string());
+        } else if let Some(rest) = hit_id.strip_prefix("research:") {
+            if !rest.is_empty() {
+                r.research_hash = Some(rest.to_string());
+            }
         } else if let Some(rest) = hit_id.strip_prefix("zotero:") {
             r.item_key = Some(rest.to_string());
         } else if let Some(rest) = hit_id.strip_prefix("url:") {
@@ -1434,6 +1493,7 @@ fn resolve_open_targets(req: &OpenPaperRequest) -> Result<OpenResolved> {
         && r.paper_id.is_none()
         && r.attachment_key.is_none()
         && r.url.is_none()
+        && r.research_hash.is_none()
     {
         return Err(ZoteroMcpError::InvalidInput(
             "open_paper requires hit_id, doi, arxiv_id, item_key, paper_id, attachment_key, or url."
@@ -1513,6 +1573,7 @@ fn paper_hit_from_resolved(resolved: &OpenResolved) -> PaperHit {
             paper_id: pid,
             cached: true,
             has_full_text: false,
+            yams_indexed: false,
         });
     }
     hit
@@ -1582,6 +1643,46 @@ fn cached_paper_structure(paper: &CachedPaperDetail, fulltext: &FulltextContent)
         figures: Vec::new(),
         source: crate::models::PaperStructureSource::ZoteroFulltext,
     }
+}
+
+fn title_from_open_content(content: &str) -> Option<String> {
+    if let Some(after) = content.split("\\title{").nth(1)
+        && let Some(title) = after.split('}').next()
+    {
+        let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !title.is_empty() {
+            return Some(title);
+        }
+    }
+    content.lines().find_map(|line| {
+        let title = line.trim().strip_prefix("# ")?.trim();
+        (!title.is_empty()).then(|| title.to_string())
+    })
+}
+
+fn truncate_structure_sections(sections: &mut Vec<crate::models::PaperSection>, max_chars: usize) {
+    let mut remaining = max_chars;
+    truncate_section_list(sections, &mut remaining);
+}
+
+fn truncate_section_list(sections: &mut Vec<crate::models::PaperSection>, remaining: &mut usize) {
+    for section in sections.iter_mut() {
+        if *remaining == 0 {
+            section.text.clear();
+            section.subsections.clear();
+            continue;
+        }
+        let count = section.text.chars().count();
+        if count > *remaining {
+            section.text = section.text.chars().take(*remaining).collect();
+            *remaining = 0;
+            section.subsections.clear();
+        } else {
+            *remaining -= count;
+            truncate_section_list(&mut section.subsections, remaining);
+        }
+    }
+    sections.retain(|section| !section.text.is_empty() || !section.subsections.is_empty());
 }
 
 fn titles_match(a: &str, b: &str) -> bool {
@@ -2003,6 +2104,7 @@ fn normalize_arxiv_id(raw: &str) -> Option<String> {
 
 fn source_rank_bias(source: crate::models::PaperSource) -> u8 {
     match source {
+        crate::models::PaperSource::Research => 12,
         crate::models::PaperSource::Arxiv => 11,
         crate::models::PaperSource::SemanticScholar => 10,
         crate::models::PaperSource::OpenAlex => 9,
@@ -2019,6 +2121,38 @@ fn source_rank_bias(source: crate::models::PaperSource) -> u8 {
     }
 }
 
+fn research_paper_to_hit(hit: crate::paperseed_api::ResearchPaperHit) -> PaperHit {
+    let is_pdf = hit.path.extension().and_then(|ext| ext.to_str()) == Some("pdf");
+    let mut paper = PaperHit::new(
+        PaperSource::Research,
+        hit.title,
+        Vec::new(),
+        None,
+        None,
+        None,
+        None,
+        Some(hit.snippet),
+        None,
+        None,
+        None,
+        Some("Local research workspace".into()),
+        None,
+    );
+    paper.hit_id = Some(format!("research:{}", hit.hash));
+    paper.relevance_score = Some(hit.score);
+    paper.access = Some(crate::models::AccessInfo {
+        pdf: is_pdf,
+        cached: true,
+        full_text: hit.content_available,
+        content_state: Some(if hit.content_available {
+            ContentState::Ready
+        } else {
+            ContentState::Stale
+        }),
+    });
+    paper
+}
+
 fn summarize_validation_report(report: &ValidationReport) -> String {
     report
         .issues
@@ -2028,17 +2162,7 @@ fn summarize_validation_report(report: &ValidationReport) -> String {
         .join("; ")
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum MirrorMode {
-    Background,
-    Awaited,
-}
-
-async fn mirror_open_access_hit(
-    api: &PaperseedApi,
-    hit: &PaperHit,
-    mode: MirrorMode,
-) -> Result<()> {
+async fn mirror_open_access_hit(api: &PaperseedApi, hit: &PaperHit) -> Result<()> {
     // Prefer the hit's own OA url; otherwise resolve one from its DOI.
     let url = match hit.oa_pdf_url.clone() {
         Some(url) => url,
@@ -2053,21 +2177,9 @@ async fn mirror_open_access_hit(
         ZoteroMcpError::Config(format!("Failed to create Paperseed incoming dir: {e}"))
     })?;
     let file = incoming.join(format!("{}.pdf", paperseed_safe_name(hit)));
-    if mode == MirrorMode::Background {
-        let yams_downloaded = api.download_with_yams_queue(
-            url,
-            Some(&hit.title),
-            hit.doi.as_deref(),
-            hit.url.as_deref().or(Some(url)),
-        );
-        // Background mirroring may hand work to YAMS. The awaited agent path
-        // deliberately bypasses the queue and ingests synchronously below.
-        if yams_downloaded.is_some() {
-            return Ok(());
-        }
-    }
-
-    // Manual path: download then index into local corpus.
+    // Download through Paperbridge and finish the Paperseed + YAMS ingest in
+    // one path. Returning after a separate YAMS queue accepted the URL left no
+    // Paperseed identity or verified yams_hash for later open calls.
     let bytes = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()?
@@ -2235,9 +2347,7 @@ mod tests {
             next: Vec::new(),
         };
 
-        mirror_open_access_hit(&api, &hit, MirrorMode::Awaited)
-            .await
-            .unwrap();
+        mirror_open_access_hit(&api, &hit).await.unwrap();
         let db = api.corpus_status().unwrap();
         assert_eq!(db.papers.len(), 1);
         assert_eq!(db.papers[0].paper.metadata.title, "Open Paper");
@@ -2983,6 +3093,7 @@ mod tests {
             paper_id: "p1".to_string(),
             cached: true,
             has_full_text: true,
+            yams_indexed: false,
         });
         hit
     }

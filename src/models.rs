@@ -289,6 +289,10 @@ pub struct CrossrefWork {
 #[serde(rename_all = "snake_case")]
 pub enum PaperSource {
     Arxiv,
+    /// Documents from the user's YAMS-indexed research workspace.
+    #[value(name = "research", alias = "yams")]
+    #[serde(rename = "research", alias = "yams")]
+    Research,
     #[value(name = "paperseed", alias = "local_cache", alias = "cache")]
     #[serde(alias = "local_cache", alias = "cache")]
     Paperseed,
@@ -389,6 +393,18 @@ pub struct PaperIds {
     pub zotero_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paper_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub research_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentState {
+    Ready,
+    MetadataOnly,
+    Queued,
+    Stale,
+    Failed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
@@ -396,6 +412,8 @@ pub struct AccessInfo {
     pub pdf: bool,
     pub cached: bool,
     pub full_text: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_state: Option<ContentState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Default, schemars::JsonSchema)]
@@ -670,6 +688,8 @@ pub struct CachedPaperSummary {
     pub paper_id: String,
     pub cached: bool,
     pub has_full_text: bool,
+    #[serde(default)]
+    pub yams_indexed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
@@ -745,6 +765,9 @@ mod tests {
         assert_eq!(parse("open_alex"), PaperSource::OpenAlex);
         assert_eq!(parse("oa"), PaperSource::OpenAlex);
 
+        assert_eq!(parse("research"), PaperSource::Research);
+        assert_eq!(parse("yams"), PaperSource::Research);
+
         assert_eq!(parse("openreview"), PaperSource::OpenReview);
         assert_eq!(parse("open_review"), PaperSource::OpenReview);
         assert_eq!(parse("or"), PaperSource::OpenReview);
@@ -774,6 +797,10 @@ mod tests {
 
     #[test]
     fn paper_source_serializes_to_canonical_wire_names() {
+        assert_eq!(
+            serde_json::to_string(&PaperSource::Research).unwrap(),
+            "\"research\""
+        );
         assert_eq!(
             serde_json::to_string(&PaperSource::OpenAlex).unwrap(),
             "\"openalex\""

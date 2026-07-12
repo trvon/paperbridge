@@ -14,7 +14,12 @@ use paperseed::db::{CorpusDb, IndexedPaper, QueryHit};
 use paperseed::models::LocalPaper;
 use paperseed::resolver::{ResolvedOpenPaper, ResolverClient, SearchResult};
 use paperseed::sources::PaperbridgeMetadata;
-use paperseed::yams::{CommandYamsRunner, YamsConfig, YamsDownloadRequest, YamsDownloadResult};
+use paperseed::yams::{
+    CommandYamsRunner, YamsConfig, YamsDownloadRequest, YamsDownloadResult, YamsResearchHit,
+    YamsRunner, YamsStoredDocument, cat_with_runner, list_research_group_with_runner,
+    query_research_with_runner,
+};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -23,6 +28,16 @@ pub struct PaperseedApi {
     paths: CorpusPaths,
     resolver: ResolverClient,
     yams: YamsConfig,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResearchPaperHit {
+    pub hash: String,
+    pub path: PathBuf,
+    pub title: String,
+    pub snippet: String,
+    pub score: f32,
+    pub content_available: bool,
 }
 
 impl PaperseedApi {
@@ -143,6 +158,57 @@ impl PaperseedApi {
         paperseed::app::query_entries_with_yams(&self.paths, query, &self.yams).map_err(map_error)
     }
 
+    pub fn research_enabled(&self) -> bool {
+        self.yams.enabled
+    }
+
+    pub fn search_research_papers(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ResearchPaperHit>> {
+        if !self.yams.enabled {
+            return Err(ZoteroMcpError::MissingConfig(
+                "YAMS research search is not ready".into(),
+            ));
+        }
+        let runner = CommandYamsRunner::with_timeout(&self.yams.binary, Duration::from_secs(8));
+        // Current YAMS deployments reliably serve agent-sized prefixes up to
+        // 20 results; larger limits may fall back to local initialization and
+        // fail even while the daemon is healthy.
+        let fetch_limit = limit.saturating_mul(2).clamp(10, 20);
+        let hits = query_research_with_runner(&self.yams, &runner, query, fetch_limit).map_err(
+            |reason| ZoteroMcpError::InvalidInput(format!("YAMS research search failed: {reason}")),
+        )?;
+        Ok(group_research_hits(&self.yams, &runner, hits, limit))
+    }
+
+    pub fn get_research_content(&self, hash: &str) -> Result<String> {
+        if !self.yams.enabled {
+            return Err(ZoteroMcpError::MissingConfig(
+                "YAMS research content is not available".into(),
+            ));
+        }
+        let runner = CommandYamsRunner::with_timeout(&self.yams.binary, Duration::from_secs(5));
+        let primary = cat_with_runner(&self.yams, &runner, hash).ok_or_else(|| {
+            ZoteroMcpError::InvalidInput(format!(
+                "Research document '{hash}' is stale: YAMS can search its metadata but has no readable content.\nTry:\n  yams doctor\n  yams add <paper-or-source-file>"
+            ))
+        })?;
+        let path = query_research_with_runner(&self.yams, &runner, hash, 1)
+            .ok()
+            .and_then(|hits| hits.into_iter().find(|hit| hit.hash == hash))
+            .map(|hit| hit.path);
+        let Some(group) = path.as_deref().and_then(research_group_path) else {
+            return Ok(primary);
+        };
+        let documents =
+            list_research_group_with_runner(&self.yams, &runner, &group, 50).unwrap_or_default();
+        Ok(assemble_research_bundle(
+            &self.yams, &runner, &primary, documents,
+        ))
+    }
+
     pub fn search_cached_papers(&self, query: &str, limit: usize) -> Result<Vec<PaperHit>> {
         let scored = paperseed::app::query_entries_scored_with_yams(&self.paths, query, &self.yams)
             .map_err(map_error)?;
@@ -171,6 +237,7 @@ impl PaperseedApi {
                     paper_id: entry.paper.metadata.id.clone(),
                     cached: true,
                     has_full_text: entry.full_text.is_some(),
+                    yams_indexed: entry.yams_hash.is_some(),
                 }),
                 relevance_score: score,
                 ids: None,
@@ -386,6 +453,235 @@ fn summarize_abstract(text: &str) -> String {
     out
 }
 
+fn group_research_hits(
+    config: &YamsConfig,
+    runner: &impl YamsRunner,
+    hits: Vec<YamsResearchHit>,
+    limit: usize,
+) -> Vec<ResearchPaperHit> {
+    let mut groups: HashMap<String, Vec<YamsResearchHit>> = HashMap::new();
+    for hit in hits {
+        if let Some(key) = research_group_key(&hit.path) {
+            groups.entry(key).or_default().push(hit);
+        }
+    }
+
+    let mut grouped = groups.into_values().collect::<Vec<_>>();
+    grouped.sort_by(|left, right| {
+        let left_score = left.iter().map(|hit| hit.score).fold(0.0_f64, f64::max);
+        let right_score = right.iter().map(|hit| hit.score).fold(0.0_f64, f64::max);
+        right_score.total_cmp(&left_score)
+    });
+    grouped.truncate(limit);
+
+    let mut papers = grouped
+        .into_iter()
+        .filter_map(|mut candidates| {
+            candidates.sort_by(|left, right| {
+                representation_priority(&right.path)
+                    .cmp(&representation_priority(&left.path))
+                    .then_with(|| right.score.total_cmp(&left.score))
+            });
+            let score = candidates
+                .iter()
+                .map(|hit| hit.score)
+                .fold(0.0_f64, f64::max) as f32;
+            let pdf_title = candidates
+                .iter()
+                .filter(|hit| extension(&hit.path) == "pdf")
+                .find_map(|hit| title_from_snippet(&hit.snippet));
+
+            let mut selected = None;
+            let mut selected_content = None;
+            for candidate in candidates.iter().take(4) {
+                if let Some(content) = cat_with_runner(config, runner, &candidate.hash) {
+                    selected = Some(candidate.clone());
+                    selected_content = Some(content);
+                    break;
+                }
+            }
+            let selected = selected.or_else(|| candidates.first().cloned())?;
+            let content_available = selected_content.is_some();
+            let title = pdf_title
+                .or_else(|| selected_content.as_deref().and_then(title_from_content))
+                .or_else(|| title_from_snippet(&selected.snippet))
+                .unwrap_or_else(|| fallback_research_title(&selected.path));
+            Some(ResearchPaperHit {
+                hash: selected.hash,
+                path: selected.path,
+                title,
+                snippet: selected.snippet,
+                score,
+                content_available,
+            })
+        })
+        .collect::<Vec<_>>();
+    papers.sort_by(|left, right| right.score.total_cmp(&left.score));
+    papers.truncate(limit);
+    papers
+}
+
+fn research_group_key(path: &Path) -> Option<String> {
+    let text = path.to_string_lossy();
+    if !text.contains("/research/") {
+        return None;
+    }
+    let components = path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    if let Some(index) = components.iter().position(|component| {
+        component
+            .strip_prefix("paper-")
+            .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
+    }) {
+        return Some(components[..=index].join("/"));
+    }
+    (extension(path) == "pdf").then(|| text.to_string())
+}
+
+fn research_group_path(path: &Path) -> Option<PathBuf> {
+    path.ancestors().find_map(|ancestor| {
+        let name = ancestor.file_name()?.to_str()?;
+        name.strip_prefix("paper-")
+            .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
+            .then(|| ancestor.to_path_buf())
+    })
+}
+
+fn assemble_research_bundle(
+    config: &YamsConfig,
+    runner: &impl YamsRunner,
+    primary: &str,
+    documents: Vec<YamsStoredDocument>,
+) -> String {
+    const ORDER: [&str; 7] = [
+        "abstract",
+        "introduction",
+        "design",
+        "results",
+        "related",
+        "conclusion",
+        "appendix",
+    ];
+    let mut selected: HashMap<&'static str, YamsStoredDocument> = HashMap::new();
+    for document in documents {
+        let Some(kind) = research_section_kind(&document.path) else {
+            continue;
+        };
+        let replace = selected.get(kind).is_none_or(|current| {
+            canonical_section_score(&document.path, document.indexed)
+                > canonical_section_score(&current.path, current.indexed)
+        });
+        if replace {
+            selected.insert(kind, document);
+        }
+    }
+    if selected.is_empty() {
+        return primary.to_string();
+    }
+
+    let mut bundle = String::new();
+    if let Some(title) = title_from_content(primary) {
+        bundle.push_str("# ");
+        bundle.push_str(&title);
+        bundle.push_str("\n\n");
+    }
+    for kind in ORDER {
+        let Some(document) = selected.get(kind) else {
+            continue;
+        };
+        if let Some(content) = cat_with_runner(config, runner, &document.hash) {
+            bundle.push_str(&content);
+            if !bundle.ends_with('\n') {
+                bundle.push('\n');
+            }
+            bundle.push('\n');
+        }
+    }
+    if bundle.trim().is_empty() {
+        primary.to_string()
+    } else {
+        bundle
+    }
+}
+
+fn research_section_kind(path: &Path) -> Option<&'static str> {
+    let name = path.file_stem()?.to_str()?.to_ascii_lowercase();
+    match name.as_str() {
+        "abstract" => Some("abstract"),
+        "introduction" => Some("introduction"),
+        "design" | "method" | "methods" => Some("design"),
+        "results" | "evaluation" => Some("results"),
+        "related" | "related-work" | "related_work" => Some("related"),
+        "conclusion" | "conclusions" => Some("conclusion"),
+        "appendix" => Some("appendix"),
+        _ => None,
+    }
+}
+
+fn canonical_section_score(path: &Path, indexed: i64) -> (u8, i64) {
+    let path = path.to_string_lossy();
+    let canonical = (!path.contains("draft") && path.contains("/tex/")) as u8;
+    (canonical, indexed)
+}
+
+fn representation_priority(path: &Path) -> u8 {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match (extension(path), name.as_str()) {
+        ("pdf", _) => 100,
+        (_, "paper.tex" | "main.tex") => 90,
+        (_, "abstract.tex") => 80,
+        (_, "introduction.tex") => 70,
+        ("tex", _) => 60,
+        ("md", _) => 50,
+        _ => 10,
+    }
+}
+
+fn extension(path: &Path) -> &str {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+}
+
+fn title_from_content(content: &str) -> Option<String> {
+    if let Some(after) = content.split("\\title{").nth(1)
+        && let Some(title) = after.split('}').next()
+    {
+        return cleaned_title(title);
+    }
+    content
+        .lines()
+        .find_map(|line| line.trim().strip_prefix('#').and_then(cleaned_title))
+}
+
+fn title_from_snippet(snippet: &str) -> Option<String> {
+    let text = snippet.trim().trim_start_matches('#').trim();
+    let end = [" [Author", " [Affiliation", " Abstract", "Abstract—"]
+        .into_iter()
+        .filter_map(|marker| text.find(marker))
+        .min()
+        .unwrap_or(text.len());
+    cleaned_title(&text[..end.min(text.len())])
+}
+
+fn cleaned_title(raw: &str) -> Option<String> {
+    let title = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!title.is_empty() && title.chars().count() <= 240).then_some(title)
+}
+
+fn fallback_research_title(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Research paper")
+        .replace(['-', '_'], " ")
+}
+
 pub fn map_error(error: paperseed::PaperseedError) -> ZoteroMcpError {
     match error {
         paperseed::PaperseedError::Io(error) => ZoteroMcpError::Config(error.to_string()),
@@ -409,6 +705,22 @@ pub fn map_error(error: paperseed::PaperseedError) -> ZoteroMcpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ResearchRunner {
+        content: HashMap<String, String>,
+    }
+
+    impl YamsRunner for ResearchRunner {
+        fn run(&self, args: &[String]) -> std::io::Result<paperseed::yams::YamsOutput> {
+            let hash = args.get(1).map(String::as_str).unwrap_or_default();
+            let content = self.content.get(hash).cloned().unwrap_or_default();
+            Ok(paperseed::yams::YamsOutput {
+                status_success: !content.is_empty(),
+                stdout: content,
+                stderr: String::new(),
+            })
+        }
+    }
 
     fn ingest(
         api: &PaperseedApi,
@@ -473,5 +785,89 @@ mod tests {
             )
             .unwrap();
         assert_eq!(found.paper.metadata.id, paper.metadata.id);
+    }
+
+    #[test]
+    fn research_results_collapse_project_fragments_and_skip_stale_pdf_content() {
+        let config = YamsConfig {
+            enabled: true,
+            binary: "yams".into(),
+        };
+        let runner = ResearchRunner {
+            content: HashMap::from([(
+                "tex-hash".into(),
+                r"\title{Which Component Drives Detection? Decomposing a Graph Neural Network Intrusion Detector}"
+                    .into(),
+            )]),
+        };
+        let hits = vec![
+            YamsResearchHit {
+                hash: "pdf-hash".into(),
+                path: "/Users/test/work/research/papers/paper-2/paper.pdf".into(),
+                score: 0.68,
+                snippet: "Which Component Drives Detection? Decomposing a Graph Neural Network Intrusion Detector [Author Names Removed] Abstract...".into(),
+            },
+            YamsResearchHit {
+                hash: "tex-hash".into(),
+                path: "/Users/test/work/research/papers/paper-2/paper.tex".into(),
+                score: 0.70,
+                snippet: "\\documentclass{IEEEtran}".into(),
+            },
+            YamsResearchHit {
+                hash: "related-hash".into(),
+                path: "/Users/test/work/research/papers/paper-2/tex/related.tex".into(),
+                score: 0.10,
+                snippet: "\\section{Related Work}".into(),
+            },
+        ];
+
+        let papers = group_research_hits(&config, &runner, hits, 10);
+
+        assert_eq!(papers.len(), 1);
+        assert_eq!(papers[0].hash, "tex-hash");
+        assert!(papers[0].content_available);
+        assert_eq!(
+            papers[0].title,
+            "Which Component Drives Detection? Decomposing a Graph Neural Network Intrusion Detector"
+        );
+    }
+
+    #[test]
+    fn research_bundle_includes_evaluation_content_in_paper_order() {
+        let config = YamsConfig {
+            enabled: true,
+            binary: "yams".into(),
+        };
+        let runner = ResearchRunner {
+            content: HashMap::from([
+                (
+                    "abstract".into(),
+                    "\\begin{abstract}Summary\\end{abstract}".into(),
+                ),
+                ("results".into(), "\\section{Evaluation}AUC was 0.92".into()),
+            ]),
+        };
+        let documents = vec![
+            YamsStoredDocument {
+                hash: "results".into(),
+                path: "/research/papers/paper-2/tex/results.tex".into(),
+                indexed: 2,
+            },
+            YamsStoredDocument {
+                hash: "abstract".into(),
+                path: "/research/papers/paper-2/tex/abstract.tex".into(),
+                indexed: 1,
+            },
+        ];
+
+        let bundle = assemble_research_bundle(
+            &config,
+            &runner,
+            "\\title{Which Component Drives Detection?}",
+            documents,
+        );
+
+        assert!(bundle.starts_with("# Which Component Drives Detection?"));
+        assert!(bundle.find("Summary").unwrap() < bundle.find("AUC was 0.92").unwrap());
     }
 }

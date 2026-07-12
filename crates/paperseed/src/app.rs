@@ -94,7 +94,7 @@ pub fn import_with_yams(
     request: ImportRequest,
     yams: &YamsConfig,
 ) -> Result<LocalPaper> {
-    let runner = CommandYamsRunner::new(&yams.binary);
+    let runner = CommandYamsRunner::with_timeout(&yams.binary, std::time::Duration::from_secs(35));
     import_with_yams_runner(paths, request, yams, &runner)
 }
 
@@ -156,25 +156,53 @@ pub fn ingest_with_yams(
     request: IngestRequest,
     yams: &YamsConfig,
 ) -> Result<LocalPaper> {
-    let mut paper = import_with_yams(
+    let runner = CommandYamsRunner::with_timeout(&yams.binary, std::time::Duration::from_secs(35));
+    ingest_with_yams_runner(paths, request, yams, &runner)
+}
+
+pub fn ingest_with_yams_runner(
+    paths: &CorpusPaths,
+    request: IngestRequest,
+    yams: &YamsConfig,
+    runner: &impl YamsRunner,
+) -> Result<LocalPaper> {
+    let IngestRequest {
+        path,
+        metadata,
+        license,
+        yams_hash,
+    } = request;
+    // Import storage/fulltext first, then index only after authoritative DOI,
+    // title, author, and source metadata have been applied.
+    let mut paper = import_with_yams_runner(
         paths,
         ImportRequest {
-            path: request.path,
-            title: request.metadata.title.clone(),
-            license: request.license.or(request.metadata.license.clone()),
-            yams_hash: request.yams_hash,
+            path,
+            title: metadata.title.clone(),
+            license: license.or(metadata.license.clone()),
+            yams_hash: None,
         },
-        yams,
+        &YamsConfig::disabled(),
+        runner,
     )?;
 
     let mut db = CorpusDb::load(&paths.db_path)?;
     let full_text = db
         .get(&paper.metadata.id)
         .and_then(|entry| entry.full_text.clone());
-    let yams_hash = db
-        .get(&paper.metadata.id)
-        .and_then(|entry| entry.yams_hash.clone());
-    apply_metadata(&mut paper.metadata, request.metadata);
+    apply_metadata(&mut paper.metadata, metadata);
+    let yams_hash = if yams_hash.is_some() || !yams.enabled {
+        yams_hash
+    } else {
+        index_paper_with_runner(
+            yams,
+            runner,
+            YamsIndexRequest {
+                paper: &paper,
+                full_text: full_text.as_deref(),
+            },
+        )
+    };
     db.upsert(IndexedPaper {
         paper: paper.clone(),
         full_text,

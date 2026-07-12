@@ -21,7 +21,12 @@ impl YamsConfig {
 
     pub fn auto_detect() -> Self {
         Self {
-            enabled: yams_ready("yams"),
+            // The CLI can serve searches through the daemon or initialize its
+            // local search services. Treat an installed binary as usable and
+            // report individual command failures at the call site instead of
+            // permanently disabling YAMS because a point-in-time daemon probe
+            // was stale.
+            enabled: yams_available("yams"),
             binary: PathBuf::from("yams"),
         }
     }
@@ -87,6 +92,23 @@ pub struct YamsOutput {
     pub stderr: String,
 }
 
+/// A global YAMS result that can be surfaced independently of the Paperseed
+/// corpus database.
+#[derive(Debug, Clone, PartialEq)]
+pub struct YamsResearchHit {
+    pub hash: String,
+    pub path: PathBuf,
+    pub score: f64,
+    pub snippet: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct YamsStoredDocument {
+    pub hash: String,
+    pub path: PathBuf,
+    pub indexed: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct CommandYamsRunner {
     binary: PathBuf,
@@ -128,7 +150,7 @@ pub fn yams_available(binary: &str) -> bool {
 pub fn yams_daemon_running(binary: &str) -> bool {
     run_command_with_timeout(
         &PathBuf::from(binary),
-        &["status".to_string()],
+        &["daemon".to_string(), "status".to_string(), "-d".to_string()],
         Duration::from_secs(2),
     )
     .map(|output| yams_status_indicates_running(&output))
@@ -166,10 +188,15 @@ fn run_command_with_timeout(
 ) -> std::io::Result<YamsOutput> {
     let mut child = Command::new(binary)
         .args(args)
-        .stdin(Stdio::null())
+        // YAMS currently treats an immediate stdin EOF as a signal to fall
+        // back from its daemon and may fail local search initialization. Keep
+        // an idle pipe open for the command lifetime without exposing the
+        // parent MCP/CLI stdin stream to the child.
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
+    let _stdin = child.stdin.take();
     let start = Instant::now();
     loop {
         if child.try_wait()?.is_some() {
@@ -216,11 +243,16 @@ pub fn index_paper_with_runner(
     // `--name=...` (one token) instead of `--name <title>` (two tokens) so a
     // title starting with `-` can't be parsed as a YAMS flag. Same shape used
     // for every other arg-with-value below for consistency.
-    let args = vec![
+    let mut args = vec![
+        // `--json` is a YAMS global option for `add`; placing it after the
+        // subcommand currently leaves human output even though parsing
+        // succeeds.
+        "--json".to_string(),
         "add".to_string(),
         request.paper.file.path.display().to_string(),
         format!("--name={}", request.paper.metadata.title),
         "--tags=paperseed,paperbridge,paper".to_string(),
+        "--collection=paperbridge".to_string(),
         format!("--metadata=paperseed_id={}", request.paper.metadata.id),
         format!(
             "--metadata=doi={}",
@@ -229,9 +261,28 @@ pub fn index_paper_with_runner(
         // Char count, not byte length — YAMS metadata is informational and
         // `text.len()` over-reports for non-ASCII titles/authors/full text.
         format!("--metadata=paperseed_text_chars={}", text.chars().count()),
-        "--no-session".to_string(),
-        "--json".to_string(),
     ];
+    if !request.paper.metadata.authors.is_empty() {
+        args.push(format!(
+            "--metadata=authors={}",
+            request.paper.metadata.authors.join("; ")
+        ));
+    }
+    if let Some(year) = request.paper.metadata.year {
+        args.push(format!("--metadata=year={year}"));
+    }
+    if let Some(venue) = request.paper.metadata.venue.as_deref() {
+        args.push(format!("--metadata=venue={venue}"));
+    }
+    if let Some(source_url) = request.paper.metadata.source_url.as_deref() {
+        args.push(format!("--metadata=source_url={source_url}"));
+    }
+    args.extend([
+        "--no-session".to_string(),
+        "--sync".to_string(),
+        "--sync-timeout=30".to_string(),
+        "--verify".to_string(),
+    ]);
 
     let output = match runner.run(&args) {
         Ok(out) => out,
@@ -352,6 +403,116 @@ pub fn query_with_runner(
     parse_yams_hits(&output.stdout).ok()
 }
 
+pub fn query_research_with_runner(
+    config: &YamsConfig,
+    runner: &impl YamsRunner,
+    q: &str,
+    limit: usize,
+) -> Result<Vec<YamsResearchHit>, String> {
+    if !config.enabled || q.trim().is_empty() || limit == 0 {
+        return Err("YAMS research query is disabled or empty".into());
+    }
+    let args = vec![
+        "search".to_string(),
+        q.to_string(),
+        "--json".to_string(),
+        "--show-hash".to_string(),
+        "--limit".to_string(),
+        limit.to_string(),
+        "--no-session".to_string(),
+    ];
+    let output = runner
+        .run(&args)
+        .map_err(|error| format!("failed to start YAMS search: {error}"))?;
+    if !output.status_success {
+        return Err(if output.stderr.trim().is_empty() {
+            "YAMS search returned a non-success status".into()
+        } else {
+            output.stderr.trim().to_string()
+        });
+    }
+    parse_research_hits(&output.stdout).map_err(|error| format!("invalid YAMS JSON: {error}"))
+}
+
+pub fn parse_research_hits(raw: &str) -> serde_json::Result<Vec<YamsResearchHit>> {
+    let value: serde_json::Value = serde_json::from_str(raw)?;
+    let items = value
+        .as_array()
+        .cloned()
+        .or_else(|| value.get("results").and_then(|v| v.as_array()).cloned())
+        .unwrap_or_default();
+    Ok(items
+        .into_iter()
+        .filter_map(|item| {
+            let hash = item.get("hash")?.as_str()?.trim();
+            let path = item.get("path")?.as_str()?.trim();
+            if hash.is_empty() || path.is_empty() {
+                return None;
+            }
+            Some(YamsResearchHit {
+                hash: hash.to_string(),
+                path: PathBuf::from(path),
+                score: item.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                snippet: item
+                    .get("snippet")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            })
+        })
+        .collect())
+}
+
+pub fn list_research_group_with_runner(
+    config: &YamsConfig,
+    runner: &impl YamsRunner,
+    group: &std::path::Path,
+    limit: usize,
+) -> Result<Vec<YamsStoredDocument>, String> {
+    if !config.enabled || limit == 0 {
+        return Err("YAMS research listing is disabled".into());
+    }
+    let pattern = format!("{}/*", group.display());
+    let args = vec![
+        "list".to_string(),
+        pattern,
+        "--format".to_string(),
+        "json".to_string(),
+        "--show-deleted".to_string(),
+        "--no-snippets".to_string(),
+        "--limit".to_string(),
+        limit.to_string(),
+    ];
+    let output = runner
+        .run(&args)
+        .map_err(|error| format!("failed to start YAMS list: {error}"))?;
+    if !output.status_success {
+        return Err(if output.stderr.trim().is_empty() {
+            "YAMS list returned a non-success status".into()
+        } else {
+            output.stderr.trim().to_string()
+        });
+    }
+    parse_stored_documents(&output.stdout).map_err(|error| format!("invalid YAMS JSON: {error}"))
+}
+
+pub fn parse_stored_documents(raw: &str) -> serde_json::Result<Vec<YamsStoredDocument>> {
+    let value: serde_json::Value = serde_json::from_str(raw)?;
+    Ok(value
+        .get("documents")
+        .and_then(|documents| documents.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            Some(YamsStoredDocument {
+                hash: item.get("hash")?.as_str()?.to_string(),
+                path: PathBuf::from(item.get("path")?.as_str()?),
+                indexed: item.get("indexed").and_then(|v| v.as_i64()).unwrap_or(0),
+            })
+        })
+        .collect())
+}
+
 pub fn parse_yams_hits(raw: &str) -> serde_json::Result<Vec<QueryHit>> {
     let value: serde_json::Value = serde_json::from_str(raw)?;
     let items = value
@@ -408,7 +569,10 @@ fn parse_add_hash(raw: &str) -> Option<String> {
     if let Some(hash) = value.get("hash").and_then(|value| value.as_str()) {
         return Some(hash.to_string());
     }
-    value.as_array()?.iter().find_map(|item| {
+    let items = value
+        .as_array()
+        .or_else(|| value.get("results").and_then(|results| results.as_array()))?;
+    items.iter().find_map(|item| {
         item.get("hash")
             .and_then(|value| value.as_str())
             .map(ToOwned::to_owned)
