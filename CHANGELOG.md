@@ -37,6 +37,26 @@
 
 * Bump `quick-xml` to 0.41 (RUSTSEC-2026-0194 / 0195)
 
+## [1.0.0](https://github.com/trvon/paperbridge/compare/v0.11.1...v1.0.0) (2026-07-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** structured commands now print human-readable output by default. Pass --json for machine-readable success and runtime error envelopes. Paperseed corpus export defaults to BibTeX.
+
+### Features
+
+* agent-first search envelopes, open_paper, and compact hits ([065d8dc](https://github.com/trvon/paperbridge/commit/065d8dc14b7112106e0229829136d331b0782a62))
+* **cli:** make JSON output opt-in ([5a10866](https://github.com/trvon/paperbridge/commit/5a10866c7e129a4706c9264e459b33b9516fc3ad))
+* **research:** integrate verified YAMS paper workflows ([a777587](https://github.com/trvon/paperbridge/commit/a777587e1cbe8cf156ce12b6243d956309f1f291))
+
+
+### Bug Fixes
+
+* harden agent search and open workflows ([fbca02f](https://github.com/trvon/paperbridge/commit/fbca02f563b432ec96297fa549d703c99eaaa47e))
+* **open:** require exact cache identity matches ([9299497](https://github.com/trvon/paperbridge/commit/9299497546ff6969e09a08ae01a26548c6f63563))
+* **search:** resolve identifiers and rank query coverage ([eabda62](https://github.com/trvon/paperbridge/commit/eabda626c7ed35ff8eedf3a7fd1ee43f2d0dfd74))
+
 ## [0.11.1](https://github.com/trvon/paperbridge/compare/v0.11.0...v0.11.1) (2026-07-02)
 
 
