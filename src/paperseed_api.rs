@@ -112,11 +112,37 @@ impl PaperseedApi {
         paperseed::app::status(&self.paths).map_err(map_error)
     }
 
+    pub fn corpus_status_summary(&self) -> Result<paperseed::app::CorpusStatus> {
+        paperseed::app::status_summary(&self.paths).map_err(map_error)
+    }
+
+    pub fn list_corpus_entries(&self) -> Result<Vec<IndexedPaper>> {
+        paperseed::app::list_entries(&self.paths).map_err(map_error)
+    }
+
+    pub fn remove_corpus_entry(&self, paper_id: &str) -> Result<IndexedPaper> {
+        paperseed::app::remove_entry(&self.paths, paper_id).map_err(map_error)
+    }
+
+    pub fn reindex_corpus(&self) -> Result<usize> {
+        paperseed::app::reindex(&self.paths).map_err(map_error)
+    }
+
     pub fn import_local_file(
         &self,
         path: impl AsRef<Path>,
         title: Option<String>,
         license: Option<String>,
+    ) -> Result<LocalPaper> {
+        self.import_local_file_with_options(path, title, license, true)
+    }
+
+    pub fn import_local_file_with_options(
+        &self,
+        path: impl AsRef<Path>,
+        title: Option<String>,
+        license: Option<String>,
+        extract_full_text: bool,
     ) -> Result<LocalPaper> {
         paperseed::app::import_with_yams(
             &self.paths,
@@ -125,6 +151,7 @@ impl PaperseedApi {
                 title,
                 license,
                 yams_hash: None,
+                extract_full_text,
             },
             &self.yams,
         )
@@ -137,6 +164,16 @@ impl PaperseedApi {
         metadata: PaperbridgeMetadata,
         license: Option<String>,
     ) -> Result<LocalPaper> {
+        self.ingest_with_metadata_options(path, metadata, license, true)
+    }
+
+    pub fn ingest_with_metadata_options(
+        &self,
+        path: impl AsRef<Path>,
+        metadata: PaperbridgeMetadata,
+        license: Option<String>,
+        extract_full_text: bool,
+    ) -> Result<LocalPaper> {
         paperseed::app::ingest_with_yams(
             &self.paths,
             IngestRequest {
@@ -144,6 +181,7 @@ impl PaperseedApi {
                 metadata,
                 license,
                 yams_hash: None,
+                extract_full_text,
             },
             &self.yams,
         )
@@ -222,12 +260,14 @@ impl PaperseedApi {
                 authors: entry.paper.metadata.authors.clone(),
                 year: entry.paper.metadata.year.map(|year| year.to_string()),
                 doi: entry.paper.metadata.doi.clone(),
-                arxiv_id: None,
+                arxiv_id: entry.paper.metadata.arxiv_id.clone(),
                 pmid: None,
                 abstract_note: entry
-                    .full_text
-                    .as_ref()
-                    .map(|text| summarize_abstract(text)),
+                    .paper
+                    .metadata
+                    .abstract_note
+                    .as_deref()
+                    .map(summarize_abstract),
                 url: entry.paper.metadata.source_url.clone(),
                 pdf_url: Some(entry.paper.file.path.display().to_string()),
                 oa_pdf_url: entry.paper.metadata.source_url.clone(),
@@ -236,7 +276,7 @@ impl PaperseedApi {
                 cache: Some(CachedPaperSummary {
                     paper_id: entry.paper.metadata.id.clone(),
                     cached: true,
-                    has_full_text: entry.full_text.is_some(),
+                    has_full_text: entry.has_full_text(),
                     yams_indexed: entry.yams_hash.is_some(),
                 }),
                 relevance_score: score,
@@ -297,18 +337,21 @@ impl PaperseedApi {
 }
 
 fn cached_paper_detail(entry: IndexedPaper) -> CachedPaperDetail {
+    let has_full_text = entry.has_full_text();
     CachedPaperDetail {
         paper_id: entry.paper.metadata.id,
         title: entry.paper.metadata.title,
         authors: entry.paper.metadata.authors,
         year: entry.paper.metadata.year.map(|year| year.to_string()),
         doi: entry.paper.metadata.doi,
+        arxiv_id: entry.paper.metadata.arxiv_id,
         venue: entry.paper.metadata.venue,
+        abstract_note: entry.paper.metadata.abstract_note,
         source_url: entry.paper.metadata.source_url,
         stored_path: entry.paper.file.path.display().to_string(),
         mime: entry.paper.file.mime,
         yams_hash: entry.yams_hash,
-        has_full_text: entry.full_text.is_some(),
+        has_full_text,
     }
 }
 
@@ -334,6 +377,15 @@ fn entry_arxiv_matches(entry: &IndexedPaper, expected: &str) -> bool {
     let expected = normalize_arxiv_id(expected);
     if expected.is_empty() {
         return false;
+    }
+    if entry
+        .paper
+        .metadata
+        .arxiv_id
+        .as_deref()
+        .is_some_and(|id| normalize_arxiv_id(id) == expected)
+    {
+        return true;
     }
     if entry
         .paper
@@ -686,7 +738,13 @@ pub fn map_error(error: paperseed::PaperseedError) -> ZoteroMcpError {
     match error {
         paperseed::PaperseedError::Io(error) => ZoteroMcpError::Config(error.to_string()),
         paperseed::PaperseedError::Json(error) => ZoteroMcpError::Serde(error.to_string()),
+        paperseed::PaperseedError::CorruptCorpus { .. } => {
+            ZoteroMcpError::Config(error.to_string())
+        }
         paperseed::PaperseedError::Http(error) => ZoteroMcpError::Http(error.to_string()),
+        paperseed::PaperseedError::MissingResolverEmail => {
+            ZoteroMcpError::MissingConfig(error.to_string())
+        }
         paperseed::PaperseedError::NotAFile(path) => ZoteroMcpError::InvalidInput(format!(
             "Paperseed import failed: path is not a file: {}\nTry:\n  paperseed corpus import <file> --license user-owned-private",
             path.display()
@@ -694,6 +752,11 @@ pub fn map_error(error: paperseed::PaperseedError) -> ZoteroMcpError {
         paperseed::PaperseedError::PaperNotFound(id) => ZoteroMcpError::InvalidInput(format!(
             "Paperseed corpus paper not found: {id}\nTry:\n  paperseed corpus query -q <terms>\n  paperseed corpus status"
         )),
+        paperseed::PaperseedError::EmptyPaperId
+        | paperseed::PaperseedError::AmbiguousPaperId { .. }
+        | paperseed::PaperseedError::IntegrityMismatch { .. } => {
+            ZoteroMcpError::InvalidInput(error.to_string())
+        }
         paperseed::PaperseedError::PolicyBlocked { reason } => {
             ZoteroMcpError::InvalidInput(format!(
                 "Paperseed policy blocked this action: {reason}\nTry:\n  paperseed corpus import <file> --license cc-by\n  paperseed seed check --paper-id <id>"
@@ -736,9 +799,11 @@ mod tests {
             PaperbridgeMetadata {
                 title: Some(name.to_string()),
                 doi: Some(doi.to_string()),
+                arxiv_id: None,
                 authors: vec!["Test Author".into()],
                 year: Some(2024),
                 venue: None,
+                abstract_note: None,
                 license: Some("cc-by".into()),
                 source_url: Some(source_url.to_string()),
             },

@@ -30,13 +30,15 @@ fn import_and_get_text(fixture: &str, title: &str) -> String {
             title: Some(title.to_string()),
             license: Some("cc-by".to_string()),
             yams_hash: None,
+            extract_full_text: true,
         },
         &YamsConfig::disabled(),
     )
     .expect("import");
     let db = CorpusDb::load(&paths.db_path).expect("load corpus");
     db.get(&paper.metadata.id)
-        .and_then(|entry| entry.full_text.clone())
+        .expect("valid paper id")
+        .and_then(|entry| entry.read_full_text().expect("read full text"))
         .unwrap_or_default()
 }
 

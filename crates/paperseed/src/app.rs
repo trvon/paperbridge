@@ -1,11 +1,11 @@
-use crate::corpus::import_local_file;
-use crate::db::{CorpusDb, IndexedPaper, QueryHit};
+use crate::corpus::paper_from_stored_file;
+use crate::db::{CorpusDb, IndexedPaper, QueryHit, with_corpus_write_lock};
 use crate::error::{PaperseedError, Result};
 use crate::indexing;
 use crate::models::{CorpusAction, License, LocalPaper};
-use crate::policy::{evaluate, license_slug, parse_license};
+use crate::policy::{evaluate, parse_license};
 use crate::sources::{PaperbridgeMetadata, apply_metadata};
-use crate::storage::content_addressed_path;
+use crate::storage::{content_addressed_path, copy_and_describe_file};
 use crate::yams::{
     CommandYamsRunner, YamsConfig, YamsIndexRequest, YamsRunner, cat_with_runner,
     index_paper_with_runner, query_with_runner,
@@ -20,6 +20,7 @@ pub struct CorpusPaths {
     pub files_dir: PathBuf,
     pub db_path: PathBuf,
     pub index_path: PathBuf,
+    pub text_dir: PathBuf,
     pub seeds_dir: PathBuf,
 }
 
@@ -29,7 +30,8 @@ impl CorpusPaths {
         Self {
             files_dir: root.join("files"),
             db_path: root.join("corpus.json"),
-            index_path: root.join("corpus.idx.json"),
+            index_path: root.join("corpus.idx.bin"),
+            text_dir: root.join("text"),
             seeds_dir: root.join("seeds"),
             root,
         }
@@ -42,6 +44,7 @@ pub struct ImportRequest {
     pub title: Option<String>,
     pub license: Option<String>,
     pub yams_hash: Option<String>,
+    pub extract_full_text: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +53,15 @@ pub struct IngestRequest {
     pub metadata: PaperbridgeMetadata,
     pub license: Option<String>,
     pub yams_hash: Option<String>,
+    pub extract_full_text: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorpusStatus {
+    pub root: PathBuf,
+    pub papers: usize,
+    pub index_docs: Option<usize>,
+    pub index_in_sync: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +97,22 @@ pub fn status(paths: &CorpusPaths) -> Result<CorpusDb> {
     CorpusDb::load(&paths.db_path)
 }
 
+pub fn status_summary(paths: &CorpusPaths) -> Result<CorpusStatus> {
+    let db = CorpusDb::load(&paths.db_path)?;
+    let papers = db.papers.len();
+    let index_docs = indexing::persisted_doc_count(&paths.index_path);
+    Ok(CorpusStatus {
+        root: paths.root.clone(),
+        papers,
+        index_docs,
+        index_in_sync: index_docs == Some(papers),
+    })
+}
+
+pub fn list_entries(paths: &CorpusPaths) -> Result<Vec<IndexedPaper>> {
+    Ok(CorpusDb::load(&paths.db_path)?.papers)
+}
+
 pub fn import(paths: &CorpusPaths, request: ImportRequest) -> Result<LocalPaper> {
     import_with_yams(paths, request, &YamsConfig::auto_detect())
 }
@@ -104,27 +132,19 @@ pub fn import_with_yams_runner(
     yams: &YamsConfig,
     runner: &impl YamsRunner,
 ) -> Result<LocalPaper> {
-    fs::create_dir_all(&paths.files_dir)?;
     let license = request
         .license
         .as_deref()
         .map(parse_license)
         .unwrap_or(crate::models::License::UserOwnedPrivate);
     let title = request.title.unwrap_or_else(|| infer_title(&request.path));
-    let mime = infer_mime(&request.path);
-    let mut paper = import_local_file(&request.path, title, license, mime)?;
-
-    let extension = request.path.extension().and_then(|ext| ext.to_str());
-    let destination = content_addressed_path(&paths.files_dir, &paper.file.hash, extension);
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    if !destination.exists() {
-        fs::copy(&request.path, &destination)?;
-    }
-    paper.file.path = destination;
-
-    let full_text = extract_full_text(&request.path, &paper.file.mime)?;
+    let (paper, full_text) = prepare_local_file(
+        paths,
+        &request.path,
+        title,
+        license,
+        request.extract_full_text,
+    )?;
     let mut yams_hash = request.yams_hash;
     if yams.enabled && yams_hash.is_none() {
         yams_hash = index_paper_with_runner(
@@ -136,15 +156,80 @@ pub fn import_with_yams_runner(
             },
         );
     }
-    let mut db = CorpusDb::load(&paths.db_path)?;
-    db.upsert(IndexedPaper {
-        paper: paper.clone(),
-        full_text: full_text.clone(),
-        yams_hash,
-    });
-    db.save(&paths.db_path)?;
-    save_index(paths, &db);
+    persist_entry(
+        paths,
+        IndexedPaper {
+            paper: paper.clone(),
+            full_text,
+            full_text_path: None,
+            yams_hash,
+        },
+    )?;
     Ok(paper)
+}
+
+fn prepare_local_file(
+    paths: &CorpusPaths,
+    source: &Path,
+    title: String,
+    license: License,
+    should_extract_full_text: bool,
+) -> Result<(LocalPaper, Option<String>)> {
+    fs::create_dir_all(&paths.files_dir)?;
+    let mime = infer_mime(source);
+    let file = copy_and_describe_file(source, &paths.files_dir, mime)?;
+    let paper = paper_from_stored_file(file, title, license)?;
+    let full_text = if should_extract_full_text {
+        extract_full_text(&paper.file.path, &paper.file.mime)?
+    } else {
+        None
+    };
+    Ok((paper, full_text))
+}
+
+fn persist_entry(paths: &CorpusPaths, entry: IndexedPaper) -> Result<()> {
+    with_corpus_write_lock(|| {
+        let mut db = CorpusDb::load(&paths.db_path)?;
+        let paper_id = entry.paper.metadata.id.clone();
+        db.upsert(entry);
+        externalize_full_text(paths, &mut db)?;
+        db.save(&paths.db_path)?;
+        indexing::persist_upsert(&db, &paths.index_path, &paper_id)?;
+        Ok(())
+    })
+}
+
+fn persist_full_text(paths: &CorpusPaths, entry: IndexedPaper) -> Result<()> {
+    with_corpus_write_lock(|| {
+        let mut db = CorpusDb::load(&paths.db_path)?;
+        let paper_id = entry.paper.metadata.id.clone();
+        db.upsert(entry);
+        externalize_full_text(paths, &mut db)?;
+        db.save(&paths.db_path)?;
+        indexing::persist_upsert(&db, &paths.index_path, &paper_id)?;
+        Ok(())
+    })
+}
+
+fn externalize_full_text(paths: &CorpusPaths, db: &mut CorpusDb) -> Result<()> {
+    for entry in &mut db.papers {
+        let Some(text) = entry.full_text.take() else {
+            continue;
+        };
+        let path = content_addressed_path(&paths.text_dir, &entry.paper.file.hash, Some("txt"));
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let temp = path.with_extension(format!("txt.tmp.{}-{nonce}", std::process::id()));
+        fs::write(&temp, text.as_bytes())?;
+        fs::rename(&temp, &path)?;
+        entry.full_text_path = Some(path);
+    }
+    Ok(())
 }
 
 pub fn ingest(paths: &CorpusPaths, request: IngestRequest) -> Result<LocalPaper> {
@@ -171,25 +256,16 @@ pub fn ingest_with_yams_runner(
         metadata,
         license,
         yams_hash,
+        extract_full_text,
     } = request;
-    // Import storage/fulltext first, then index only after authoritative DOI,
-    // title, author, and source metadata have been applied.
-    let mut paper = import_with_yams_runner(
-        paths,
-        ImportRequest {
-            path,
-            title: metadata.title.clone(),
-            license: license.or(metadata.license.clone()),
-            yams_hash: None,
-        },
-        &YamsConfig::disabled(),
-        runner,
-    )?;
-
-    let mut db = CorpusDb::load(&paths.db_path)?;
-    let full_text = db
-        .get(&paper.metadata.id)
-        .and_then(|entry| entry.full_text.clone());
+    let resolved_license = license
+        .or_else(|| metadata.license.clone())
+        .as_deref()
+        .map(parse_license)
+        .unwrap_or(License::UserOwnedPrivate);
+    let title = metadata.title.clone().unwrap_or_else(|| infer_title(&path));
+    let (mut paper, full_text) =
+        prepare_local_file(paths, &path, title, resolved_license, extract_full_text)?;
     apply_metadata(&mut paper.metadata, metadata);
     let yams_hash = if yams_hash.is_some() || !yams.enabled {
         yams_hash
@@ -203,56 +279,15 @@ pub fn ingest_with_yams_runner(
             },
         )
     };
-    db.upsert(IndexedPaper {
-        paper: paper.clone(),
-        full_text,
-        yams_hash,
-    });
-    db.save(&paths.db_path)?;
-    save_index(paths, &db);
-    Ok(paper)
-}
-
-pub fn fetch_open_file(
-    paths: &CorpusPaths,
-    doi: String,
-    path: PathBuf,
-    title: Option<String>,
-    license: Option<String>,
-) -> Result<LocalPaper> {
-    let license = license
-        .as_deref()
-        .map(parse_license)
-        .unwrap_or(License::Unknown);
-    let decision = evaluate(CorpusAction::Download, license);
-    if !decision.allowed {
-        return Err(PaperseedError::PolicyBlocked {
-            reason: decision.reason.to_string(),
-        });
-    }
-
-    let mut paper = import(
+    persist_entry(
         paths,
-        ImportRequest {
-            path,
-            title: title.or_else(|| Some(format!("DOI {doi}"))),
-            license: Some(license_slug(license).to_string()),
-            yams_hash: None,
+        IndexedPaper {
+            paper: paper.clone(),
+            full_text,
+            full_text_path: None,
+            yams_hash,
         },
     )?;
-    paper.metadata.doi = Some(doi);
-
-    let mut db = CorpusDb::load(&paths.db_path)?;
-    let full_text = db
-        .get(&paper.metadata.id)
-        .and_then(|entry| entry.full_text.clone());
-    db.upsert(IndexedPaper {
-        paper: paper.clone(),
-        full_text,
-        yams_hash: None,
-    });
-    db.save(&paths.db_path)?;
-    save_index(paths, &db);
     Ok(paper)
 }
 
@@ -268,17 +303,12 @@ pub fn query_with_yams(paths: &CorpusPaths, q: &str, yams: &YamsConfig) -> Resul
         }
     }
     let db = CorpusDb::load(&paths.db_path)?;
-    Ok(indexing::search(
-        &db,
-        &paths.index_path,
-        q,
-        DEFAULT_QUERY_TOP_K,
-    ))
+    indexing::search(&db, &paths.index_path, q, DEFAULT_QUERY_TOP_K)
 }
 
 pub fn query_entries(paths: &CorpusPaths, q: &str) -> Result<Vec<IndexedPaper>> {
     let db = CorpusDb::load(&paths.db_path)?;
-    let hits = indexing::search(&db, &paths.index_path, q, DEFAULT_QUERY_TOP_K);
+    let hits = indexing::search(&db, &paths.index_path, q, DEFAULT_QUERY_TOP_K)?;
     Ok(entries_from_hits(&db, hits))
 }
 
@@ -306,7 +336,7 @@ pub fn query_entries_with_yams_runner(
             return Ok(entries);
         }
     }
-    let hits = indexing::search(&db, &paths.index_path, q, DEFAULT_QUERY_TOP_K);
+    let hits = indexing::search(&db, &paths.index_path, q, DEFAULT_QUERY_TOP_K)?;
     Ok(entries_from_hits(&db, hits))
 }
 
@@ -325,30 +355,34 @@ pub fn query_entries_scored_with_yams(
     {
         let entries: Vec<(IndexedPaper, Option<f32>)> = hits
             .into_iter()
-            .filter_map(|hit| db.get(&hit.id).cloned().map(|entry| (entry, None)))
+            .filter_map(|hit| {
+                db.get(&hit.id)
+                    .ok()
+                    .flatten()
+                    .cloned()
+                    .map(|entry| (entry, None))
+            })
             .collect();
         if !entries.is_empty() {
             return Ok(entries);
         }
     }
-    let scored = indexing::search_scored(&db, &paths.index_path, q, DEFAULT_QUERY_TOP_K);
+    let scored = indexing::search_scored(&db, &paths.index_path, q, DEFAULT_QUERY_TOP_K)?;
     Ok(scored
         .into_iter()
-        .filter_map(|(hit, score)| db.get(&hit.id).cloned().map(|entry| (entry, Some(score))))
+        .filter_map(|(hit, score)| {
+            db.get(&hit.id)
+                .ok()
+                .flatten()
+                .cloned()
+                .map(|entry| (entry, Some(score)))
+        })
         .collect())
 }
 
 /// Default top-K for index-backed corpus queries. Generous enough to feed the
 /// downstream merge step without over-collecting.
 pub const DEFAULT_QUERY_TOP_K: usize = 64;
-
-fn save_index(paths: &CorpusPaths, db: &CorpusDb) {
-    if let Err(err) = indexing::persist_index(db, &paths.index_path) {
-        // Non-fatal: query path falls back to in-memory build on miss. Log
-        // via tracing once the crate adopts it; for now, swallow and move on.
-        let _ = err;
-    }
-}
 
 /// Rebuild the BM25F index from `corpus.json`. Used by `paperseed reindex`.
 pub fn reindex(paths: &CorpusPaths) -> Result<usize> {
@@ -360,9 +394,47 @@ pub fn reindex(paths: &CorpusPaths) -> Result<usize> {
 
 pub fn get_entry(paths: &CorpusPaths, paper_id: &str) -> Result<IndexedPaper> {
     CorpusDb::load(&paths.db_path)?
-        .get(paper_id)
+        .get(paper_id)?
         .cloned()
         .ok_or_else(|| PaperseedError::PaperNotFound(paper_id.to_string()))
+}
+
+pub fn remove_entry(paths: &CorpusPaths, paper_id: &str) -> Result<IndexedPaper> {
+    let removed = with_corpus_write_lock(|| {
+        let mut db = CorpusDb::load(&paths.db_path)?;
+        let entry = db
+            .get(paper_id)?
+            .cloned()
+            .ok_or_else(|| PaperseedError::PaperNotFound(paper_id.to_string()))?;
+        db.papers
+            .retain(|candidate| candidate.paper.file.hash != entry.paper.file.hash);
+        externalize_full_text(paths, &mut db)?;
+        db.save(&paths.db_path)?;
+        indexing::persist_index(&db, &paths.index_path)?;
+        Ok(entry)
+    })?;
+
+    match fs::remove_file(&removed.paper.file.path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    if let Some(path) = &removed.full_text_path {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let manifest = paths
+        .seeds_dir
+        .join(format!("{}.json", removed.paper.metadata.id));
+    match fs::remove_file(manifest) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(removed)
 }
 
 pub fn get_full_text(paths: &CorpusPaths, paper_id: &str, yams: &YamsConfig) -> Result<String> {
@@ -376,12 +448,12 @@ pub fn get_full_text_with_yams_runner(
     yams: &YamsConfig,
     runner: &impl YamsRunner,
 ) -> Result<String> {
-    let mut db = CorpusDb::load(&paths.db_path)?;
+    let db = CorpusDb::load(&paths.db_path)?;
     let entry = db
-        .get(paper_id)
+        .get(paper_id)?
         .cloned()
         .ok_or_else(|| PaperseedError::PaperNotFound(paper_id.to_string()))?;
-    if let Some(full_text) = entry.full_text {
+    if let Some(full_text) = entry.read_full_text()? {
         return Ok(full_text);
     }
     if yams.enabled
@@ -390,16 +462,16 @@ pub fn get_full_text_with_yams_runner(
     {
         let mut updated = entry;
         updated.full_text = Some(full_text.clone());
-        db.upsert(updated);
-        db.save(&paths.db_path)?;
+        updated.full_text_path = None;
+        persist_full_text(paths, updated)?;
         return Ok(full_text);
     }
     // Last resort: try to extract text from the stored file
     if let Some(full_text) = extract_full_text(&entry.paper.file.path, &entry.paper.file.mime)? {
         let mut updated = entry;
         updated.full_text = Some(full_text.clone());
-        db.upsert(updated);
-        db.save(&paths.db_path)?;
+        updated.full_text_path = None;
+        persist_full_text(paths, updated)?;
         return Ok(full_text);
     }
     Err(PaperseedError::PaperNotFound(paper_id.to_string()))
@@ -407,14 +479,14 @@ pub fn get_full_text_with_yams_runner(
 
 fn entries_from_hits(db: &CorpusDb, hits: Vec<QueryHit>) -> Vec<IndexedPaper> {
     hits.into_iter()
-        .filter_map(|hit| db.get(&hit.id).cloned())
+        .filter_map(|hit| db.get(&hit.id).ok().flatten().cloned())
         .collect()
 }
 
 pub fn seed_check(paths: &CorpusPaths, paper_id: &str) -> Result<&'static str> {
     let db = CorpusDb::load(&paths.db_path)?;
     let entry = db
-        .get(paper_id)
+        .get(paper_id)?
         .ok_or_else(|| PaperseedError::PaperNotFound(paper_id.to_string()))?;
     let decision = evaluate(CorpusAction::SeedRedistribute, entry.paper.metadata.license);
     if decision.allowed {
@@ -429,8 +501,16 @@ pub fn create_seed_manifest(paths: &CorpusPaths, paper_id: &str) -> Result<SeedM
     let reason = seed_check(paths, paper_id)?.to_string();
     let db = CorpusDb::load(&paths.db_path)?;
     let entry = db
-        .get(paper_id)
+        .get(paper_id)?
         .ok_or_else(|| PaperseedError::PaperNotFound(paper_id.to_string()))?;
+    let actual_hash = crate::storage::hash_file(&entry.paper.file.path)?;
+    if actual_hash != entry.paper.file.hash {
+        return Err(PaperseedError::IntegrityMismatch {
+            path: entry.paper.file.path.clone(),
+            expected: entry.paper.file.hash.clone(),
+            actual: actual_hash,
+        });
+    }
     let manifest = SeedManifest {
         paper_id: entry.paper.metadata.id.clone(),
         title: entry.paper.metadata.title.clone(),

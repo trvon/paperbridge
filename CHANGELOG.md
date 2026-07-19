@@ -8,6 +8,8 @@
 * **agent interface:** `open_paper` MCP tool + `papers open` CLI for discover→read by hit_id/DOI/arXiv/item/paper id
 * **research:** first-class YAMS discovery with grouped paper projects, stable `research:` IDs, availability state, and off-disk TeX opening
 * **paperseed:** synchronous verified YAMS indexing with persisted content hashes for imports and OA mirrors
+* **paperseed:** corpus list/show/remove operations, deferred `--no-fulltext` imports, and index-drift status
+* **paperseed:** content-addressed text blobs, incremental BM25F updates, and binary index persistence
 * **search:** arXiv title/id query adapters; Crossref bibliographic query for multi-word titles
 * **search:** DOI-first resolution, conversational GNN query expansion, and query-coverage ranking
 * **search:** later offset pages expand the source prefix; URL-only hits now carry openable `url:` IDs
@@ -28,6 +30,8 @@
 
 * **open:** require exact DOI, arXiv, or canonical URL identity before reusing cached content
 * **yams:** pass the JSON flag in the supported position, parse current result envelopes, and verify content before storing an index hash
+* **paperseed:** serialize concurrent corpus writers, quarantine corrupt databases, reject ambiguous ids, preserve OA licenses, and verify seed-file integrity
+* **paperseed:** index real abstracts/arXiv ids, persist fallback rebuilds, and improve Unicode/stemmed matching
 
 ### Security
 

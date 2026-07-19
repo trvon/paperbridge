@@ -293,7 +293,7 @@ management commands are exposed through the Paperbridge command graph so they
 inherit Paperbridge config:
 
 ```text
-paperbridge paperseed corpus {status,import,ingest,query,export}
+paperbridge paperseed corpus {status,list,show,import,ingest,query,export,remove,reindex}
 paperbridge paperseed seed {check,create}
 ```
 

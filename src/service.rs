@@ -647,11 +647,13 @@ impl PaperbridgeService {
         };
         for hit in hits {
             if let Some(entry) = api.find_cached_hit(hit) {
+                let has_full_text = entry.has_full_text();
+                let yams_indexed = entry.yams_hash.is_some();
                 hit.cache = Some(CachedPaperSummary {
                     paper_id: entry.paper.metadata.id,
                     cached: true,
-                    has_full_text: entry.full_text.is_some(),
-                    yams_indexed: entry.yams_hash.is_some(),
+                    has_full_text,
+                    yams_indexed,
                 });
             }
         }
@@ -1690,6 +1692,7 @@ fn titles_match(a: &str, b: &str) -> bool {
 }
 
 fn should_surface_cached_hit(query: &str, hit: &PaperHit) -> bool {
+    const MIN_SINGLE_TERM_CACHE_BM25_SCORE: f32 = 6.0;
     if query_id_matches_hit(query, hit) {
         return true;
     }
@@ -1716,7 +1719,8 @@ fn should_surface_cached_hit(query: &str, hit: &PaperHit) -> bool {
         .count();
 
     if terms.len() == 1 {
-        return title_matches == 1 || (evidence_matches == 1 && cache_score(hit) >= 6_000);
+        return title_matches == 1
+            || (evidence_matches == 1 && cache_score(hit) >= MIN_SINGLE_TERM_CACHE_BM25_SCORE);
     }
 
     evidence_matches >= 2 || (title_matches >= 1 && evidence_matches >= 1)
@@ -1877,11 +1881,10 @@ fn contains_normalized_token(text: &str, token: &str) -> bool {
     text.split_whitespace().any(|part| part == token)
 }
 
-fn cache_score(hit: &PaperHit) -> u32 {
+fn cache_score(hit: &PaperHit) -> f32 {
     hit.relevance_score
         .filter(|s| s.is_finite() && *s > 0.0)
-        .map(|s| (s * 1000.0).round().clamp(0.0, u32::MAX as f32) as u32)
-        .unwrap_or(0)
+        .unwrap_or(0.0)
 }
 
 fn rank_search_hits(query: &str, hits: &mut [PaperHit]) {
@@ -2164,13 +2167,14 @@ fn summarize_validation_report(report: &ValidationReport) -> String {
 
 async fn mirror_open_access_hit(api: &PaperseedApi, hit: &PaperHit) -> Result<()> {
     // Prefer the hit's own OA url; otherwise resolve one from its DOI.
-    let url = match hit.oa_pdf_url.clone() {
-        Some(url) => url,
+    let (url, license) = match hit.oa_pdf_url.clone() {
+        Some(url) => (url, paperseed::models::License::Unknown),
         None => match resolve_oa_pdf_url(api, hit).await {
-            Some(url) => url,
+            Some(resolved) => resolved,
             None => return Ok(()),
         },
     };
+    let license = paperseed::policy::license_slug(license).to_string();
     let url = url.as_str();
     let incoming = api.paths().root.join("incoming");
     std::fs::create_dir_all(&incoming).map_err(|e| {
@@ -2196,28 +2200,39 @@ async fn mirror_open_access_hit(api: &PaperseedApi, hit: &PaperHit) -> Result<()
         paperseed::sources::PaperbridgeMetadata {
             title: Some(hit.title.clone()),
             doi: hit.doi.clone(),
+            arxiv_id: hit.arxiv_id.clone(),
             authors: hit.authors.clone(),
             year: hit.year.as_deref().and_then(parse_year),
             venue: hit.venue.clone(),
-            license: Some("unknown".to_string()),
+            abstract_note: hit.abstract_note.clone(),
+            license: Some(license.clone()),
             source_url: hit.url.clone().or_else(|| Some(url.to_string())),
         },
-        Some("unknown".to_string()),
+        Some(license),
     )?;
     Ok(())
 }
 
-/// Resolve a hit's DOI to an open-access PDF url via Unpaywall → OpenAlex.
+/// Resolve a hit's DOI to an open-access PDF URL and license via Unpaywall → OpenAlex.
 /// Returns `None` when the hit has no DOI or no open PDF could be found.
-async fn resolve_oa_pdf_url(api: &PaperseedApi, hit: &PaperHit) -> Option<String> {
+async fn resolve_oa_pdf_url(
+    api: &PaperseedApi,
+    hit: &PaperHit,
+) -> Option<(String, paperseed::models::License)> {
     let doi = hit.doi.as_deref()?;
     match api.resolve_open_doi(doi, None).await {
-        Ok(resolved) => resolved.open_pdf_url,
+        Ok(resolved) => resolved_mirror_location(resolved),
         Err(error) => {
             debug!("paperseed OA resolve skipped '{}': {}", hit.title, error);
             None
         }
     }
+}
+
+fn resolved_mirror_location(
+    resolved: paperseed::resolver::ResolvedOpenPaper,
+) -> Option<(String, paperseed::models::License)> {
+    resolved.open_pdf_url.map(|url| (url, resolved.license))
 }
 
 fn paperseed_safe_name(hit: &PaperHit) -> String {
@@ -2358,6 +2373,21 @@ mod tests {
     }
 
     #[test]
+    fn resolved_mirror_location_preserves_resolver_license() {
+        let resolved = paperseed::resolver::ResolvedOpenPaper {
+            doi: "10.5555/open".to_string(),
+            title: Some("Open Paper".to_string()),
+            open_pdf_url: Some("https://example.org/paper.pdf".to_string()),
+            landing_url: None,
+            license: paperseed::models::License::CcBy,
+            source: "unpaywall".to_string(),
+        };
+
+        let (_, license) = resolved_mirror_location(resolved).unwrap();
+        assert_eq!(license, paperseed::models::License::CcBy);
+    }
+
+    #[test]
     fn cached_paper_fulltext_round_trips_from_paperseed() {
         let dir = tempfile::tempdir().unwrap();
         let api = PaperseedApi::new(dir.path().join("corpus"), None);
@@ -2397,9 +2427,11 @@ mod tests {
                 paperseed::sources::PaperbridgeMetadata {
                     title: Some("Graph Learning at Scale".to_string()),
                     doi: Some("10.5555/graph".to_string()),
+                    arxiv_id: None,
                     authors: vec!["Grace Hopper".to_string()],
                     year: Some(2024),
                     venue: Some("Systems Journal".to_string()),
+                    abstract_note: None,
                     license: Some("cc-by".to_string()),
                     source_url: Some("https://example.org/graph".to_string()),
                 },
@@ -2444,9 +2476,11 @@ mod tests {
                 paperseed::sources::PaperbridgeMetadata {
                     title: Some("Structured Cached Paper".to_string()),
                     doi: Some("10.5555/structure".to_string()),
+                    arxiv_id: None,
                     authors: vec!["Grace Hopper".to_string()],
                     year: Some(2024),
                     venue: Some("Systems Journal".to_string()),
+                    abstract_note: None,
                     license: Some("cc-by".to_string()),
                     source_url: Some("https://example.org/structure".to_string()),
                 },
@@ -2501,9 +2535,11 @@ mod tests {
                 paperseed::sources::PaperbridgeMetadata {
                     title: Some("Queryable Cached Paper".to_string()),
                     doi: Some("10.5555/query".to_string()),
+                    arxiv_id: None,
                     authors: vec!["Grace Hopper".to_string()],
                     year: Some(2024),
                     venue: Some("Systems Journal".to_string()),
+                    abstract_note: None,
                     license: Some("cc-by".to_string()),
                     source_url: Some("https://example.org/query".to_string()),
                 },
@@ -2543,12 +2579,14 @@ mod tests {
                 paperseed::sources::PaperbridgeMetadata {
                     title: Some("Planar Induced Subgraphs of Sparse Graphs".to_string()),
                     doi: Some("10.48550/arXiv.1408.5939".to_string()),
+                    arxiv_id: Some("1408.5939".to_string()),
                     authors: vec![
                         "Glencora Borradaile".to_string(),
                         "David Eppstein".to_string(),
                     ],
                     year: Some(2014),
                     venue: Some("arXiv".to_string()),
+                    abstract_note: None,
                     license: Some("cc-by".to_string()),
                     source_url: Some("https://arxiv.org/abs/1408.5939".to_string()),
                 },
@@ -2633,9 +2671,11 @@ mod tests {
                 paperseed::sources::PaperbridgeMetadata {
                     title: Some("Matched External Paper".to_string()),
                     doi: None,
+                    arxiv_id: None,
                     authors: vec!["Grace Hopper".to_string()],
                     year: Some(2024),
                     venue: Some("Systems Journal".to_string()),
+                    abstract_note: None,
                     license: Some("cc-by".to_string()),
                     source_url: Some("https://example.org/matched".to_string()),
                 },
@@ -2651,9 +2691,11 @@ mod tests {
                 paperseed::sources::PaperbridgeMetadata {
                     title: Some("Local Only Paper".to_string()),
                     doi: Some("10.5555/local".to_string()),
+                    arxiv_id: None,
                     authors: vec!["Ada Lovelace".to_string()],
                     year: Some(2023),
                     venue: Some("Local Venue".to_string()),
+                    abstract_note: None,
                     license: Some("cc-by".to_string()),
                     source_url: Some("https://example.org/local".to_string()),
                 },
@@ -2734,9 +2776,11 @@ mod tests {
             paperseed::sources::PaperbridgeMetadata {
                 title: Some("Graph Neural Networks for Program Analysis".to_string()),
                 doi: Some("10.5555/graph".to_string()),
+                arxiv_id: None,
                 authors: vec!["Ada Lovelace".to_string()],
                 year: Some(2024),
                 venue: Some("Local Venue".to_string()),
+                abstract_note: None,
                 license: Some("cc-by".to_string()),
                 source_url: Some("https://example.org/graph".to_string()),
             },
@@ -3707,9 +3751,11 @@ mod tests {
                 paperseed::sources::PaperbridgeMetadata {
                     title: Some("Open Paper Cache".into()),
                     doi: Some("10.1/open-paper".into()),
+                    arxiv_id: None,
                     authors: vec!["Test".into()],
                     year: Some(2024),
                     venue: None,
+                    abstract_note: None,
                     license: Some("cc-by".into()),
                     source_url: None,
                 },
@@ -3825,9 +3871,11 @@ mod tests {
                 paperseed::sources::PaperbridgeMetadata {
                     title: Some("Paper PDF Download".into()),
                     doi: Some("10.6028/NIST.AI.100-2e2023".into()),
+                    arxiv_id: None,
                     authors: vec!["NIST".into()],
                     year: Some(2024),
                     venue: None,
+                    abstract_note: None,
                     license: Some("cc-by".into()),
                     source_url: Some("https://example.test/unrelated.pdf".into()),
                 },

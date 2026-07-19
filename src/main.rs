@@ -1146,20 +1146,47 @@ async fn handle_paperseed(
     match action {
         PaperseedAction::Corpus { action } => match action {
             PaperseedCorpusAction::Status => {
-                print_output(&api.corpus_status()?, output)?;
+                let status = api.corpus_status_summary()?;
+                let index_in_sync = status.index_in_sync;
+                print_output(&status, output)?;
+                if output == OutputFormat::Human && !index_in_sync {
+                    println!(
+                        "warning: Paperseed search index is stale; run `paperbridge paperseed corpus reindex`"
+                    );
+                }
+            }
+            PaperseedCorpusAction::List => {
+                print_output(&api.list_corpus_entries()?, output)?;
+            }
+            PaperseedCorpusAction::Show { id } => {
+                print_output(&api.get_cached_paper(&id)?, output)?;
+            }
+            PaperseedCorpusAction::Remove { id } => {
+                let removed = api.remove_corpus_entry(&id)?;
+                print_output(
+                    &serde_json::json!({
+                        "removed": removed.paper.metadata.id,
+                        "title": removed.paper.metadata.title,
+                        "stored_path": removed.paper.file.path,
+                    }),
+                    output,
+                )?;
             }
             PaperseedCorpusAction::Import {
                 file,
                 title,
                 license,
+                no_fulltext,
             } => {
-                let paper = api.import_local_file(file, title, license)?;
+                let paper =
+                    api.import_local_file_with_options(file, title, license, !no_fulltext)?;
                 print_output(&paper, output)?;
             }
             PaperseedCorpusAction::Ingest {
                 metadata,
                 file,
                 license,
+                no_fulltext,
             } => {
                 let raw = std::fs::read_to_string(&metadata).map_err(|e| {
                     paperbridge::ZoteroMcpError::Config(format!(
@@ -1167,7 +1194,8 @@ async fn handle_paperseed(
                     ))
                 })?;
                 let metadata = paperseed::sources::metadata_from_paperbridge_json(&raw)?;
-                let paper = api.ingest_with_metadata(file, metadata, license)?;
+                let paper =
+                    api.ingest_with_metadata_options(file, metadata, license, !no_fulltext)?;
                 print_output(&paper, output)?;
             }
             PaperseedCorpusAction::Query { q } => {
@@ -1195,6 +1223,16 @@ async fn handle_paperseed(
                         ));
                     }
                 }
+            }
+            PaperseedCorpusAction::Reindex => {
+                let indexed = api.reindex_corpus()?;
+                print_output(
+                    &serde_json::json!({
+                        "indexed": indexed,
+                        "index_path": api.paths().index_path.display().to_string(),
+                    }),
+                    output,
+                )?;
             }
         },
         PaperseedAction::Seed { action } => match action {
@@ -2150,8 +2188,10 @@ paperseed_auto_download = true
 
     #[test]
     fn safe_config_json_redacts_secrets_and_marks_unset_values() {
-        let mut config = Config::default();
-        config.api_key = Some("super-secret".to_string());
+        let config = Config {
+            api_key: Some("super-secret".to_string()),
+            ..Config::default()
+        };
 
         let value = safe_config_value(&config).unwrap();
         assert_eq!(value["api_key"], "<set>");

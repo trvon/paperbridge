@@ -543,9 +543,9 @@ pub fn parse_yams_hits(raw: &str) -> serde_json::Result<Vec<QueryHit>> {
                 .unwrap_or_else(|| "Untitled YAMS result".to_string()),
             score: item
                 .get("score")
-                .and_then(|value| value.as_u64())
-                .and_then(|score| usize::try_from(score).ok())
-                .unwrap_or(1),
+                .and_then(|value| value.as_f64())
+                .map(|score| score as f32)
+                .unwrap_or(1.0),
             path: item
                 .get("path")
                 .and_then(|value| value.as_str())

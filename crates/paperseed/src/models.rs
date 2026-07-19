@@ -6,9 +6,13 @@ pub struct PaperMetadata {
     pub id: String,
     pub title: String,
     pub doi: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arxiv_id: Option<String>,
     pub authors: Vec<String>,
     pub year: Option<u16>,
     pub venue: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abstract_note: Option<String>,
     pub license: License,
     pub source_url: Option<String>,
 }

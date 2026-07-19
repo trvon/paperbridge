@@ -167,10 +167,15 @@ Manage the content-addressed local cache and license-gated seed manifests:
 
 ```bash
 paperbridge paperseed corpus status
+paperbridge paperseed corpus list
+paperbridge paperseed corpus show <id-or-unique-hash-prefix>
 paperbridge paperseed corpus import ./paper.pdf --license cc-by
+paperbridge paperseed corpus import ./large.pdf --license cc-by --no-fulltext
 paperbridge paperseed corpus ingest --metadata item.json --file paper.pdf --license cc-by
 paperbridge paperseed corpus query -q "induction heads"
 paperbridge paperseed corpus export --format bibtex
+paperbridge paperseed corpus remove <id-or-unique-hash-prefix>
+paperbridge paperseed corpus reindex
 
 paperbridge paperseed seed check --paper-id <id>
 paperbridge paperseed seed create --paper-id <id>
@@ -179,8 +184,11 @@ paperbridge paperseed seed create --paper-id <id>
 `paperseed corpus export` defaults to BibTeX. Pass the global `--json` flag to
 export the corpus as JSON; `--format json` is accepted only with `--json`.
 
-Imported PDFs have their text automatically extracted and stored in the
-corpus for full-text search. When `paperseed_yams_enabled = true`, imports and
+Imported PDFs have their text automatically extracted into content-addressed
+text blobs for full-text search. Use `--no-fulltext` to defer extraction until
+first read; PDF extraction does not perform OCR. `corpus status` reports paper
+and index document counts and warns when they drift. When
+`paperseed_yams_enabled = true`, imports and
 OA mirrors are synchronously added to YAMS with authoritative title, DOI,
 authors, venue, and source metadata. The returned hash is persisted as
 `yams_hash`; search cache summaries expose `yams_indexed`.
@@ -198,8 +206,9 @@ search hits are mirrored into the corpus. Hits that already carry an open-access
 PDF url are downloaded directly; hits that only expose a DOI (common for
 metadata-only sources like Crossref, PubMed, and DBLP) are resolved to an open
 PDF via Unpaywall, falling back to OpenAlex's best OA location. Set
-`unpaywall_email` for best Unpaywall coverage. Mirrored files are stored with an
-`unknown` license (cached but not seedable).
+`unpaywall_email` with a real contact address for Unpaywall. Resolver-derived
+licenses are preserved for mirrored files; hits with a direct PDF but no
+license evidence remain `unknown` and are not seedable.
 
 ### Write Zotero items & collections
 
@@ -259,7 +268,7 @@ paperbridge config snippet --target opencode
 - **Key-gated sources skip loudly** — see `diagnostics.sources_skipped` / `sources_failed`.
 - **Cached papers are conservative by default**: default cache-only hits need strong relevance, and `--sources` without `paperseed` excludes cache hits. Use `--sources paperseed` for explicit cache-only search.
 - **Research hits report availability**: use `--sources research` for YAMS-only discovery. Do not attempt to open hits with `access.content_state: stale` until the source is re-indexed.
-- **PDF text extraction** happens automatically during local corpus import — no separate step needed.
+- **PDF text extraction** happens automatically during local corpus import unless `--no-fulltext` is passed. Deferred extraction runs on first read; neither path performs OCR.
 - **Fulltext can be large** — prefer `open_paper` with `max_chars` (default 8000) or structure selectors. Vox tools use `--max-chars-per-chunk`.
 - **Write operations need `version` on update/delete** (Zotero optimistic concurrency). Re-fetch if you get HTTP 412.
 - **`config get api_key` no longer prints the raw key** — it prints `(set, N chars — pass --show-secret to reveal)`.

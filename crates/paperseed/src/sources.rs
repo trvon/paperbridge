@@ -34,9 +34,13 @@ pub struct FetchPlan {
 pub struct PaperbridgeMetadata {
     pub title: Option<String>,
     pub doi: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arxiv_id: Option<String>,
     pub authors: Vec<String>,
     pub year: Option<u16>,
     pub venue: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abstract_note: Option<String>,
     pub license: Option<String>,
     pub source_url: Option<String>,
 }
@@ -116,6 +120,16 @@ pub fn metadata_from_paperbridge_json(raw: &str) -> serde_json::Result<Paperbrid
             &value,
             &["doi", "DOI", "data.DOI", "data.doi", "metadata.doi"],
         ),
+        arxiv_id: first_string(
+            &value,
+            &[
+                "arxiv_id",
+                "arxivId",
+                "data.arxiv_id",
+                "data.arxivId",
+                "metadata.arxiv_id",
+            ],
+        ),
         authors: authors(&value),
         year: first_u16(&value, &["year", "metadata.year"]).or_else(|| year_from_date(&value)),
         venue: first_string(
@@ -125,6 +139,18 @@ pub fn metadata_from_paperbridge_json(raw: &str) -> serde_json::Result<Paperbrid
                 "publicationTitle",
                 "data.publicationTitle",
                 "metadata.venue",
+            ],
+        ),
+        abstract_note: first_string(
+            &value,
+            &[
+                "abstract",
+                "abstractNote",
+                "abstract_note",
+                "data.abstractNote",
+                "data.abstract",
+                "metadata.abstract",
+                "metadata.abstract_note",
             ],
         ),
         license: first_string(&value, &["license", "metadata.license", "data.rights"]),
@@ -142,6 +168,9 @@ pub fn apply_metadata(base: &mut PaperMetadata, metadata: PaperbridgeMetadata) {
     if metadata.doi.is_some() {
         base.doi = metadata.doi;
     }
+    if metadata.arxiv_id.is_some() {
+        base.arxiv_id = metadata.arxiv_id;
+    }
     if !metadata.authors.is_empty() {
         base.authors = metadata.authors;
     }
@@ -150,6 +179,9 @@ pub fn apply_metadata(base: &mut PaperMetadata, metadata: PaperbridgeMetadata) {
     }
     if metadata.venue.is_some() {
         base.venue = metadata.venue;
+    }
+    if metadata.abstract_note.is_some() {
+        base.abstract_note = metadata.abstract_note;
     }
     if let Some(license) = metadata.license {
         let parsed = parse_license(&license);

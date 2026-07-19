@@ -10,6 +10,15 @@ pub fn import_local_file(
     license: License,
     mime: impl Into<String>,
 ) -> Result<LocalPaper> {
+    let file = storage::describe_file(path, mime)?;
+    paper_from_stored_file(file, title, license)
+}
+
+pub fn paper_from_stored_file(
+    file: crate::models::StoredFile,
+    title: impl Into<String>,
+    license: License,
+) -> Result<LocalPaper> {
     let decision = policy::evaluate(CorpusAction::StorePrivate, license);
     if !decision.allowed {
         return Err(PaperseedError::PolicyBlocked {
@@ -17,16 +26,17 @@ pub fn import_local_file(
         });
     }
 
-    let file = storage::describe_file(path, mime)?;
     let id = file.hash[..12.min(file.hash.len())].to_string();
     Ok(LocalPaper {
         metadata: PaperMetadata {
             id,
             title: title.into(),
             doi: None,
+            arxiv_id: None,
             authors: Vec::new(),
             year: None,
             venue: None,
+            abstract_note: None,
             license,
             source_url: None,
         },

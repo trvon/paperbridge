@@ -126,10 +126,15 @@ full-text querying, and license-gated seed manifests:
 
 ```bash
 paperbridge paperseed corpus status
+paperbridge paperseed corpus list
+paperbridge paperseed corpus show <id-or-unique-hash-prefix>
 paperbridge paperseed corpus import ./paper.pdf --license cc-by
+paperbridge paperseed corpus import ./large.pdf --license cc-by --no-fulltext
 paperbridge paperseed corpus ingest --metadata item.json --file paper.pdf --license cc-by
 paperbridge paperseed corpus query -q "induction heads"
 paperbridge paperseed corpus export --format bibtex
+paperbridge paperseed corpus remove <id-or-unique-hash-prefix>
+paperbridge paperseed corpus reindex
 
 paperbridge paperseed seed check --paper-id <id>
 paperbridge paperseed seed create --paper-id <id>
@@ -137,6 +142,11 @@ paperbridge paperseed seed create --paper-id <id>
 
 The corpus is stored under `$XDG_DATA_HOME/paperbridge/paperseed` (defaults to
 `~/.local/share/paperbridge/paperseed`).
+
+`corpus status` reports both paper and index document counts and warns on drift.
+Full text is stored in content-addressed `text/` blobs rather than inline in
+`corpus.json`; `--no-fulltext` defers extraction until first read. PDF extraction
+does not perform OCR.
 
 Seeding is license-gated: private or unknown-license material may be stored and
 searched locally, but seed manifests are created only when redistribution is

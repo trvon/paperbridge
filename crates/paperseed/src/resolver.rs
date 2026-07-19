@@ -2,6 +2,7 @@ use crate::error::Result;
 use crate::models::License;
 use crate::policy::parse_license;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use urlencoding::encode;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +47,7 @@ impl ResolverClient {
         match source.unwrap_or("openalex") {
             "openalex" => self.search_openalex(q).await,
             "arxiv" => self.search_arxiv(q).await,
+            "crossref" => self.search_crossref(q).await,
             _ => self.search_openalex(q).await,
         }
     }
@@ -54,6 +56,7 @@ impl ResolverClient {
         match source {
             Some("unpaywall") => self.resolve_unpaywall(doi).await,
             Some("openalex") => self.resolve_openalex(doi).await,
+            Some("crossref") => self.resolve_crossref(doi).await,
             // Default: try Unpaywall, then fall back to OpenAlex's OA location
             // when Unpaywall has no open PDF (or is unreachable). This is what
             // lets DOIs from metadata-only sources (Crossref, PubMed, DBLP)
@@ -79,16 +82,13 @@ impl ResolverClient {
         if let Some(email) = self.email.as_deref() {
             url.push_str(&format!("?mailto={}", encode(email)));
         }
-        let work: OpenAlexWork = self.http.get(url).send().await?.json().await?;
+        let work: OpenAlexWork = self.get_with_retry(&url).await?.json().await?;
         Ok(openalex_work_to_resolved(work, doi))
     }
 
     async fn search_openalex(&self, q: &str) -> Result<Vec<SearchResult>> {
-        let url = format!(
-            "https://api.openalex.org/works?search={}&per-page=10",
-            encode(q)
-        );
-        let body: OpenAlexResponse = self.http.get(url).send().await?.json().await?;
+        let url = openalex_search_url(q, self.email.as_deref());
+        let body: OpenAlexResponse = self.get_with_retry(&url).await?.json().await?;
         Ok(body
             .results
             .into_iter()
@@ -118,27 +118,125 @@ impl ResolverClient {
     }
 
     async fn search_arxiv(&self, q: &str) -> Result<Vec<SearchResult>> {
-        let url = format!(
-            "https://export.arxiv.org/api/query?search_query=all:{}&start=0&max_results=10",
-            encode(q)
-        );
-        let text = self.http.get(url).send().await?.text().await?;
+        let url = arxiv_search_url(q);
+        let text = self.get_with_retry(&url).await?.text().await?;
         Ok(parse_arxiv_atom(&text))
     }
 
     async fn resolve_unpaywall(&self, doi: &str) -> Result<ResolvedOpenPaper> {
         let email = self
             .email
-            .clone()
-            .unwrap_or_else(|| "paperseed@example.invalid".to_string());
+            .as_deref()
+            .filter(|email| !email.trim().is_empty())
+            .ok_or(crate::error::PaperseedError::MissingResolverEmail)?;
         let url = format!(
             "https://api.unpaywall.org/v2/{}?email={}",
             encode(doi),
-            encode(&email)
+            encode(email)
         );
-        let body: UnpaywallResponse = self.http.get(url).send().await?.json().await?;
+        let body: UnpaywallResponse = self.get_with_retry(&url).await?.json().await?;
         Ok(unpaywall_to_resolved(body, doi))
     }
+
+    async fn search_crossref(&self, q: &str) -> Result<Vec<SearchResult>> {
+        let url = format!(
+            "https://api.crossref.org/works?query.bibliographic={}&rows=10",
+            encode(q)
+        );
+        let body: CrossrefResponse = self.get_with_retry(&url).await?.json().await?;
+        Ok(body
+            .message
+            .items
+            .into_iter()
+            .map(crossref_to_search_result)
+            .collect())
+    }
+
+    async fn resolve_crossref(&self, doi: &str) -> Result<ResolvedOpenPaper> {
+        let url = format!("https://api.crossref.org/works/{}", encode(doi));
+        let body: CrossrefSingleResponse = self.get_with_retry(&url).await?.json().await?;
+        Ok(ResolvedOpenPaper {
+            doi: body.message.doi.unwrap_or_else(|| doi.to_string()),
+            title: body.message.title.into_iter().next(),
+            open_pdf_url: None,
+            landing_url: body.message.url,
+            license: License::Unknown,
+            source: "crossref".to_string(),
+        })
+    }
+
+    async fn get_with_retry(&self, url: &str) -> Result<reqwest::Response> {
+        const ATTEMPTS: usize = 3;
+        for attempt in 0..ATTEMPTS {
+            match self.http.get(url).send().await {
+                Ok(response) if !retryable_status(response.status()) => {
+                    return Ok(response.error_for_status()?);
+                }
+                Ok(response) if attempt + 1 == ATTEMPTS => {
+                    return Ok(response.error_for_status()?);
+                }
+                Ok(response) => {
+                    let delay = retry_delay(response.headers(), attempt);
+                    tokio::time::sleep(delay).await;
+                }
+                Err(error) if attempt + 1 == ATTEMPTS => return Err(error.into()),
+                Err(_) => tokio::time::sleep(exponential_delay(attempt)).await,
+            }
+        }
+        unreachable!("retry loop always returns on its final attempt")
+    }
+}
+
+fn openalex_search_url(query: &str, email: Option<&str>) -> String {
+    let mut url = format!(
+        "https://api.openalex.org/works?search={}&per-page=10",
+        encode(query)
+    );
+    if let Some(email) = email.filter(|email| !email.trim().is_empty()) {
+        url.push_str(&format!("&mailto={}", encode(email)));
+    }
+    url
+}
+
+fn arxiv_search_url(query: &str) -> String {
+    let query = query.trim();
+    let fielded = if let Some(author) = query.strip_prefix("author:") {
+        format!("au:\"{}\"", author.trim())
+    } else if looks_like_arxiv_id(query) {
+        format!("id:{}", query.trim_start_matches("arxiv:"))
+    } else {
+        format!("ti:\"{query}\"")
+    };
+    format!(
+        "https://export.arxiv.org/api/query?search_query={}&start=0&max_results=10&sortBy=relevance&sortOrder=descending",
+        encode(&fielded)
+    )
+}
+
+fn looks_like_arxiv_id(query: &str) -> bool {
+    let query = query.trim_start_matches("arxiv:");
+    let query = query.strip_suffix(".pdf").unwrap_or(query);
+    query.contains('.')
+        && query
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '/' | '-'))
+}
+
+fn retryable_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+fn retry_delay(headers: &reqwest::header::HeaderMap, attempt: usize) -> Duration {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| exponential_delay(attempt))
+}
+
+fn exponential_delay(attempt: usize) -> Duration {
+    Duration::from_millis(200_u64.saturating_mul(1_u64 << attempt.min(4)))
 }
 
 fn unpaywall_to_resolved(body: UnpaywallResponse, doi: &str) -> ResolvedOpenPaper {
@@ -219,6 +317,39 @@ fn tag(input: &str, name: &str) -> Option<String> {
     Some(after_start.split_once(&end)?.0.trim().to_string())
 }
 
+fn crossref_to_search_result(work: CrossrefWork) -> SearchResult {
+    SearchResult {
+        source: "crossref".to_string(),
+        title: work
+            .title
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| "untitled".to_string()),
+        doi: work.doi,
+        authors: work
+            .author
+            .into_iter()
+            .filter_map(|author| {
+                let name = format!(
+                    "{} {}",
+                    author.given.unwrap_or_default(),
+                    author.family.unwrap_or_default()
+                )
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+                (!name.is_empty()).then_some(name)
+            })
+            .collect(),
+        year: work
+            .published
+            .and_then(|date| date.date_parts.into_iter().next())
+            .and_then(|parts| parts.into_iter().next()),
+        open_url: work.url,
+        license: License::Unknown,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,6 +413,50 @@ mod tests {
         );
         assert_eq!(resolved.license, License::Cc0);
     }
+
+    #[test]
+    fn openalex_search_includes_configured_mailto() {
+        let url = openalex_search_url("graph learning", Some("researcher@example.org"));
+        assert!(url.contains("mailto=researcher%40example.org"));
+    }
+
+    #[test]
+    fn arxiv_search_uses_field_prefix_and_relevance_sort() {
+        let title_url = arxiv_search_url("Attention Is All You Need");
+        assert!(title_url.contains("search_query=ti%3A%22Attention%20Is%20All%20You%20Need%22"));
+        assert!(title_url.contains("sortBy=relevance"));
+
+        let id_url = arxiv_search_url("arxiv:1706.03762");
+        assert!(id_url.contains("search_query=id%3A1706.03762"));
+    }
+
+    #[tokio::test]
+    async fn explicit_unpaywall_resolution_requires_real_email() {
+        let resolver = ResolverClient::new(None);
+        let error = resolver
+            .resolve_doi("10.1/example", Some("unpaywall"))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("contact email"));
+    }
+
+    #[test]
+    fn crossref_metadata_maps_to_search_result() {
+        let work: CrossrefWork = serde_json::from_str(
+            r#"{
+                "title": ["A Crossref Paper"],
+                "DOI": "10.1/crossref",
+                "author": [{"given": "Ada", "family": "Lovelace"}],
+                "published": {"date-parts": [[2025, 1, 2]]},
+                "URL": "https://doi.org/10.1/crossref"
+            }"#,
+        )
+        .unwrap();
+        let result = crossref_to_search_result(work);
+        assert_eq!(result.title, "A Crossref Paper");
+        assert_eq!(result.authors, vec!["Ada Lovelace"]);
+        assert_eq!(result.year, Some(2025));
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -334,4 +509,45 @@ struct UnpaywallLocation {
     url: Option<String>,
     url_for_pdf: Option<String>,
     license: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CrossrefResponse {
+    message: CrossrefMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct CrossrefSingleResponse {
+    message: CrossrefWork,
+}
+
+#[derive(Debug, Deserialize)]
+struct CrossrefMessage {
+    items: Vec<CrossrefWork>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CrossrefWork {
+    #[serde(default)]
+    title: Vec<String>,
+    #[serde(default, rename = "DOI")]
+    doi: Option<String>,
+    #[serde(default)]
+    author: Vec<CrossrefAuthor>,
+    #[serde(default)]
+    published: Option<CrossrefDate>,
+    #[serde(default, rename = "URL")]
+    url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CrossrefAuthor {
+    given: Option<String>,
+    family: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CrossrefDate {
+    #[serde(default, rename = "date-parts")]
+    date_parts: Vec<Vec<u16>>,
 }

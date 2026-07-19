@@ -539,6 +539,21 @@ pub enum PaperseedCorpusAction {
     /// Show Paperseed corpus status using Paperbridge config
     Status,
 
+    /// List papers in the local Paperseed corpus
+    List,
+
+    /// Show one cached paper by exact id or unique hash prefix
+    Show {
+        /// Local paper id or unique content-hash prefix
+        id: String,
+    },
+
+    /// Remove one cached paper and its stored file
+    Remove {
+        /// Local paper id or unique content-hash prefix
+        id: String,
+    },
+
     /// Import a PDF/text file that the user has rights to store locally
     Import {
         /// File path to import
@@ -549,6 +564,9 @@ pub enum PaperseedCorpusAction {
         /// Optional license, e.g. cc-by, cc0, public-domain, user-owned-private
         #[arg(long)]
         license: Option<String>,
+        /// Defer full-text extraction until first read
+        #[arg(long)]
+        no_fulltext: bool,
     },
 
     /// Ingest Paperbridge/Zotero-style metadata plus an authorized local file
@@ -562,6 +580,9 @@ pub enum PaperseedCorpusAction {
         /// License override
         #[arg(long)]
         license: Option<String>,
+        /// Defer full-text extraction until first read
+        #[arg(long)]
+        no_fulltext: bool,
     },
 
     /// Search the local Paperseed full-text corpus
@@ -577,6 +598,9 @@ pub enum PaperseedCorpusAction {
         #[arg(long, value_enum)]
         format: Option<PaperseedExportFormat>,
     },
+
+    /// Rebuild the Paperseed search index from corpus metadata and text blobs
+    Reindex,
 }
 
 #[derive(Debug, Subcommand)]
@@ -750,6 +774,18 @@ mod tests {
                 }
             })
         ));
+    }
+
+    #[test]
+    fn parse_paperseed_corpus_admin_commands() {
+        for args in [
+            vec!["paperbridge", "paperseed", "corpus", "list"],
+            vec!["paperbridge", "paperseed", "corpus", "show", "abc123"],
+            vec!["paperbridge", "paperseed", "corpus", "remove", "abc123"],
+            vec!["paperbridge", "paperseed", "corpus", "reindex"],
+        ] {
+            Cli::try_parse_from(args).expect("paperseed corpus command should parse");
+        }
     }
 
     #[test]
