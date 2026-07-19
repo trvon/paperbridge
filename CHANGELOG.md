@@ -37,6 +37,13 @@
 
 * Bump `quick-xml` to 0.41 (RUSTSEC-2026-0194 / 0195)
 
+## [1.0.1](https://github.com/trvon/paperbridge/compare/v1.0.0...v1.0.1) (2026-07-19)
+
+
+### Bug Fixes
+
+* **paperseed:** harden local corpus ([5825371](https://github.com/trvon/paperbridge/commit/5825371d713c9be9550903b3b9da17b4e951ced8))
+
 ## [1.0.0](https://github.com/trvon/paperbridge/compare/v0.11.1...v1.0.0) (2026-07-12)
 
 
