@@ -606,4 +606,24 @@ Encerramento.
         assert_eq!(sections[0].text, "Graph detector summary.");
         assert!(sections[2].text.contains("AUC was 0.92"));
     }
+
+    #[test]
+    fn real_pdf_extraction_yields_navigable_sections() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("crates/paperseed/tests/fixtures/arxiv_1408_5939_planar_subgraphs.pdf");
+        let bytes = std::fs::read(fixture).expect("read PDF fixture");
+        let text = paperseed::app::extract_pdf_text_from_bytes(&bytes)
+            .expect("extract PDF fixture")
+            .expect("extract text from PDF fixture");
+        let sections = build_sections(None, &text);
+
+        assert!(sections.iter().any(|section| {
+            section.kind == Some(PaperSectionKind::Abstract)
+                && section.text.contains("induced pseudoforest")
+        }));
+        assert!(sections.iter().any(|section| {
+            section.kind == Some(PaperSectionKind::Introduction)
+                && section.text.contains("Planarization")
+        }));
+    }
 }

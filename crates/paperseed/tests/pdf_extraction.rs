@@ -9,7 +9,8 @@
 //! extractor in `paperseed::app::extract_text_from_pdf_bytes`. They flip to
 //! `passing` once that extractor is replaced with `pdf-extract`.
 
-use paperseed::app::{CorpusPaths, ImportRequest, import_with_yams};
+use paperseed::PaperseedError;
+use paperseed::app::{CorpusPaths, ImportRequest, extract_pdf_text_from_bytes, import_with_yams};
 use paperseed::db::CorpusDb;
 use paperseed::yams::YamsConfig;
 use std::path::PathBuf;
@@ -85,4 +86,57 @@ fn arxiv_1808_extracts_author_and_topic() {
         "expected topic phrase; first 400 chars: {:?}",
         text.chars().take(400).collect::<String>()
     );
+}
+
+#[test]
+fn invalid_pdf_import_does_not_create_a_corpus_entry() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = dir.path().join("publisher-error.pdf");
+    std::fs::write(&source, "<html><body>Access denied</body></html>").expect("write fixture");
+    let paths = CorpusPaths::new(dir.path().join("corpus"));
+
+    let error = import_with_yams(
+        &paths,
+        ImportRequest {
+            path: source,
+            title: Some("Not a PDF".to_string()),
+            license: Some("cc-by".to_string()),
+            yams_hash: None,
+            extract_full_text: true,
+        },
+        &YamsConfig::disabled(),
+    )
+    .expect_err("HTML served as a PDF must not be indexed");
+
+    assert!(matches!(error, PaperseedError::InvalidPdf));
+    assert!(
+        CorpusDb::load(&paths.db_path)
+            .expect("load corpus")
+            .papers
+            .is_empty()
+    );
+    assert!(
+        std::fs::read_dir(&paths.files_dir)
+            .expect("files directory")
+            .next()
+            .is_none()
+    );
+    assert!(
+        std::fs::read_dir(paths.root.join(".staging"))
+            .expect("staging directory")
+            .all(
+                |entry| std::fs::read_dir(entry.expect("staging entry").path())
+                    .expect("staging prefix")
+                    .next()
+                    .is_none()
+            ),
+        "failed extraction must not leave staged PDF bytes"
+    );
+}
+
+#[test]
+fn malformed_pdf_with_header_reports_parse_failure() {
+    let error = extract_pdf_text_from_bytes(b"%PDF-1.7\nthis is not a complete PDF")
+        .expect_err("malformed PDF must not look like an image-only PDF");
+    assert!(matches!(error, PaperseedError::PdfExtraction { .. }));
 }
