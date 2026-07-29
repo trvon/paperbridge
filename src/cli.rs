@@ -452,6 +452,9 @@ pub enum PapersAction {
         /// Max fulltext characters (default 8000)
         #[arg(long)]
         max_chars: Option<usize>,
+        /// UTF-8 byte offset for the next fulltext page (default 0)
+        #[arg(long)]
+        offset: Option<usize>,
         /// Structure selector when want includes structure
         #[arg(long)]
         selector: Option<String>,

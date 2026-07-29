@@ -8,6 +8,15 @@ pub enum PaperseedError {
     #[error("path is not a file: {0}")]
     NotAFile(PathBuf),
 
+    #[error("PDF is too large to extract safely ({bytes} bytes; limit is {limit} bytes)")]
+    PdfTooLarge { bytes: u64, limit: u64 },
+
+    #[error("file is not a PDF document (missing %PDF- header)")]
+    InvalidPdf,
+
+    #[error("could not extract text from PDF: {reason}")]
+    PdfExtraction { reason: String },
+
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 

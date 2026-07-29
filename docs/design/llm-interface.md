@@ -36,18 +36,17 @@ Companion backlog: [llm-interface-tasks.md](llm-interface-tasks.md).
 | Free-text / id query | `query` | `q` | required when searching | Same for library + papers |
 | Page size | `limit` | — | **10** (search/list) | Max 50 for agent defaults; never default 0=all |
 | Per-source fan-out | `limit_per_source` | CLI legacy `--limit` | 10 | Initial source prefix; later offset pages expand it as needed, up to a safe window of 200. CLI prefers `--per-source`. |
-| Pagination offset | `offset` | `start` | 0 | Library + papers |
+| Pagination offset | `offset` | `start` | 0 | Library and paper-search rows; bounded fulltext uses a returned UTF-8 byte offset |
 | Source filter | `sources` | — | all enabled | Canonical wire names below |
 | Cache mode | `cache` | — | `auto` | `auto` \| `include` \| `only` \| `off` |
 | Detail level | `detail` | — | `compact` | `compact` \| `full` |
-| Field projection | `fields` | — | compact default set | Optional explicit list |
 | Abstract cap | `abstract_max_chars` | — | 280 when abstract included | 0 = unlimited (full detail only) |
 
 ### Source wire names (canonical)
 
 Prefer **skill/CLI forms** as the single wire form for MCP JSON + CLI:
 
-`arxiv`, `paperseed`, `hugging_face`, `semantic_scholar`, `crossref`,
+`research`, `arxiv`, `paperseed`, `hugging_face`, `semantic_scholar`, `crossref`,
 `openalex`, `europe_pmc`, `dblp`, `openreview`, `core`, `ads`, `pubmed`,
 `scholarapi`.
 
@@ -86,8 +85,9 @@ Rules:
 - `limit == 0` is rejected or clamped with an actionable error (do not mean “all”).
 - `diagnostics` may be omitted for pure local library calls that cannot fail
   per-source; prefer always present with empty arrays when cheap.
-- Pretty-print JSON is fine for CLI; MCP may use compact JSON to save tokens
-  if the host allows (prefer compact for MCP when changing serializers).
+- CLI `--json` output may be pretty-printed; human-readable output is the CLI
+  default. MCP may use compact JSON to save tokens if the host allows (prefer
+  compact for MCP when changing serializers).
 
 ## Compact hit contract (`detail=compact`)
 
@@ -100,10 +100,7 @@ Rules:
   "year": "2017",
   "ids": {
     "doi": "10.48550/arXiv.1706.03762",
-    "arxiv": "1706.03762",
-    "pmid": null,
-    "zotero_key": null,
-    "paper_id": null
+    "arxiv": "1706.03762"
   },
   "match": {
     "kind": "exact_title",
@@ -130,11 +127,17 @@ Stable, deterministic, preferred order of minting:
 3. `pmid:{pmid}`
 4. `zotero:{item_key}`
 5. `paperseed:{paper_id}`
-6. `url:{canonical_url}` last resort. This is intentionally reversible so a
+6. `research:{yams_hash}` for grouped YAMS research documents
+7. `url:{canonical_url}` last resort. This is intentionally reversible so a
    stateless `open_paper { hit_id }` call can retrieve URL-only hits.
 
 Same logical paper from different sources should prefer the same id when an
 identifier is shared (dedupe merge must promote best id set onto the kept hit).
+
+`access.content_state` is optional for remote results and required for local
+research hits: `ready` is directly openable; `stale` means discovery metadata
+survives but YAMS cannot read the indexed blob or original path. Agents must not
+infer full-text availability from a search snippet.
 
 ## Query planning (search)
 
@@ -185,20 +188,23 @@ open_paper {
   hit_id? | doi? | arxiv_id? | item_key? | paper_id? | attachment_key? | url?,
   want: ["metadata" | "fulltext" | "structure" | "chunks"],
   max_chars?,
+  offset?,
   selector?,
   max_chars_per_chunk?
 }
 ```
 
-Resolution order: explicit ids → `hit_id` parse → cache → Zotero → OA PDF
-download (**await**, not fire-and-forget) → error with recovery steps.
+Resolution order: explicit ids → `hit_id` parse → YAMS research bundle → exact
+cache identity → Zotero → OA PDF download (**await**, not fire-and-forget) →
+error with recovery steps.
 
 Defaults:
 
 - `want` default `["metadata"]` or `["structure"]` for paper keys (choose one
   and document; prefer `metadata` then let agent request more).
-- Fulltext always respects `max_chars` (default e.g. 8_000) with
-  `truncated: true` and `total_chars` when clipped.
+- Fulltext always respects `max_chars` (default 8,000), reports `total_chars`,
+  and returns `next_offset` when another page is available. `next_offset` is a
+  UTF-8 byte position; call the same tool with that exact `offset` to continue.
 - Structure path may accept `selector` (same language as `query_paper`).
 
 Low-level tools (`get_pdf_text`, `get_item_fulltext`, `get_paper_structure`)
@@ -228,6 +234,10 @@ Every user-facing error body should support:
   "try": ["exact next tool call or CLI command", "..."]
 }
 ```
+
+CLI runtime errors emit this envelope on stderr when `--json` is selected and
+return a non-zero exit code; stdout remains empty. Clap parse/usage errors occur
+before runtime dispatch and retain Clap's native formatting.
 
 Map validation failures to MCP `invalid_params`; keep recovery text in the
 message or structured data.
@@ -295,3 +305,6 @@ Minimum live or mocked cases after changes:
 9. CLI `papers search --help` and MCP schema agree on `limit` vs
    `limit_per_source`.
 10. Skill examples run against the built CLI surface.
+11. Query `What drives detection in GNN` with source `research` → consolidated
+    paper-2 hit first; opening its `research:` id yields structured evaluation
+    content within the second tool call.

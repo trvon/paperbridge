@@ -6,11 +6,11 @@ use crate::hit_enrich::{apply_detail, enrich_hit_identity, enrich_match};
 use crate::models::{
     BackendInfo, CachedPaperDetail, CachedPaperSummary, CollectionListResult, CollectionSummary,
     CollectionUpdateRequest, CollectionWriteRequest, ContentState, CrossrefWork,
-    DeleteCollectionRequest, DeleteItemRequest, FulltextContent, ItemDetail, ItemListResult,
-    ItemSummary, ItemUpdateRequest, ItemVoxPayload, ItemWriteRequest, ListCollectionsQuery,
-    PaperHit, PaperSource, PaperStructure, SearchCacheMode, SearchDiagnostics, SearchItemsQuery,
-    SearchPapersResult, SearchVoxPayload, SkillPayload, SourceDiagnostic, ValidationIssue,
-    ValidationIssueLevel, ValidationReport, VoxTextPayload,
+    DeleteCollectionRequest, DeleteItemRequest, FulltextContent, FulltextPage, ItemDetail,
+    ItemListResult, ItemSummary, ItemUpdateRequest, ItemVoxPayload, ItemWriteRequest,
+    ListCollectionsQuery, PaperHit, PaperSource, PaperStructure, SearchCacheMode,
+    SearchDiagnostics, SearchItemsQuery, SearchPapersResult, SearchVoxPayload, SkillPayload,
+    SourceDiagnostic, ValidationIssue, ValidationIssueLevel, ValidationReport, VoxTextPayload,
 };
 use crate::paper;
 use crate::paper::docker::DEFAULT_PORT as GROBID_DEFAULT_PORT;
@@ -64,6 +64,7 @@ pub struct OpenPaperRequest {
     pub url: Option<String>,
     pub want: Vec<String>,
     pub max_chars: Option<usize>,
+    pub offset: Option<usize>,
     pub selector: Option<String>,
     pub max_chars_per_chunk: Option<usize>,
 }
@@ -287,6 +288,12 @@ impl PaperbridgeService {
     /// Resolve a paper by id and return requested slices (metadata/fulltext/structure/chunks).
     pub async fn open_paper(&self, req: OpenPaperRequest) -> Result<serde_json::Value> {
         let max_chars = req.max_chars.unwrap_or(DEFAULT_FULLTEXT_MAX_CHARS);
+        if max_chars == 0 {
+            return Err(ZoteroMcpError::InvalidInput(
+                "max_chars must be at least 1; omit it to use the default of 8000.".into(),
+            ));
+        }
+        let offset = req.offset.unwrap_or(0);
         let mut resolved = resolve_open_targets(&req)?;
 
         // Prefer cache when paper_id known or hit_id is paperseed:
@@ -349,15 +356,15 @@ impl PaperbridgeService {
 
         if wants.iter().any(|w| w == "fulltext" || w == "chunks") {
             let fulltext = self.resolve_fulltext_for_open(&mut resolved).await?;
-            let truncated = truncate_fulltext(&fulltext, max_chars);
+            let page = paginate_fulltext(&fulltext, max_chars, offset)?;
             if wants.iter().any(|w| w == "fulltext") {
-                out.insert("fulltext".into(), serde_json::to_value(&truncated)?);
+                out.insert("fulltext".into(), serde_json::to_value(&page)?);
             }
             if wants.iter().any(|w| w == "chunks") {
                 let chunk_size = req.max_chars_per_chunk.unwrap_or(DEFAULT_CHUNK_SIZE);
                 let vox = pdf::prepare_vox_payload(
-                    &format!("open:{}", truncated.item_key),
-                    &truncated.content,
+                    &format!("open:{}", page.fulltext.item_key),
+                    &page.fulltext.content,
                     chunk_size,
                 );
                 out.insert("chunks".into(), serde_json::to_value(vox)?);
@@ -382,19 +389,7 @@ impl PaperbridgeService {
             ));
         }
 
-        out.insert(
-            "resolved".into(),
-            serde_json::json!({
-                "hit_id": req.hit_id,
-                "doi": resolved.doi,
-                "arxiv_id": resolved.arxiv_id,
-                "item_key": resolved.item_key,
-                "paper_id": resolved.paper_id,
-                "attachment_key": resolved.attachment_key,
-                "url": resolved.url,
-                "research_hash": resolved.research_hash,
-            }),
-        );
+        out.insert("resolved".into(), resolved_open_output(&req, &resolved));
 
         Ok(serde_json::Value::Object(out))
     }
@@ -545,7 +540,7 @@ impl PaperbridgeService {
         let Some(url) = self.resolve_open_pdf_url(resolved).await else {
             return Ok(None);
         };
-        let response = reqwest::Client::builder()
+        let mut response = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()?
             .get(&url)
@@ -558,8 +553,35 @@ impl PaperbridgeService {
                 message: format!("open_paper PDF download failed at {url}"),
             });
         }
-        let bytes = response.bytes().await?;
-        let content = paperseed::app::extract_pdf_text_from_bytes(&bytes).ok_or_else(|| {
+        if response
+            .content_length()
+            .is_some_and(|length| length > paperseed::app::MAX_PDF_EXTRACTION_BYTES)
+        {
+            return Err(ZoteroMcpError::InvalidInput(format!(
+                "Downloaded PDF from {url} exceeds the {} MiB extraction limit. Try a smaller copy, a cached/OCR version, or a Zotero attachment.",
+                paperseed::app::MAX_PDF_EXTRACTION_BYTES / (1024 * 1024)
+            )));
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            let next_len = bytes.len().saturating_add(chunk.len());
+            if u64::try_from(next_len).unwrap_or(u64::MAX)
+                > paperseed::app::MAX_PDF_EXTRACTION_BYTES
+            {
+                return Err(ZoteroMcpError::InvalidInput(format!(
+                    "Downloaded PDF from {url} exceeds the {} MiB extraction limit. Try a smaller copy, a cached/OCR version, or a Zotero attachment.",
+                    paperseed::app::MAX_PDF_EXTRACTION_BYTES / (1024 * 1024)
+                )));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let content = paperseed::app::extract_pdf_text_from_bytes(&bytes)
+            .map_err(|error| {
+                ZoteroMcpError::InvalidInput(format!(
+                    "Downloaded paper from {url}, but its PDF text could not be read: {error}. Try a real, decrypted PDF, an OCR copy, or a Zotero attachment."
+                ))
+            })?
+            .ok_or_else(|| {
             ZoteroMcpError::InvalidInput(format!(
                 "Downloaded paper from {url}, but no extractable PDF text was found. Try a cached/OCR copy or a Zotero attachment."
             ))
@@ -817,6 +839,18 @@ impl PaperbridgeService {
         }
     }
 
+    /// Fetch a bounded page of PDF text for MCP-style context use.
+    pub async fn get_pdf_text_page(
+        &self,
+        attachment_key: &str,
+        max_chars: Option<usize>,
+        offset: Option<usize>,
+    ) -> Result<FulltextPage> {
+        let max_chars = validated_fulltext_limit(max_chars)?;
+        let fulltext = self.get_pdf_text(attachment_key).await?;
+        paginate_fulltext(&fulltext, max_chars, offset.unwrap_or(0))
+    }
+
     pub async fn get_item_fulltext(&self, attachment_key: &str) -> Result<FulltextContent> {
         match self.backend.get_item_fulltext(attachment_key).await {
             Ok(fulltext) => Ok(fulltext),
@@ -827,6 +861,18 @@ impl PaperbridgeService {
                 Err(backend_err)
             }
         }
+    }
+
+    /// Fetch a bounded page of indexed full text for MCP-style context use.
+    pub async fn get_item_fulltext_page(
+        &self,
+        attachment_key: &str,
+        max_chars: Option<usize>,
+        offset: Option<usize>,
+    ) -> Result<FulltextPage> {
+        let max_chars = validated_fulltext_limit(max_chars)?;
+        let fulltext = self.get_item_fulltext(attachment_key).await?;
+        paginate_fulltext(&fulltext, max_chars, offset.unwrap_or(0))
     }
 
     pub async fn get_paper_structure(
@@ -1520,6 +1566,40 @@ fn normalize_open_url(raw: &str) -> Result<String> {
     Ok(parsed.to_string())
 }
 
+fn resolved_open_output(req: &OpenPaperRequest, resolved: &OpenResolved) -> serde_json::Value {
+    let mut output = serde_json::Map::new();
+    insert_optional_json_string(&mut output, "hit_id", req.hit_id.as_deref());
+    insert_optional_json_string(&mut output, "doi", resolved.doi.as_deref());
+    insert_optional_json_string(&mut output, "arxiv_id", resolved.arxiv_id.as_deref());
+    insert_optional_json_string(&mut output, "item_key", resolved.item_key.as_deref());
+    insert_optional_json_string(&mut output, "paper_id", resolved.paper_id.as_deref());
+    insert_optional_json_string(
+        &mut output,
+        "attachment_key",
+        resolved.attachment_key.as_deref(),
+    );
+    insert_optional_json_string(&mut output, "url", resolved.url.as_deref());
+    insert_optional_json_string(
+        &mut output,
+        "research_hash",
+        resolved.research_hash.as_deref(),
+    );
+    serde_json::Value::Object(output)
+}
+
+fn insert_optional_json_string(
+    output: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: Option<&str>,
+) {
+    if let Some(value) = value {
+        output.insert(
+            key.to_string(),
+            serde_json::Value::String(value.to_string()),
+        );
+    }
+}
+
 fn strip_arxiv_version_local(id: &str) -> String {
     if let Some(idx) = id.rfind('v') {
         let (base, ver) = id.split_at(idx);
@@ -1581,23 +1661,48 @@ fn paper_hit_from_resolved(resolved: &OpenResolved) -> PaperHit {
     hit
 }
 
-fn truncate_fulltext(fulltext: &FulltextContent, max_chars: usize) -> FulltextContent {
-    let total_chars = fulltext.content.chars().count() as u32;
-    if fulltext.content.chars().count() <= max_chars {
-        let mut ft = fulltext.clone();
-        ft.total_chars = Some(total_chars);
-        ft.indexed_chars = Some(total_chars);
-        return ft;
+fn validated_fulltext_limit(max_chars: Option<usize>) -> Result<usize> {
+    match max_chars.unwrap_or(DEFAULT_FULLTEXT_MAX_CHARS) {
+        0 => Err(ZoteroMcpError::InvalidInput(
+            "max_chars must be at least 1; omit it to use the default of 8000.".into(),
+        )),
+        limit => Ok(limit),
     }
-    let content: String = fulltext.content.chars().take(max_chars).collect();
-    FulltextContent {
-        item_key: fulltext.item_key.clone(),
-        content,
-        indexed_pages: fulltext.indexed_pages,
-        total_pages: fulltext.total_pages,
-        indexed_chars: Some(max_chars as u32),
-        total_chars: Some(total_chars),
+}
+
+fn paginate_fulltext(
+    fulltext: &FulltextContent,
+    max_chars: usize,
+    offset: usize,
+) -> Result<FulltextPage> {
+    let source = fulltext.content.as_str();
+    let start = offset.min(source.len());
+    if !source.is_char_boundary(start) {
+        return Err(ZoteroMcpError::InvalidInput(
+            "offset must be on a UTF-8 character boundary; use next_offset from the previous page."
+                .into(),
+        ));
     }
+    let remaining = &source[start..];
+    let end = remaining
+        .char_indices()
+        .nth(max_chars)
+        .map_or(source.len(), |(index, _)| start + index);
+    let content = source[start..end].to_string();
+    let returned_chars = content.chars().count();
+    let total = fulltext
+        .total_chars
+        .and_then(|chars| usize::try_from(chars).ok())
+        .unwrap_or_else(|| source.chars().count());
+    let mut page = fulltext.clone();
+    page.content = content;
+    page.indexed_chars = u32::try_from(returned_chars).ok();
+    page.total_chars = u32::try_from(total).ok();
+    Ok(FulltextPage {
+        fulltext: page,
+        offset: (start > 0).then_some(start),
+        next_offset: (end < source.len()).then_some(end),
+    })
 }
 
 fn merge_prefer_cached(hits: &mut Vec<PaperHit>, cache_start: usize) {
@@ -2331,9 +2436,14 @@ mod tests {
     #[tokio::test]
     async fn mirror_open_access_hit_downloads_into_paperseed_corpus() {
         let server = wiremock::MockServer::start().await;
+        let fixture = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("crates/paperseed/tests/fixtures/arxiv_1408_5939_planar_subgraphs.pdf"),
+        )
+        .unwrap();
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/paper.pdf"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes("pdf bytes"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(fixture))
             .mount(&server)
             .await;
 
@@ -3633,6 +3743,7 @@ mod tests {
             url: None,
             want: vec![],
             max_chars: None,
+            offset: None,
             selector: None,
             max_chars_per_chunk: None,
         })
@@ -3649,6 +3760,7 @@ mod tests {
             url: None,
             want: vec![],
             max_chars: None,
+            offset: None,
             selector: None,
             max_chars_per_chunk: None,
         })
@@ -3665,6 +3777,7 @@ mod tests {
             url: None,
             want: vec![],
             max_chars: None,
+            offset: None,
             selector: None,
             max_chars_per_chunk: None,
         })
@@ -3681,6 +3794,7 @@ mod tests {
             url: None,
             want: vec![],
             max_chars: None,
+            offset: None,
             selector: None,
             max_chars_per_chunk: None,
         })
@@ -3692,7 +3806,7 @@ mod tests {
     }
 
     #[test]
-    fn truncate_fulltext_sets_total_and_indexed_chars() {
+    fn paginate_fulltext_sets_total_and_continuation() {
         let full = FulltextContent {
             item_key: "k".into(),
             content: "abcdefghij".into(),
@@ -3701,10 +3815,39 @@ mod tests {
             indexed_chars: None,
             total_chars: None,
         };
-        let t = truncate_fulltext(&full, 4);
-        assert_eq!(t.content, "abcd");
-        assert_eq!(t.indexed_chars, Some(4));
-        assert_eq!(t.total_chars, Some(10));
+        let first = paginate_fulltext(&full, 4, 0).unwrap();
+        assert_eq!(first.fulltext.content, "abcd");
+        assert_eq!(first.fulltext.indexed_chars, Some(4));
+        assert_eq!(first.fulltext.total_chars, Some(10));
+        assert_eq!(first.offset, None);
+        assert_eq!(first.next_offset, Some(4));
+
+        let second = paginate_fulltext(&full, 4, 4).unwrap();
+        assert_eq!(second.fulltext.content, "efgh");
+        assert_eq!(second.offset, Some(4));
+        assert_eq!(second.next_offset, Some(8));
+    }
+
+    #[test]
+    fn paginate_fulltext_uses_utf8_byte_offsets() {
+        let full = FulltextContent {
+            item_key: "k".into(),
+            content: "éabc".into(),
+            indexed_pages: None,
+            total_pages: None,
+            indexed_chars: None,
+            total_chars: Some(4),
+        };
+
+        let first = paginate_fulltext(&full, 1, 0).unwrap();
+        assert_eq!(first.fulltext.content, "é");
+        assert_eq!(first.next_offset, Some(2));
+
+        let second = paginate_fulltext(&full, 2, first.next_offset.unwrap()).unwrap();
+        assert_eq!(second.fulltext.content, "ab");
+        assert_eq!(second.next_offset, Some(4));
+
+        assert!(paginate_fulltext(&full, 1, 1).is_err());
     }
 
     #[tokio::test]
@@ -3721,12 +3864,16 @@ mod tests {
                 url: None,
                 want: vec!["metadata".into()],
                 max_chars: None,
+                offset: None,
                 selector: None,
                 max_chars_per_chunk: None,
             })
             .await
             .unwrap();
         assert_eq!(value["metadata"]["arxiv_id"].as_str(), Some("1706.03762"));
+        assert_eq!(value["resolved"]["hit_id"], "arxiv:1706.03762");
+        assert_eq!(value["resolved"]["arxiv_id"], "1706.03762");
+        assert!(value["resolved"].get("doi").is_none());
         assert!(
             value["metadata"]["pdf_url"]
                 .as_str()
@@ -3783,6 +3930,7 @@ mod tests {
                 url: None,
                 want: vec!["fulltext".into()],
                 max_chars: Some(12),
+                offset: None,
                 selector: None,
                 max_chars_per_chunk: None,
             })
@@ -3793,6 +3941,7 @@ mod tests {
         assert_eq!(content, "hello open p");
         assert_eq!(value["fulltext"]["indexed_chars"], 12);
         assert!(value["fulltext"]["total_chars"].as_u64().unwrap() > 12);
+        assert_eq!(value["fulltext"]["next_offset"], 12);
     }
 
     #[tokio::test]
@@ -3824,6 +3973,7 @@ mod tests {
                 url: None,
                 want: vec!["structure".into()],
                 max_chars: Some(2_000),
+                offset: None,
                 selector: None,
                 max_chars_per_chunk: None,
             })
@@ -3838,6 +3988,46 @@ mod tests {
         assert_eq!(
             value["resolved"]["url"].as_str(),
             Some(format!("{}/paper.pdf", server.uri()).as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn open_url_rejects_html_disguised_as_a_pdf() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/paper.pdf"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/html")
+                    .set_body_string("<html><body>Access denied</body></html>"),
+            )
+            .mount(&server)
+            .await;
+
+        let error = service()
+            .open_paper(OpenPaperRequest {
+                hit_id: Some(format!("url:{}/paper.pdf", server.uri())),
+                doi: None,
+                arxiv_id: None,
+                item_key: None,
+                paper_id: None,
+                attachment_key: None,
+                url: None,
+                want: vec!["fulltext".into()],
+                max_chars: None,
+                offset: None,
+                selector: None,
+                max_chars_per_chunk: None,
+            })
+            .await
+            .expect_err("HTML must not be presented as an empty PDF");
+
+        assert!(
+            error.to_string().contains("not a PDF"),
+            "unexpected: {error}"
         );
     }
 
@@ -3902,6 +4092,7 @@ mod tests {
                 url: None,
                 want: vec!["fulltext".into()],
                 max_chars: Some(2_000),
+                offset: None,
                 selector: None,
                 max_chars_per_chunk: None,
             })
@@ -3931,6 +4122,7 @@ mod tests {
                 url: None,
                 want: vec!["metadata".into()],
                 max_chars: None,
+                offset: None,
                 selector: None,
                 max_chars_per_chunk: None,
             })

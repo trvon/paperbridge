@@ -14,6 +14,11 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Upper bound for an in-process PDF extraction. This prevents accidental
+/// ingestion of multi-gigabyte downloads while leaving ample room for normal
+/// scholarly PDFs.
+pub const MAX_PDF_EXTRACTION_BYTES: u64 = 100 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct CorpusPaths {
     pub root: PathBuf,
@@ -177,13 +182,38 @@ fn prepare_local_file(
 ) -> Result<(LocalPaper, Option<String>)> {
     fs::create_dir_all(&paths.files_dir)?;
     let mime = infer_mime(source);
-    let file = copy_and_describe_file(source, &paths.files_dir, mime)?;
-    let paper = paper_from_stored_file(file, title, license)?;
+    // Snapshot input before extraction so the text and stored file always
+    // refer to the same bytes, even if the source path is replaced mid-import.
+    let staging_dir = paths.root.join(".staging");
+    let staged = copy_and_describe_file(source, &staging_dir, mime.clone())?;
     let full_text = if should_extract_full_text {
-        extract_full_text(&paper.file.path, &paper.file.mime)?
+        match extract_full_text(&staged.path, &mime) {
+            Ok(text) => text,
+            Err(error) => {
+                let _ = fs::remove_file(&staged.path);
+                return Err(error);
+            }
+        }
     } else {
         None
     };
+    let extension = source.extension().and_then(|extension| extension.to_str());
+    let destination = content_addressed_path(&paths.files_dir, &staged.hash, extension);
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if destination.exists() {
+        fs::remove_file(&staged.path)?;
+    } else {
+        fs::rename(&staged.path, &destination)?;
+    }
+    let file = crate::models::StoredFile {
+        hash: staged.hash,
+        path: destination,
+        size_bytes: staged.size_bytes,
+        mime,
+    };
+    let paper = paper_from_stored_file(file, title, license)?;
     Ok((paper, full_text))
 }
 
@@ -554,22 +584,97 @@ fn extract_full_text(path: &Path, mime: &str) -> Result<Option<String>> {
         return Ok(Some(fs::read_to_string(path)?));
     }
     if mime == "application/pdf" {
+        let bytes_len = fs::metadata(path)?.len();
+        if bytes_len > MAX_PDF_EXTRACTION_BYTES {
+            return Err(PaperseedError::PdfTooLarge {
+                bytes: bytes_len,
+                limit: MAX_PDF_EXTRACTION_BYTES,
+            });
+        }
         let bytes = fs::read(path)?;
-        return Ok(extract_pdf_text_from_bytes(&bytes));
+        return extract_pdf_text_from_bytes(&bytes);
     }
     Ok(None)
 }
 
 /// Extract normalized text directly from PDF bytes without importing them.
 /// Used by Paperbridge's stateless `open_paper` fallback.
-pub fn extract_pdf_text_from_bytes(bytes: &[u8]) -> Option<String> {
-    let text = pdf_extract::extract_text_from_mem(bytes).ok()?;
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
+pub fn extract_pdf_text_from_bytes(bytes: &[u8]) -> Result<Option<String>> {
+    let bytes_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if bytes_len > MAX_PDF_EXTRACTION_BYTES {
+        return Err(PaperseedError::PdfTooLarge {
+            bytes: bytes_len,
+            limit: MAX_PDF_EXTRACTION_BYTES,
+        });
     }
+    if !has_pdf_header(bytes) {
+        return Err(PaperseedError::InvalidPdf);
+    }
+
+    let text = pdf_extract::extract_text_from_mem(bytes).map_err(|error| {
+        let detail = error.to_string();
+        let reason = if detail.to_ascii_lowercase().contains("encrypt") {
+            "PDF is encrypted; provide a decrypted copy".to_string()
+        } else {
+            detail
+        };
+        PaperseedError::PdfExtraction { reason }
+    })?;
+    Ok(normalize_pdf_text(&text))
+}
+
+fn has_pdf_header(bytes: &[u8]) -> bool {
+    // ISO 32000 permits arbitrary leading bytes before the header, but asks
+    // readers to look no farther than the first 1,024 bytes.
+    bytes
+        .windows(b"%PDF-".len())
+        .take(1024)
+        .any(|window| window == b"%PDF-")
+}
+
+fn normalize_pdf_text(text: &str) -> Option<String> {
+    let mut sanitized = String::with_capacity(text.len());
+    let mut previous_was_carriage_return = false;
+    for character in text.chars() {
+        match character {
+            '\r' => {
+                sanitized.push('\n');
+                previous_was_carriage_return = true;
+            }
+            '\n' if previous_was_carriage_return => {
+                previous_was_carriage_return = false;
+            }
+            '\u{00ad}' => {}
+            '\u{00a0}' => sanitized.push(' '),
+            character if character.is_control() && character != '\n' && character != '\t' => {
+                sanitized.push(' ')
+            }
+            character => sanitized.push(character),
+        }
+        if character != '\r' && character != '\n' {
+            previous_was_carriage_return = false;
+        }
+    }
+
+    let mut normalized = String::with_capacity(sanitized.len());
+    let mut previous_blank = true;
+    for line in sanitized.lines() {
+        let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if line.is_empty() {
+            if !previous_blank {
+                normalized.push('\n');
+            }
+            previous_blank = true;
+        } else {
+            if !normalized.is_empty() {
+                normalized.push('\n');
+            }
+            normalized.push_str(&line);
+            previous_blank = false;
+        }
+    }
+
+    (!normalized.trim().is_empty()).then_some(normalized)
 }
 
 pub fn export_bibtex(db: &CorpusDb) -> String {
@@ -613,4 +718,28 @@ fn sanitize_bibtex_key(input: &str) -> String {
 
 fn escape_bibtex(input: &str) -> String {
     input.replace('{', "\\{").replace('}', "\\}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_html_disguised_as_a_pdf() {
+        let error = extract_pdf_text_from_bytes(b"<!doctype html><title>Access denied</title>")
+            .expect_err("HTML must not be accepted as a PDF");
+        assert!(matches!(error, PaperseedError::InvalidPdf));
+    }
+
+    #[test]
+    fn normalization_removes_controls_and_preserves_structure() {
+        let normalized = normalize_pdf_text(
+            "  Abstract\r\nA\u{00a0}useful\u{00ad} paper.\u{0000}\n\n\nIntroduction\t\nText.  ",
+        )
+        .expect("normalized text");
+        assert_eq!(
+            normalized,
+            "Abstract\nA useful paper.\n\nIntroduction\nText."
+        );
+    }
 }

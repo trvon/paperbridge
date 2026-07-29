@@ -101,6 +101,9 @@ pub struct OpenPaperParams {
     #[schemars(description = "Max characters of fulltext (default 8000)")]
     pub max_chars: Option<usize>,
 
+    #[schemars(description = "UTF-8 byte offset for the next fulltext page (default 0)")]
+    pub offset: Option<usize>,
+
     #[schemars(description = "Optional PaperStructure selector when want includes structure")]
     pub selector: Option<String>,
 
@@ -154,6 +157,12 @@ pub struct PreparePaperForSkillParams {
 pub struct GetItemFulltextParams {
     #[schemars(description = "Attachment item key")]
     pub attachment_key: String,
+
+    #[schemars(description = "Max characters to return (default 8000)")]
+    pub max_chars: Option<usize>,
+
+    #[schemars(description = "UTF-8 byte offset for the next page (default 0)")]
+    pub offset: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -403,7 +412,7 @@ impl PaperbridgeServer {
 
     #[tool(
         name = "get_item_fulltext",
-        description = "Get indexed full-text content for a Zotero attachment key. Falls back to searching the local Paperseed cache by the attachment key as a natural-language query when the backend is unavailable."
+        description = "Get a bounded page of indexed full-text for a Zotero attachment key. Default max_chars is 8000; use next_offset to continue. Falls back to the local Paperseed cache when the backend is unavailable."
     )]
     async fn get_item_fulltext(
         &self,
@@ -411,7 +420,7 @@ impl PaperbridgeServer {
     ) -> std::result::Result<CallToolResult, McpError> {
         let text = self
             .service
-            .get_item_fulltext(&params.attachment_key)
+            .get_item_fulltext_page(&params.attachment_key, params.max_chars, params.offset)
             .await
             .map_err(Self::map_error)?;
         Self::ok_json(&text)
@@ -419,7 +428,7 @@ impl PaperbridgeServer {
 
     #[tool(
         name = "get_pdf_text",
-        description = "Get PDF text for a Zotero attachment key (via Zotero full-text index). Falls back to searching the local Paperseed cache by the attachment key as a natural-language query when the backend is unavailable."
+        description = "Get a bounded page of PDF text for a Zotero attachment key. Default max_chars is 8000; use next_offset to continue. Falls back to the local Paperseed cache when the backend is unavailable."
     )]
     async fn get_pdf_text(
         &self,
@@ -427,7 +436,7 @@ impl PaperbridgeServer {
     ) -> std::result::Result<CallToolResult, McpError> {
         let text = self
             .service
-            .get_pdf_text(&params.attachment_key)
+            .get_pdf_text_page(&params.attachment_key, params.max_chars, params.offset)
             .await
             .map_err(Self::map_error)?;
         Self::ok_json(&text)
@@ -730,7 +739,7 @@ impl PaperbridgeServer {
             .search_papers(opts)
             .await
             .map_err(Self::map_error)?;
-        Self::ok_json(&result)
+        Self::ok_json(&result.agent_output())
     }
 
     #[tool(
@@ -753,6 +762,7 @@ impl PaperbridgeServer {
                 url: params.url,
                 want: params.want.unwrap_or_else(|| vec!["metadata".into()]),
                 max_chars: params.max_chars,
+                offset: params.offset,
                 selector: params.selector,
                 max_chars_per_chunk: params.max_chars_per_chunk,
             })
@@ -1089,16 +1099,14 @@ mod tests {
         let result = srv
             .get_item_fulltext(Parameters(GetItemFulltextParams {
                 attachment_key: "PDFA".to_string(),
+                max_chars: Some(10),
+                offset: None,
             }))
             .await
             .unwrap();
         let json: serde_json::Value = parse_call_tool_result(&result);
-        assert!(
-            json["content"]
-                .as_str()
-                .unwrap_or("")
-                .contains("First sentence")
-        );
+        assert!(json["content"].as_str().unwrap_or("").chars().count() == 10);
+        assert_eq!(json["next_offset"], 10);
     }
 
     #[tokio::test]

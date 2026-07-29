@@ -104,6 +104,8 @@ When `unpaywall_email` is configured, the response includes `oa_pdf_url`.
 ```bash
 # After search: open by hit_id / DOI / arXiv / Zotero key
 paperbridge papers open --hit-id "arxiv:1706.03762" --want fulltext --max-chars 8000
+# If the response includes next_offset, pass that UTF-8 byte offset to continue.
+paperbridge papers open --hit-id "arxiv:1706.03762" --want fulltext --max-chars 8000 --offset <next-offset>
 paperbridge papers open --hit-id "research:<yams-hash>" --want structure --max-chars 30000
 paperbridge papers open --item-key ABCD1234 --want structure
 paperbridge papers structure --key ABCD1234
@@ -117,8 +119,8 @@ paperbridge library read-search -q "sparse attention" --result-index 0 --search-
 `query_paper` / `resolve_doi`. Use Vox `prepare_*` tools only for read-aloud.
 
 MCP tools:
-- `open_paper { hit_id|doi|arxiv_id|item_key|paper_id|attachment_key|url, want, max_chars? }` — preferred
-- `get_pdf_text` / `get_item_fulltext` — low-level attachment/cache paths
+- `open_paper { hit_id|doi|arxiv_id|item_key|paper_id|attachment_key|url, want, max_chars?, offset? }` — preferred; use `next_offset` to continue fulltext
+- `get_pdf_text { attachment_key, max_chars?, offset? }` / `get_item_fulltext { attachment_key, max_chars?, offset? }` — low-level bounded attachment/cache paths
 - `prepare_vox_text` / `prepare_item_for_vox` / `prepare_search_result_for_vox` — Vox chunks only
 
 ### Structured paper content
@@ -269,7 +271,8 @@ paperbridge config snippet --target opencode
 - **Cached papers are conservative by default**: default cache-only hits need strong relevance, and `--sources` without `paperseed` excludes cache hits. Use `--sources paperseed` for explicit cache-only search.
 - **Research hits report availability**: use `--sources research` for YAMS-only discovery. Do not attempt to open hits with `access.content_state: stale` until the source is re-indexed.
 - **PDF text extraction** happens automatically during local corpus import unless `--no-fulltext` is passed. Deferred extraction runs on first read; neither path performs OCR.
-- **Fulltext can be large** — prefer `open_paper` with `max_chars` (default 8000) or structure selectors. Vox tools use `--max-chars-per-chunk`.
+- **PDF validation is strict when extracting** — HTML/error pages saved as `.pdf`, malformed or encrypted PDFs, and files over 100 MiB are rejected with recovery guidance. Use `--no-fulltext` only when you deliberately need to retain a PDF for later handling.
+- **Fulltext is paged** — `open_paper`, `get_pdf_text`, and `get_item_fulltext` default to 8,000 characters. When `next_offset` is present, repeat the same call with that UTF-8 byte `offset`. Vox tools use `--max-chars-per-chunk`.
 - **Write operations need `version` on update/delete** (Zotero optimistic concurrency). Re-fetch if you get HTTP 412.
 - **`config get api_key` no longer prints the raw key** — it prints `(set, N chars — pass --show-secret to reveal)`.
 - **Legacy flat commands** (`query`, `create-item`, `backend-info`, `search-papers`, …) still work but emit a deprecation warning. Prefer the canonical domain paths.

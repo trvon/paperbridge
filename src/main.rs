@@ -257,6 +257,7 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
                 url,
                 want,
                 max_chars,
+                offset,
                 selector,
             } => {
                 handle_papers_open(
@@ -270,6 +271,7 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
                     url,
                     want,
                     max_chars,
+                    offset,
                     selector,
                     output,
                 )
@@ -1031,7 +1033,7 @@ async fn handle_papers_search(
         abstract_max_chars: args.abstract_max_chars,
     };
     let result = service.search_papers(opts).await?;
-    print_output(&result, output)
+    print_output(&result.agent_output(), output)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1046,6 +1048,7 @@ async fn handle_papers_open(
     url: Option<String>,
     want: Option<Vec<String>>,
     max_chars: Option<usize>,
+    offset: Option<usize>,
     selector: Option<String>,
     output: OutputFormat,
 ) -> paperbridge::Result<()> {
@@ -1061,6 +1064,7 @@ async fn handle_papers_open(
             url,
             want: want.unwrap_or_else(|| vec!["metadata".into()]),
             max_chars,
+            offset,
             selector,
             max_chars_per_chunk: None,
         })

@@ -59,7 +59,7 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` cancelled
 - [x] **T-A4.2** Compact hits omit full abstracts; authors capped
 - [ ] **T-A4.3** Optional `fields` projection
 - [x] **T-A4.4** MCP JSON: compact serialization for tool results
-- [ ] **T-A4.5** Size budget test: 10 compact hits for a broad query stay under documented threshold
+- [x] **T-A4.5** Size budget test: 10 compact hits for a broad query stay under documented threshold
 
 **Accept:** Default search is usable inside an LLM context window without manual `jq` surgery.
 
@@ -123,29 +123,42 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` cancelled
 
 **Accept:** Golden queries in design verification corpus pass under mock + optional live smoke.
 
+### B7 — Local research and freshness
+
+- [x] **T-B7.1** Add canonical `research` source (`yams` alias) with stable hash ids
+- [x] **T-B7.2** Parse current YAMS float scores/hash/path/snippet schema
+- [x] **T-B7.3** Collapse paper-project fragments and prefer readable source blobs
+- [x] **T-B7.4** Report `access.content_state=ready|stale`
+- [x] **T-B7.5** Assemble off-disk TeX paper sections during `open_paper`
+- [x] **T-B7.6** Persist verified `yams_hash` after Paperseed import/OA mirror
+
+**Accept:** The paper-2 natural-language query returns one canonical hit first;
+search → open takes at most two calls and never advertises stale content as
+full text.
+
 ---
 
 ## Phase C — Execution interface (discover → read)
 
 ### C1 — `open_paper` tool + CLI
 
-- [x] **T-C1.1** Service API: resolve hit_id | doi | arxiv | item_key | paper_id | attachment_key
+- [x] **T-C1.1** Service API: resolve hit_id (including research) | doi | arxiv | item_key | paper_id | attachment_key
 - [x] **T-C1.2** Await OA/cache materialization (agent path uses synchronous ingestion/direct extraction; auto-mirror remains background)
 - [x] **T-C1.3** MCP tool `open_paper` with `want`, `max_chars`, `selector`
 - [x] **T-C1.4** CLI `papers open` (canonical) mirroring MCP
 - [x] **T-C1.5** Errors with recovery text when id not openable
-- [ ] **T-C1.6** Tests: open by arXiv id, DOI, cache paper_id, zotero key
+- [~] **T-C1.6** Tests: open by URL, research id, cache paper_id; arXiv/DOI/Zotero coverage remains
 
 ### C2 — Fulltext safety
 
 - [x] **T-C2.1** `max_chars` + `total_chars` / `indexed_chars` on open fulltext returns
 - [x] **T-C2.2** Default max on open fulltext path (8000)
-- [ ] **T-C2.3** Optional offset/continuation token or “next chunk” guidance
-- [ ] **T-C2.4** Align `get_pdf_text` / `get_item_fulltext` with same truncation options (low-level)
+- [x] **T-C2.3** Offset/continuation guidance via `next_offset`
+- [x] **T-C2.4** Align `get_pdf_text` / `get_item_fulltext` with bounded `max_chars` + `offset`
 
 ### C3 — Structure path clarity
 
-- [x] **T-C3.1** `open_paper want=structure` reuses `get_paper_structure`
+- [x] **T-C3.1** `open_paper want=structure` reuses cached structures and parses complete direct/research text before output truncation
 - [ ] **T-C3.2** Selector errors list available top-level keys + examples
 - [x] **T-C3.3** Accept DOI/arXiv/paper_id keys via structure path when cached/Zotero resolve works
 
@@ -164,16 +177,16 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` cancelled
 ### D1 — Descriptions match behavior
 
 - [ ] **T-D1.1** Fix `prepare_search_result_for_vox` description (papers-first, not “Search Zotero” only) or rename
-- [ ] **T-D1.2** Skill: separate “plain fulltext/structure” from “Vox read-aloud”
-- [ ] **T-D1.3** Skill: never teach `library read` as fulltext
-- [ ] **T-D1.4** Add plain fulltext CLI if missing (`library fulltext` or `papers open`)
-- [ ] **T-D1.5** Server instructions string: 6-tool spine + skill prompt
+- [x] **T-D1.2** Skill separates plain fulltext/structure from Vox read-aloud
+- [x] **T-D1.3** Skill does not teach `library read` as fulltext
+- [x] **T-D1.4** Plain fulltext CLI: `papers open --want fulltext`
+- [x] **T-D1.5** Server instructions lists the six-tool spine + skill prompt
 
 ### D2 — Default tool spine / progressive disclosure
 
-- [ ] **T-D2.1** Document primary vs secondary tools in skill frontmatter/body
+- [x] **T-D2.1** Skill documents primary agent spine vs Vox helpers
 - [ ] **T-D2.2** Optionally group or annotate write/vox tools as secondary in descriptions
-- [ ] **T-D2.3** Ensure `paperbridge_skill` prompt content regenerated/synced from `docs/skill.md`
+- [x] **T-D2.3** `paperbridge_skill` embeds `docs/skill.md`
 
 ### D3 — Library search quality
 
@@ -186,12 +199,16 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` cancelled
 - [ ] **T-D4.1** Structured error helper shared by CLI stderr/JSON and MCP messages
 - [ ] **T-D4.2** Audit top error paths for `try: []` next steps (config, missing key, no PDF, 412 version)
 
+CLI runtime half complete: `--json` now emits the documented error envelope on
+stderr with class-based recovery commands. Sharing the helper with MCP and a
+deeper per-path recovery audit remain open.
+
 ### D5 — Docs matrix
 
-- [ ] **T-D5.1** Update `docs/skill.md`, README, USAGE, CHANGELOG
-- [ ] **T-D5.2** CLI design checklist review for any command renames
-- [ ] **T-D5.3** `tests/cli_surface.rs` snapshots if help text changes
-- [ ] **T-D5.4** Agents.md: reference llm-interface design for MCP/return changes
+- [x] **T-D5.1** Update `docs/skill.md`, README, USAGE, CHANGELOG
+- [x] **T-D5.2** CLI design checklist review for user-visible help/source/output changes
+- [x] **T-D5.3** `tests/cli_surface.rs` coverage reviewed after help text changes
+- [x] **T-D5.4** Agents.md: reference llm-interface design for MCP/return changes
 
 ---
 
@@ -199,9 +216,9 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` cancelled
 
 - [ ] **T-E1** Automated tests covering design verification corpus (mock-first)
 - [ ] **T-E2** Optional live smoke script (`scripts/llm-interface-smoke.sh`) for Attention / arXiv id / DOI / diagnostics
-- [ ] **T-E3** Token-size measurement before/after for default `search_papers`
+- [x] **T-E3** Deterministic token-size measurement for default `search_papers`
 - [ ] **T-E4** Re-run full LLM interface audit; file residual issues as new tasks
-- [ ] **T-E5** `cargo fmt`, `clippy -D warnings`, `cargo test`, `cargo check --tests`
+- [x] **T-E5** `cargo fmt`, `clippy -D warnings`, `cargo test`, `cargo check --tests`
 
 ---
 

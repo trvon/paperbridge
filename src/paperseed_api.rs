@@ -749,6 +749,11 @@ pub fn map_error(error: paperseed::PaperseedError) -> ZoteroMcpError {
             "Paperseed import failed: path is not a file: {}\nTry:\n  paperseed corpus import <file> --license user-owned-private",
             path.display()
         )),
+        paperseed::PaperseedError::InvalidPdf
+        | paperseed::PaperseedError::PdfTooLarge { .. }
+        | paperseed::PaperseedError::PdfExtraction { .. } => ZoteroMcpError::InvalidInput(format!(
+            "Paperseed PDF import failed: {error}\nTry:\n  verify the download is a real, unencrypted PDF\n  use an OCR'd or smaller copy"
+        )),
         paperseed::PaperseedError::PaperNotFound(id) => ZoteroMcpError::InvalidInput(format!(
             "Paperseed corpus paper not found: {id}\nTry:\n  paperseed corpus query -q <terms>\n  paperseed corpus status"
         )),

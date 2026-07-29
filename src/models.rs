@@ -181,7 +181,9 @@ pub struct ItemSummary {
     pub item_type: String,
     pub title: String,
     pub creators: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub year: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 }
 
@@ -189,7 +191,9 @@ pub struct ItemSummary {
 pub struct AttachmentSummary {
     pub key: String,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<u64>,
@@ -198,17 +202,24 @@ pub struct AttachmentSummary {
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct ItemDetail {
     pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<u64>,
     pub item_type: String,
     pub title: String,
     pub creators: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub year: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub abstract_note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub date: Option<String>,
     pub tags: Vec<TagInput>,
     pub collections: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_item: Option<String>,
     pub attachments: Vec<AttachmentSummary>,
 }
@@ -217,7 +228,9 @@ pub struct ItemDetail {
 pub struct CollectionSummary {
     pub key: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_collection: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_count: Option<u32>,
 }
 
@@ -225,10 +238,28 @@ pub struct CollectionSummary {
 pub struct FulltextContent {
     pub item_key: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexed_pages: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_pages: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexed_chars: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_chars: Option<u32>,
+}
+
+/// A bounded full-text response suitable for an agent context window.
+///
+/// `offset` is an UTF-8 byte position and omitted for the first page. Call
+/// the same read operation with `offset=next_offset` to continue when present.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct FulltextPage {
+    #[serde(flatten)]
+    pub fulltext: FulltextContent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
@@ -243,9 +274,13 @@ pub struct ItemVoxPayload {
     pub item_key: String,
     pub item_title: String,
     pub attachment: AttachmentSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexed_pages: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_pages: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexed_chars: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_chars: Option<u32>,
     pub vox: VoxTextPayload,
 }
@@ -262,13 +297,20 @@ pub struct SearchVoxPayload {
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
 pub struct CrossrefWork {
     pub doi: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub authors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub year: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub journal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub abstract_note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publisher: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oa_pdf_url: Option<String>,
@@ -485,12 +527,21 @@ pub enum SearchCacheMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
 pub struct PaperMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authors: Vec<String>,
-    #[serde(rename = "abstract", alias = "abstract_note", alias = "abstractNote")]
+    #[serde(
+        rename = "abstract",
+        alias = "abstract_note",
+        alias = "abstractNote",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub abstract_note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doi: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub year: Option<String>,
 }
 
@@ -533,14 +584,18 @@ pub struct PaperReference {
     pub raw: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub year: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doi: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
 pub struct PaperFigure {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     pub caption: String,
 }
@@ -556,6 +611,7 @@ pub enum PaperStructureSource {
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
 pub struct PaperStructure {
     pub item_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_key: Option<String>,
     pub metadata: PaperMetadata,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -587,9 +643,13 @@ pub struct PaperHit {
     pub hit_id: Option<String>,
     pub source: PaperSource,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub year: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doi: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arxiv_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pmid: Option<String>,
@@ -601,11 +661,15 @@ pub struct PaperHit {
         skip_serializing_if = "Option::is_none"
     )]
     pub abstract_note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pdf_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oa_pdf_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub venue: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub citation_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache: Option<CachedPaperSummary>,
@@ -681,6 +745,39 @@ pub struct SearchPapersResult {
     pub hits: Vec<PaperHit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<SearchDiagnostics>,
+}
+
+impl SearchPapersResult {
+    /// Project the default search result to the compact agent wire contract.
+    ///
+    /// The service keeps complete hits so ranking, cache handoff, and Rust
+    /// callers can still use their metadata. CLI and MCP invoke this only at
+    /// their serialization boundary.
+    pub fn agent_output(&self) -> Self {
+        if self
+            .detail
+            .is_some_and(|detail| detail != SearchDetail::Compact)
+        {
+            return self.clone();
+        }
+
+        let mut output = self.clone();
+        output.detail = None;
+        for hit in &mut output.hits {
+            hit.doi = None;
+            hit.arxiv_id = None;
+            hit.pmid = None;
+            hit.abstract_note = None;
+            hit.url = None;
+            hit.pdf_url = None;
+            hit.oa_pdf_url = None;
+            hit.venue = None;
+            hit.citation_count = None;
+            hit.cache = None;
+            hit.relevance_score = None;
+        }
+        output
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
