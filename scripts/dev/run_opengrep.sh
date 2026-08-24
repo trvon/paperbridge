@@ -23,12 +23,12 @@ mkdir -p "$OUT_DIR"
 PROFILE="${OPENGREP_PROFILE:-default}"
 CONFIGS=()
 case "$PROFILE" in
-  default) CONFIGS=("tools/opengrep/rules/default") ;;
-  audit) CONFIGS=("tools/opengrep/rules/audit") ;;
-  all) CONFIGS=("tools/opengrep/rules") ;;
-  trailofbits) CONFIGS=("p/trailofbits") ;;
-  public) CONFIGS=("p/default" "p/security-audit" "p/trailofbits" "p/rust") ;;
-  *) CONFIGS=("$PROFILE") ;;
+default) CONFIGS=("tools/opengrep/rules/default") ;;
+audit) CONFIGS=("tools/opengrep/rules/audit") ;;
+all) CONFIGS=("tools/opengrep/rules") ;;
+trailofbits) CONFIGS=("p/trailofbits") ;;
+public) CONFIGS=("p/default" "p/security-audit" "p/trailofbits" "p/rust") ;;
+*) CONFIGS=("$PROFILE") ;;
 esac
 PROFILE_SLUG="${PROFILE//\//-}"
 JSON_OUT="$OUT_DIR/opengrep-paperbridge-${PROFILE_SLUG}.json"
@@ -37,9 +37,9 @@ TARGETS=("${@:-src crates tests}")
 if [[ $# -eq 0 ]]; then
   TARGETS=(src crates tests)
   case "$PROFILE" in
-    audit|all)
-      TARGETS+=(".github/workflows")
-      ;;
+  audit | all)
+    TARGETS+=(".github/workflows")
+    ;;
   esac
 fi
 
@@ -69,9 +69,8 @@ if [[ "$ENGINE" == *opengrep* ]]; then
   if grep -q -- '--allow-rule-timeout-control' <<<"$HELP"; then
     COMMON+=(--allow-rule-timeout-control)
   fi
-  if [[ "$ENGINE" != *opengrep* ]] && grep -q -- '--semgrepignore-filename' <<<"$HELP"; then
-    COMMON+=(--semgrepignore-filename=.opengrepignore)
-  fi
+elif grep -q -- '--semgrepignore-filename' <<<"$HELP"; then
+  COMMON+=(--semgrepignore-filename=.opengrepignore)
 fi
 
 if [[ "${OPENGREP_STRICT:-0}" == "1" ]]; then
