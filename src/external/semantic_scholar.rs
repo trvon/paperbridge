@@ -139,6 +139,7 @@ fn convert_paper(p: RawS2Paper) -> PaperHit {
 
     let pdf = p.open_access_pdf.and_then(|o| o.url);
     PaperHit {
+        hit_id: None,
         source: PaperSource::SemanticScholar,
         title: p.title.unwrap_or_default(),
         authors,
@@ -154,6 +155,10 @@ fn convert_paper(p: RawS2Paper) -> PaperHit {
         citation_count: p.citation_count,
         cache: None,
         relevance_score: None,
+        ids: None,
+        match_info: None,
+        access: None,
+        next: Vec::new(),
     }
 }
 

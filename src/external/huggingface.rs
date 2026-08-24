@@ -127,6 +127,7 @@ fn convert_entry(entry: RawHfPaperEntry) -> PaperHit {
         .map(|id| format!("https://arxiv.org/pdf/{id}"));
 
     PaperHit {
+        hit_id: None,
         source: PaperSource::HuggingFace,
         title: paper.title.unwrap_or_default(),
         authors,
@@ -142,6 +143,10 @@ fn convert_entry(entry: RawHfPaperEntry) -> PaperHit {
         citation_count: None,
         cache: None,
         relevance_score: None,
+        ids: None,
+        match_info: None,
+        access: None,
+        next: Vec::new(),
     }
 }
 

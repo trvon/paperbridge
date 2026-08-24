@@ -1,6 +1,6 @@
 [package]
 name = "paperbridge"
-version = "0.11.1"
+version = "1.0.1"
 edition = "2024"
 description = "MCP and CLI bridge for paper discovery and PDF/full-text retrieval"
 license = "MIT"
@@ -23,7 +23,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 urlencoding = "2"
-quick-xml = { version = "0.36", features = ["serialize"] }
+quick-xml = { version = "0.41", features = ["serialize"] }
 paperseed = { path = "crates/paperseed" }
 
 [dev-dependencies]

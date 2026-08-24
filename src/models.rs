@@ -27,6 +27,9 @@ pub struct CollectionUpdateRequest {
     pub version: Option<u64>,
     pub name: Option<String>,
     pub parent_collection: Option<String>,
+    /// When true, clears parent_collection. Defaults to false when omitted.
+    #[serde(default)]
+    #[schemars(default)]
     pub clear_parent: bool,
 }
 
@@ -40,13 +43,19 @@ pub struct DeleteCollectionRequest {
 pub struct ItemWriteRequest {
     pub item_type: String,
     pub title: Option<String>,
+    #[serde(default)]
+    #[schemars(default)]
     pub creators: Vec<CreatorInput>,
     pub abstract_note: Option<String>,
     pub date: Option<String>,
     pub url: Option<String>,
     pub doi: Option<String>,
     pub isbn: Option<String>,
+    #[serde(default)]
+    #[schemars(default)]
     pub tags: Vec<TagInput>,
+    #[serde(default)]
+    #[schemars(default)]
     pub collections: Vec<String>,
     pub extra: Option<String>,
     pub parent_item: Option<String>,
@@ -68,6 +77,9 @@ pub struct ItemUpdateRequest {
     pub collections: Option<Vec<String>>,
     pub extra: Option<String>,
     pub parent_item: Option<String>,
+    /// When true, clears parent_item. Defaults to false when omitted (agent-friendly).
+    #[serde(default)]
+    #[schemars(default)]
     pub clear_parent: bool,
 }
 
@@ -94,7 +106,7 @@ impl Default for SearchItemsQuery {
             qmode: None,
             item_type: None,
             tag: None,
-            limit: 25,
+            limit: 10,
             start: 0,
         }
     }
@@ -102,6 +114,10 @@ impl Default for SearchItemsQuery {
 
 impl SearchItemsQuery {
     pub fn normalized(mut self) -> Self {
+        // Agent-safe: never allow 0/unbounded; clamp to 1..=50 (hard max 100 for power users).
+        if self.limit == 0 {
+            self.limit = 10;
+        }
         self.limit = self.limit.clamp(1, 100);
         self
     }
@@ -166,7 +182,9 @@ pub struct ItemSummary {
     pub item_type: String,
     pub title: String,
     pub creators: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub year: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 }
 
@@ -174,7 +192,9 @@ pub struct ItemSummary {
 pub struct AttachmentSummary {
     pub key: String,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<u64>,
@@ -183,17 +203,24 @@ pub struct AttachmentSummary {
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct ItemDetail {
     pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<u64>,
     pub item_type: String,
     pub title: String,
     pub creators: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub year: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub abstract_note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub date: Option<String>,
     pub tags: Vec<TagInput>,
     pub collections: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_item: Option<String>,
     pub attachments: Vec<AttachmentSummary>,
 }
@@ -202,7 +229,9 @@ pub struct ItemDetail {
 pub struct CollectionSummary {
     pub key: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_collection: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_count: Option<u32>,
 }
 
@@ -210,10 +239,28 @@ pub struct CollectionSummary {
 pub struct FulltextContent {
     pub item_key: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexed_pages: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_pages: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexed_chars: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_chars: Option<u32>,
+}
+
+/// A bounded full-text response suitable for an agent context window.
+///
+/// `offset` is an UTF-8 byte position and omitted for the first page. Call
+/// the same read operation with `offset=next_offset` to continue when present.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct FulltextPage {
+    #[serde(flatten)]
+    pub fulltext: FulltextContent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
@@ -228,9 +275,13 @@ pub struct ItemVoxPayload {
     pub item_key: String,
     pub item_title: String,
     pub attachment: AttachmentSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexed_pages: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_pages: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexed_chars: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_chars: Option<u32>,
     pub vox: VoxTextPayload,
 }
@@ -247,13 +298,20 @@ pub struct SearchVoxPayload {
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
 pub struct CrossrefWork {
     pub doi: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub authors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub year: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub journal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub abstract_note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publisher: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oa_pdf_url: Option<String>,
@@ -274,6 +332,10 @@ pub struct CrossrefWork {
 #[serde(rename_all = "snake_case")]
 pub enum PaperSource {
     Arxiv,
+    /// Documents from the user's YAMS-indexed research workspace.
+    #[value(name = "research", alias = "yams")]
+    #[serde(rename = "research", alias = "yams")]
+    Research,
     #[value(name = "paperseed", alias = "local_cache", alias = "cache")]
     #[serde(alias = "local_cache", alias = "cache")]
     Paperseed,
@@ -284,16 +346,18 @@ pub enum PaperSource {
     #[serde(alias = "semanticscholar", alias = "s2")]
     SemanticScholar,
     Crossref,
+    /// Canonical wire name: `openalex` (aliases: `open_alex`, `oa`).
     #[value(name = "openalex", alias = "open_alex", alias = "oa")]
-    #[serde(alias = "openalex", alias = "oa")]
+    #[serde(rename = "openalex", alias = "open_alex", alias = "oa")]
     OpenAlex,
     #[value(name = "europe_pmc", alias = "europepmc", alias = "epmc")]
     #[serde(alias = "europepmc", alias = "epmc")]
     EuropePmc,
     #[value(name = "dblp")]
     Dblp,
+    /// Canonical wire name: `openreview` (aliases: `open_review`, `or`).
     #[value(name = "openreview", alias = "open_review", alias = "or")]
-    #[serde(alias = "openreview", alias = "or")]
+    #[serde(rename = "openreview", alias = "open_review", alias = "or")]
     OpenReview,
     #[value(name = "core")]
     Core,
@@ -303,14 +367,138 @@ pub enum PaperSource {
     #[value(name = "pubmed", alias = "pm")]
     #[serde(alias = "pm")]
     Pubmed,
+    /// Canonical wire name: `scholarapi` (aliases: `scholar_api`, `scholar`, …).
     #[value(
         name = "scholarapi",
         alias = "scholar_api",
         alias = "scholar",
         alias = "scolarapi"
     )]
-    #[serde(alias = "scholarapi", alias = "scholar", alias = "scolarapi")]
+    #[serde(
+        rename = "scholarapi",
+        alias = "scholar_api",
+        alias = "scholar",
+        alias = "scolarapi"
+    )]
     ScholarApi,
+}
+
+/// How much detail to return for paper search hits.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Serialize,
+    Deserialize,
+    Eq,
+    PartialEq,
+    Hash,
+    schemars::JsonSchema,
+    clap::ValueEnum,
+    Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchDetail {
+    /// Title, authors (capped), year, ids, match, access, next — no full abstract.
+    #[default]
+    Compact,
+    /// Full hit fields including abstract (still respects abstract_max_chars when set).
+    Full,
+}
+
+/// Why a hit matched the query (agent-facing ranking signal).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Hash, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchKind {
+    ExactId,
+    ExactTitle,
+    Phrase,
+    Tokens,
+    Weak,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
+pub struct MatchInfo {
+    pub kind: MatchKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Default, schemars::JsonSchema)]
+pub struct PaperIds {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doi: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arxiv: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pmid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zotero_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paper_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub research_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentState {
+    Ready,
+    MetadataOnly,
+    Queued,
+    Stale,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+pub struct AccessInfo {
+    pub pdf: bool,
+    pub cached: bool,
+    pub full_text: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_state: Option<ContentState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Default, schemars::JsonSchema)]
+pub struct SourceDiagnostic {
+    pub source: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Default, schemars::JsonSchema)]
+pub struct SearchDiagnostics {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources_ok: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources_skipped: Vec<SourceDiagnostic>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources_failed: Vec<SourceDiagnostic>,
+}
+
+/// Paginated list envelope for library item search.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct ItemListResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    pub total_count: u32,
+    pub offset: u32,
+    pub limit: u32,
+    pub has_more: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<u32>,
+    pub hits: Vec<ItemSummary>,
+}
+
+/// Paginated list envelope for collections.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct CollectionListResult {
+    pub total_count: u32,
+    pub offset: u32,
+    pub limit: u32,
+    pub has_more: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<u32>,
+    pub hits: Vec<CollectionSummary>,
 }
 
 #[derive(
@@ -340,12 +528,21 @@ pub enum SearchCacheMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
 pub struct PaperMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authors: Vec<String>,
-    #[serde(rename = "abstract", alias = "abstract_note", alias = "abstractNote")]
+    #[serde(
+        rename = "abstract",
+        alias = "abstract_note",
+        alias = "abstractNote",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub abstract_note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doi: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub year: Option<String>,
 }
 
@@ -388,14 +585,18 @@ pub struct PaperReference {
     pub raw: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub year: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doi: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
 pub struct PaperFigure {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     pub caption: String,
 }
@@ -411,6 +612,7 @@ pub enum PaperStructureSource {
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
 pub struct PaperStructure {
     pub item_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_key: Option<String>,
     pub metadata: PaperMetadata,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -422,23 +624,53 @@ pub struct PaperStructure {
     pub source: PaperStructureSource,
 }
 
+/// A deterministic SKILL.md scaffold generated from a `PaperStructure`.
+///
+/// `name` and `description` are the YAML frontmatter fields; `markdown` is the
+/// full skill document (frontmatter + body). paperbridge only produces a
+/// scaffold — mechanical mapping of paper structure to markdown — leaving the
+/// procedural judgment to the consuming agent.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+pub struct SkillPayload {
+    pub name: String,
+    pub description: String,
+    pub markdown: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct PaperHit {
+    /// Stable agent-facing id (`arxiv:…`, `doi:…`, `pmid:…`, `paperseed:…`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hit_id: Option<String>,
     pub source: PaperSource,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub year: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doi: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arxiv_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pmid: Option<String>,
-    #[serde(rename = "abstract", alias = "abstract_note", alias = "abstractNote")]
+    #[serde(
+        rename = "abstract",
+        alias = "abstract_note",
+        alias = "abstractNote",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub abstract_note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pdf_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oa_pdf_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub venue: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub citation_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache: Option<CachedPaperSummary>,
@@ -447,6 +679,57 @@ pub struct PaperHit {
     /// for external hits (no comparable score available).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relevance_score: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ids: Option<PaperIds>,
+    #[serde(rename = "match", default, skip_serializing_if = "Option::is_none")]
+    pub match_info: Option<MatchInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<AccessInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next: Vec<String>,
+}
+
+impl PaperHit {
+    /// Construct a hit with enrichment fields left empty (filled later by search).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        source: PaperSource,
+        title: String,
+        authors: Vec<String>,
+        year: Option<String>,
+        doi: Option<String>,
+        arxiv_id: Option<String>,
+        pmid: Option<String>,
+        abstract_note: Option<String>,
+        url: Option<String>,
+        pdf_url: Option<String>,
+        oa_pdf_url: Option<String>,
+        venue: Option<String>,
+        citation_count: Option<u32>,
+    ) -> Self {
+        Self {
+            hit_id: None,
+            source,
+            title,
+            authors,
+            year,
+            doi,
+            arxiv_id,
+            pmid,
+            abstract_note,
+            url,
+            pdf_url,
+            oa_pdf_url,
+            venue,
+            citation_count,
+            cache: None,
+            relevance_score: None,
+            ids: None,
+            match_info: None,
+            access: None,
+            next: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
@@ -455,7 +738,47 @@ pub struct SearchPapersResult {
     pub total_count: u32,
     pub offset: u32,
     pub limit: u32,
+    pub has_more: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<SearchDetail>,
     pub hits: Vec<PaperHit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<SearchDiagnostics>,
+}
+
+impl SearchPapersResult {
+    /// Project the default search result to the compact agent wire contract.
+    ///
+    /// The service keeps complete hits so ranking, cache handoff, and Rust
+    /// callers can still use their metadata. CLI and MCP invoke this only at
+    /// their serialization boundary.
+    pub fn agent_output(&self) -> Self {
+        if self
+            .detail
+            .is_some_and(|detail| detail != SearchDetail::Compact)
+        {
+            return self.clone();
+        }
+
+        let mut output = self.clone();
+        output.detail = None;
+        for hit in &mut output.hits {
+            hit.doi = None;
+            hit.arxiv_id = None;
+            hit.pmid = None;
+            hit.abstract_note = None;
+            hit.url = None;
+            hit.pdf_url = None;
+            hit.oa_pdf_url = None;
+            hit.venue = None;
+            hit.citation_count = None;
+            hit.cache = None;
+            hit.relevance_score = None;
+        }
+        output
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
@@ -463,6 +786,8 @@ pub struct CachedPaperSummary {
     pub paper_id: String,
     pub cached: bool,
     pub has_full_text: bool,
+    #[serde(default)]
+    pub yams_indexed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
@@ -472,7 +797,9 @@ pub struct CachedPaperDetail {
     pub authors: Vec<String>,
     pub year: Option<String>,
     pub doi: Option<String>,
+    pub arxiv_id: Option<String>,
     pub venue: Option<String>,
+    pub abstract_note: Option<String>,
     pub source_url: Option<String>,
     pub stored_path: String,
     pub mime: String,
@@ -488,21 +815,21 @@ mod tests {
     fn normalized_limit_clamps_to_valid_range() {
         assert_eq!(
             SearchItemsQuery {
-                limit: 0,
-                ..SearchItemsQuery::default()
-            }
-            .normalized()
-            .limit,
-            1
-        );
-        assert_eq!(
-            SearchItemsQuery {
                 limit: 999,
                 ..SearchItemsQuery::default()
             }
             .normalized()
             .limit,
             100
+        );
+        assert_eq!(
+            SearchItemsQuery {
+                limit: 5,
+                ..SearchItemsQuery::default()
+            }
+            .normalized()
+            .limit,
+            5
         );
     }
 
@@ -538,6 +865,9 @@ mod tests {
         assert_eq!(parse("open_alex"), PaperSource::OpenAlex);
         assert_eq!(parse("oa"), PaperSource::OpenAlex);
 
+        assert_eq!(parse("research"), PaperSource::Research);
+        assert_eq!(parse("yams"), PaperSource::Research);
+
         assert_eq!(parse("openreview"), PaperSource::OpenReview);
         assert_eq!(parse("open_review"), PaperSource::OpenReview);
         assert_eq!(parse("or"), PaperSource::OpenReview);
@@ -566,18 +896,51 @@ mod tests {
     }
 
     #[test]
-    fn paper_source_serializes_to_canonical_snake_case() {
+    fn paper_source_serializes_to_canonical_wire_names() {
+        assert_eq!(
+            serde_json::to_string(&PaperSource::Research).unwrap(),
+            "\"research\""
+        );
         assert_eq!(
             serde_json::to_string(&PaperSource::OpenAlex).unwrap(),
-            "\"open_alex\""
+            "\"openalex\""
         );
         assert_eq!(
             serde_json::to_string(&PaperSource::OpenReview).unwrap(),
-            "\"open_review\""
+            "\"openreview\""
         );
         assert_eq!(
             serde_json::to_string(&PaperSource::ScholarApi).unwrap(),
-            "\"scholar_api\""
+            "\"scholarapi\""
+        );
+    }
+
+    #[test]
+    fn item_write_request_defaults_empty_collections() {
+        let item: ItemWriteRequest =
+            serde_json::from_str(r#"{"item_type":"journalArticle","title":"T"}"#).unwrap();
+        assert!(item.creators.is_empty());
+        assert!(item.tags.is_empty());
+        assert!(item.collections.is_empty());
+    }
+
+    #[test]
+    fn item_update_request_defaults_clear_parent_false() {
+        let item: ItemUpdateRequest =
+            serde_json::from_str(r#"{"key":"ABCD1234","title":"T"}"#).unwrap();
+        assert!(!item.clear_parent);
+    }
+
+    #[test]
+    fn normalized_limit_zero_becomes_default_ten() {
+        assert_eq!(
+            SearchItemsQuery {
+                limit: 0,
+                ..SearchItemsQuery::default()
+            }
+            .normalized()
+            .limit,
+            10
         );
     }
 }

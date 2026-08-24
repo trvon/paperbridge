@@ -31,6 +31,9 @@ fn top_level_help_advertises_canonical_domains_only() {
 fn canonical_commands_parse() {
     let cases: &[&[&str]] = &[
         &["paperseed", "corpus", "status"],
+        &["paperseed", "corpus", "list"],
+        &["paperseed", "corpus", "show", "abc123"],
+        &["paperseed", "corpus", "remove", "abc123"],
         &[
             "paperseed",
             "corpus",
@@ -38,6 +41,7 @@ fn canonical_commands_parse() {
             "paper.pdf",
             "--license",
             "cc-by",
+            "--no-fulltext",
         ],
         &[
             "paperseed",
@@ -49,6 +53,7 @@ fn canonical_commands_parse() {
             "paper.pdf",
             "--license",
             "cc-by",
+            "--no-fulltext",
         ],
         &["paperseed", "corpus", "query", "--q", "induction heads"],
         &["paperseed", "corpus", "export", "--format", "bibtex"],

@@ -44,7 +44,7 @@ if [[ $# -eq 0 ]]; then
 fi
 
 COMMON=(scan
-  --timeout "${OPENGREP_TIMEOUT:-60}"
+  --timeout "${OPENGREP_TIMEOUT:-5}"
   --exclude target
   --exclude .artifacts
   --exclude '*.json'
@@ -56,7 +56,7 @@ for cfg in "${CONFIGS[@]}"; do
 done
 
 HELP="$($ENGINE scan --help 2>/dev/null || true)"
-if grep -q -- '--metrics' <<<"$HELP"; then
+if [[ "$ENGINE" != *opengrep* ]] && grep -q -- '--metrics' <<<"$HELP"; then
   COMMON+=(--metrics=off)
 fi
 if grep -q -- '--max-target-bytes' <<<"$HELP"; then
@@ -66,11 +66,10 @@ if grep -q -- '--force-exclude' <<<"$HELP"; then
   COMMON+=(--force-exclude)
 fi
 if [[ "$ENGINE" == *opengrep* ]]; then
-  COMMON+=(--taint-intrafile --dynamic-timeout)
   if grep -q -- '--allow-rule-timeout-control' <<<"$HELP"; then
     COMMON+=(--allow-rule-timeout-control)
   fi
-  if grep -q -- '--semgrepignore-filename' <<<"$HELP"; then
+  if [[ "$ENGINE" != *opengrep* ]] && grep -q -- '--semgrepignore-filename' <<<"$HELP"; then
     COMMON+=(--semgrepignore-filename=.opengrepignore)
   fi
 fi

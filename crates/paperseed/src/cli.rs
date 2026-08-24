@@ -22,7 +22,7 @@ pub struct Cli {
 
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum Command {
-    /// Manage the local paper corpus: status, import, ingest, query, export
+    /// Manage the local paper corpus
     Corpus {
         #[command(subcommand)]
         action: CorpusAction,
@@ -52,6 +52,8 @@ pub enum Command {
         title: Option<String>,
         #[arg(long)]
         license: Option<String>,
+        #[arg(long)]
+        no_fulltext: bool,
     },
 
     /// Ingest Paperbridge/Zotero-style JSON metadata plus an authorized local file
@@ -66,6 +68,8 @@ pub enum Command {
         file: PathBuf,
         #[arg(long)]
         license: Option<String>,
+        #[arg(long)]
+        no_fulltext: bool,
     },
 
     /// Search the local full-text corpus
@@ -94,6 +98,21 @@ pub enum CorpusAction {
     /// Show corpus status and policy mode
     Status,
 
+    /// List papers in the local corpus
+    List,
+
+    /// Show one corpus paper by exact id or unique hash prefix
+    Show {
+        /// Local paper id or unique content-hash prefix
+        id: String,
+    },
+
+    /// Remove one corpus paper and its stored file
+    Remove {
+        /// Local paper id or unique content-hash prefix
+        id: String,
+    },
+
     /// Import a PDF or text file the user already has rights to store locally
     Import {
         /// File path to import
@@ -106,6 +125,10 @@ pub enum CorpusAction {
         /// Optional license, e.g. cc-by, cc0, public-domain, user-owned-private
         #[arg(long)]
         license: Option<String>,
+
+        /// Store metadata now and defer PDF/text extraction until first read
+        #[arg(long)]
+        no_fulltext: bool,
     },
 
     /// Ingest Paperbridge/Zotero-style JSON metadata plus an authorized local file
@@ -121,6 +144,10 @@ pub enum CorpusAction {
         /// License override, e.g. cc-by, cc0, public-domain, user-owned-private
         #[arg(long)]
         license: Option<String>,
+
+        /// Store metadata now and defer PDF/text extraction until first read
+        #[arg(long)]
+        no_fulltext: bool,
     },
 
     /// Search the local full-text corpus

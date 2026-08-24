@@ -195,6 +195,7 @@ fn convert_doc(uid: String, d: RawSummaryDoc) -> PaperHit {
     let url = Some(format!("https://pubmed.ncbi.nlm.nih.gov/{uid}/"));
 
     PaperHit {
+        hit_id: None,
         source: PaperSource::Pubmed,
         title: d.title.unwrap_or_default(),
         authors,
@@ -210,6 +211,10 @@ fn convert_doc(uid: String, d: RawSummaryDoc) -> PaperHit {
         citation_count: None,
         cache: None,
         relevance_score: None,
+        ids: None,
+        match_info: None,
+        access: None,
+        next: Vec::new(),
     }
 }
 

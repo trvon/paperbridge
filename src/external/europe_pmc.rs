@@ -148,6 +148,7 @@ fn convert_result(r: RawEpmcResult) -> PaperHit {
     let url = r.doi.as_deref().map(|d| format!("https://doi.org/{d}"));
 
     PaperHit {
+        hit_id: None,
         source: PaperSource::EuropePmc,
         title: r.title.unwrap_or_default(),
         authors,
@@ -163,6 +164,10 @@ fn convert_result(r: RawEpmcResult) -> PaperHit {
         citation_count: None,
         cache: None,
         relevance_score: None,
+        ids: None,
+        match_info: None,
+        access: None,
+        next: Vec::new(),
     }
 }
 

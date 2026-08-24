@@ -1,5 +1,69 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+* **agent interface:** compact paginated search envelopes with `hit_id`, `match`, `access`, `next`, and multi-source `diagnostics`
+* **agent interface:** `open_paper` MCP tool + `papers open` CLI for discover→read by hit_id/DOI/arXiv/item/paper id
+* **research:** first-class YAMS discovery with grouped paper projects, stable `research:` IDs, availability state, and off-disk TeX opening
+* **paperseed:** synchronous verified YAMS indexing with persisted content hashes for imports and OA mirrors
+* **paperseed:** corpus list/show/remove operations, deferred `--no-fulltext` imports, and index-drift status
+* **paperseed:** content-addressed text blobs, incremental BM25F updates, and binary index persistence
+* **search:** arXiv title/id query adapters; Crossref bibliographic query for multi-word titles
+* **search:** DOI-first resolution, conversational GNN query expansion, and query-coverage ranking
+* **search:** later offset pages expand the source prefix; URL-only hits now carry openable `url:` IDs
+* **open:** fresh DOI/arXiv/URL hits can produce fulltext or structure without enabling Paperseed
+* **skill:** `prepare_paper_for_skill` / `papers skill` scaffold from paper structure
+* **design:** `docs/design/llm-interface.md` contract + task backlog
+
+### Breaking changes (agent/CLI consumers)
+
+* CLI data output is human-readable by default; pass the global `--json` flag for structured success and runtime-error envelopes
+* Library `search_items` / `list_collections` / `library query|collections` return envelopes (`hits`, `has_more`, …), not bare arrays
+* `papers search --limit` is **page size** (default 10); use `--per-source` for fan-out
+* Search defaults to **compact** hits (no full abstracts); pass `--detail full` / `detail: "full"` for abstracts
+* Source wire names: `openalex`, `openreview`, `scholarapi` (old snake_case aliases still deserialize)
+* Unbounded search (`limit=0` meaning “all”) removed — page size defaults to 10 (max 50)
+
+### Bug Fixes
+
+* **open:** require exact DOI, arXiv, or canonical URL identity before reusing cached content
+* **yams:** pass the JSON flag in the supported position, parse current result envelopes, and verify content before storing an index hash
+* **paperseed:** serialize concurrent corpus writers, quarantine corrupt databases, reject ambiguous ids, preserve OA licenses, and verify seed-file integrity
+* **paperseed:** index real abstracts/arXiv ids, persist fallback rebuilds, and improve Unicode/stemmed matching
+
+### Security
+
+* Bump `quick-xml` to 0.41 (RUSTSEC-2026-0194 / 0195)
+
+## [1.0.1](https://github.com/trvon/paperbridge/compare/v1.0.0...v1.0.1) (2026-07-19)
+
+
+### Bug Fixes
+
+* **paperseed:** harden local corpus ([5825371](https://github.com/trvon/paperbridge/commit/5825371d713c9be9550903b3b9da17b4e951ced8))
+
+## [1.0.0](https://github.com/trvon/paperbridge/compare/v0.11.1...v1.0.0) (2026-07-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** structured commands now print human-readable output by default. Pass --json for machine-readable success and runtime error envelopes. Paperseed corpus export defaults to BibTeX.
+
+### Features
+
+* agent-first search envelopes, open_paper, and compact hits ([065d8dc](https://github.com/trvon/paperbridge/commit/065d8dc14b7112106e0229829136d331b0782a62))
+* **cli:** make JSON output opt-in ([5a10866](https://github.com/trvon/paperbridge/commit/5a10866c7e129a4706c9264e459b33b9516fc3ad))
+* **research:** integrate verified YAMS paper workflows ([a777587](https://github.com/trvon/paperbridge/commit/a777587e1cbe8cf156ce12b6243d956309f1f291))
+
+
+### Bug Fixes
+
+* harden agent search and open workflows ([fbca02f](https://github.com/trvon/paperbridge/commit/fbca02f563b432ec96297fa549d703c99eaaa47e))
+* **open:** require exact cache identity matches ([9299497](https://github.com/trvon/paperbridge/commit/9299497546ff6969e09a08ae01a26548c6f63563))
+* **search:** resolve identifiers and rank query coverage ([eabda62](https://github.com/trvon/paperbridge/commit/eabda626c7ed35ff8eedf3a7fd1ee43f2d0dfd74))
+
 ## [0.11.1](https://github.com/trvon/paperbridge/compare/v0.11.0...v0.11.1) (2026-07-02)
 
 

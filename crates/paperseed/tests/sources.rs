@@ -1,4 +1,4 @@
-use paperseed::app::{CorpusPaths, IngestRequest, export_bibtex, fetch_open_file, ingest, status};
+use paperseed::app::{CorpusPaths, IngestRequest, export_bibtex, ingest, status};
 use paperseed::sources::{fetch_plan, legal_sources, metadata_from_paperbridge_json};
 
 #[test]
@@ -29,6 +29,7 @@ fn parses_paperbridge_zotero_shape() {
         "data": {
             "title": "Graph Learning at Scale",
             "DOI": "10.5555/graph",
+            "abstractNote": "A semantic graph detector for large systems.",
             "date": "2024-08-01",
             "publicationTitle": "Systems Journal",
             "creators": [{"firstName": "Grace", "lastName": "Hopper"}],
@@ -42,6 +43,10 @@ fn parses_paperbridge_zotero_shape() {
     assert_eq!(metadata.doi.as_deref(), Some("10.5555/graph"));
     assert_eq!(metadata.year, Some(2024));
     assert_eq!(metadata.authors, vec!["Grace Hopper"]);
+    assert_eq!(
+        metadata.abstract_note.as_deref(),
+        Some("A semantic graph detector for large systems.")
+    );
     assert_eq!(metadata.license.as_deref(), Some("cc-by"));
 }
 
@@ -55,6 +60,8 @@ fn ingest_applies_paperbridge_metadata_and_exports_bibtex() {
         r#"{
             "title": "Graph Learning at Scale",
             "doi": "10.5555/graph",
+            "arxiv_id": "2401.01234v2",
+            "abstract": "Latent frobnication improves graph retrieval.",
             "authors": ["Grace Hopper"],
             "year": 2024,
             "venue": "Systems Journal",
@@ -70,42 +77,29 @@ fn ingest_applies_paperbridge_metadata_and_exports_bibtex() {
             metadata,
             license: None,
             yams_hash: None,
+            extract_full_text: true,
         },
     )
     .unwrap();
 
     assert_eq!(paper.metadata.doi.as_deref(), Some("10.5555/graph"));
+    assert_eq!(paper.metadata.arxiv_id.as_deref(), Some("2401.01234v2"));
     assert_eq!(paper.metadata.authors, vec!["Grace Hopper"]);
+    assert_eq!(
+        paper.metadata.abstract_note.as_deref(),
+        Some("Latent frobnication improves graph retrieval.")
+    );
+
+    let abstract_hits = paperseed::app::query_with_yams(
+        &paths,
+        "frobnication",
+        &paperseed::yams::YamsConfig::disabled(),
+    )
+    .unwrap();
+    assert_eq!(abstract_hits[0].id, paper.metadata.id);
 
     let bibtex = export_bibtex(&status(&paths).unwrap());
     assert!(bibtex.contains("Graph Learning at Scale"));
     assert!(bibtex.contains("Grace Hopper"));
     assert!(bibtex.contains("10.5555/graph"));
-}
-
-#[test]
-fn fetch_open_file_requires_known_open_license() {
-    let dir = tempfile::tempdir().unwrap();
-    let source = dir.path().join("fixture.txt");
-    std::fs::write(&source, "open text").unwrap();
-    let paths = CorpusPaths::new(dir.path().join("corpus"));
-
-    let blocked = fetch_open_file(
-        &paths,
-        "10.1234/example".to_string(),
-        source.clone(),
-        None,
-        None,
-    );
-    assert!(blocked.is_err());
-
-    let paper = fetch_open_file(
-        &paths,
-        "10.1234/example".to_string(),
-        source,
-        Some("Open Example".to_string()),
-        Some("cc-by".to_string()),
-    )
-    .unwrap();
-    assert_eq!(paper.metadata.doi.as_deref(), Some("10.1234/example"));
 }

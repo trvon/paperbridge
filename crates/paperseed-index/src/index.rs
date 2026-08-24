@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 /// Per-document field tf for a single posting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +44,74 @@ impl Index {
 
     pub fn options(&self) -> &BuildOptions {
         &self.options
+    }
+
+    pub fn contains_document(&self, doc_id: &str) -> bool {
+        self.doc_ids.iter().any(|candidate| candidate == doc_id)
+    }
+
+    pub fn upsert_document(&mut self, doc_id: impl Into<String>, fields: &[(&str, &str)]) {
+        let doc_id = doc_id.into();
+        let doc_idx = if let Some(index) = self.doc_ids.iter().position(|id| id == &doc_id) {
+            let doc = index as u32;
+            self.postings.retain(|_, postings| {
+                postings.retain(|posting| posting.doc != doc);
+                !postings.is_empty()
+            });
+            index
+        } else {
+            let index = self.doc_ids.len();
+            self.doc_ids.push(doc_id);
+            self.field_lens.push(vec![0; self.options.field_count()]);
+            index
+        };
+
+        let mut lens = vec![0_u32; self.options.field_count()];
+        let mut terms: HashMap<String, HashMap<u8, u32>> = HashMap::new();
+        for (name, text) in fields {
+            let Some(field) = self.options.field_id(name) else {
+                continue;
+            };
+            let tokens = tokenize(text);
+            lens[field as usize] = tokens.len() as u32;
+            for token in tokens {
+                *terms.entry(token).or_default().entry(field).or_insert(0) += 1;
+            }
+        }
+        self.field_lens[doc_idx] = lens;
+        for (term, by_field) in terms {
+            let mut fields = by_field
+                .into_iter()
+                .map(|(field, tf)| FieldTerm { field, tf })
+                .collect::<Vec<_>>();
+            fields.sort_by_key(|field| field.field);
+            let postings = self.postings.entry(term).or_default();
+            postings.push(Posting {
+                doc: doc_idx as u32,
+                fields,
+            });
+            postings.sort_by_key(|posting| posting.doc);
+        }
+        self.recalculate_average_field_lengths();
+    }
+
+    fn recalculate_average_field_lengths(&mut self) {
+        let mut totals = vec![0_u64; self.options.field_count()];
+        for lens in &self.field_lens {
+            for (field, len) in lens.iter().enumerate() {
+                totals[field] += u64::from(*len);
+            }
+        }
+        self.avg_field_len = totals
+            .into_iter()
+            .map(|total| {
+                if self.doc_ids.is_empty() {
+                    0.0
+                } else {
+                    (total as f64 / self.doc_ids.len() as f64) as f32
+                }
+            })
+            .collect();
     }
 
     /// Score the corpus against `query` and return the top-K hits in
@@ -134,7 +202,7 @@ impl Index {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let bytes = serde_json::to_vec(self)?;
+        let bytes = bincode::serialize(self)?;
         let tmp = path.with_extension("idx.tmp");
         fs::write(&tmp, &bytes)?;
         fs::rename(&tmp, path)?;
@@ -143,7 +211,7 @@ impl Index {
 
     pub fn load(path: &Path) -> Result<Self> {
         let bytes = fs::read(path)?;
-        let index: Index = serde_json::from_slice(&bytes)?;
+        let index: Index = bincode::deserialize(&bytes)?;
         if index.schema_version != SCHEMA_VERSION {
             return Err(IndexError::SchemaMismatch {
                 expected: SCHEMA_VERSION,
@@ -337,10 +405,16 @@ mod tests {
     #[test]
     fn save_and_load_round_trip() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("corpus.idx.json");
+        let path = dir.path().join("corpus.idx.bin");
 
         let idx = build_small_index();
         idx.save(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_ne!(
+            bytes.first(),
+            Some(&b'{'),
+            "index should use binary encoding"
+        );
         let loaded = Index::load(&path).unwrap();
         assert_eq!(loaded.doc_count(), idx.doc_count());
 
@@ -368,5 +442,22 @@ mod tests {
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].score, hits[1].score);
         assert_eq!(hits[0].doc_id, "a-doc"); // tie-break by doc_id ascending
+    }
+
+    #[test]
+    fn incremental_upsert_replaces_and_adds_documents() {
+        let mut index = build_small_index();
+        index.upsert_document("doc-a", &[("title", "Completely Replaced Quantum Topic")]);
+        assert!(
+            index
+                .search("deduplication", 5)
+                .iter()
+                .all(|hit| hit.doc_id != "doc-a")
+        );
+        assert_eq!(index.search("quantum", 5)[0].doc_id, "doc-a");
+
+        index.upsert_document("doc-d", &[("title", "New Incremental Paper")]);
+        assert_eq!(index.doc_count(), 4);
+        assert_eq!(index.search("incremental", 5)[0].doc_id, "doc-d");
     }
 }

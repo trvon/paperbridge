@@ -135,6 +135,7 @@ fn convert_info(info: RawDblpInfo) -> PaperHit {
         .unwrap_or_default();
 
     PaperHit {
+        hit_id: None,
         source: PaperSource::Dblp,
         title: info.title.map(decode_html_entities).unwrap_or_default(),
         authors,
@@ -150,6 +151,10 @@ fn convert_info(info: RawDblpInfo) -> PaperHit {
         citation_count: None,
         cache: None,
         relevance_score: None,
+        ids: None,
+        match_info: None,
+        access: None,
+        next: Vec::new(),
     }
 }
 

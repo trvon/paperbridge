@@ -1,6 +1,8 @@
 use paperseed::corpus::import_local_file;
 use paperseed::models::License;
-use paperseed::storage::{content_addressed_path, describe_file, hash_file};
+use paperseed::storage::{
+    content_addressed_path, copy_and_describe_file, describe_file, hash_file,
+};
 
 #[test]
 fn hash_and_describe_file_are_stable() {
@@ -39,4 +41,18 @@ fn import_local_file_builds_local_paper_record() {
     assert_eq!(paper.metadata.title, "Owned Paper");
     assert_eq!(paper.metadata.license, License::UserOwnedPrivate);
     assert_eq!(paper.file.size_bytes, 11);
+}
+
+#[test]
+fn copy_hashes_while_streaming_into_content_addressed_storage() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("paper.txt");
+    std::fs::write(&source, b"single pass fixture").unwrap();
+    let files = dir.path().join("files");
+
+    let stored = copy_and_describe_file(&source, &files, "text/plain").unwrap();
+
+    assert_eq!(stored.hash, hash_file(&source).unwrap());
+    assert_eq!(std::fs::read(&stored.path).unwrap(), b"single pass fixture");
+    assert!(stored.path.starts_with(files));
 }

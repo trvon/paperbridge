@@ -1,6 +1,6 @@
 ---
 name: paperbridge
-description: Use when a task involves Zotero (search, collections, items, PDFs, full-text), DOI/Crossref resolution, searching external paper sources (arXiv, HuggingFace Papers, Semantic Scholar, OpenAlex, etc.), or retrieving locally cached papers from the Paperseed corpus. Provides both a CLI (`paperbridge ...`) and an MCP server (`paperbridge serve`). Prefer MCP tools when available; fall back to CLI invocation otherwise.
+description: Use when a task involves Zotero (search, collections, items, PDFs, full-text), DOI/Crossref resolution, searching the YAMS research workspace or external paper sources, or retrieving locally cached papers from the Paperseed corpus. Provides both a CLI (`paperbridge ...`) and an MCP server (`paperbridge serve`). Prefer MCP tools when available; fall back to CLI invocation otherwise.
 ---
 
 # paperbridge
@@ -18,7 +18,7 @@ for downstream agents.
 
 - Search a Zotero library or browse collections, tags, attachments.
 - Resolve a DOI to structured metadata (title, authors, year, journal, abstract).
-- Search external paper indexes: arXiv, Crossref, OpenAlex, Europe PMC, DBLP,
+- Search the local YAMS research workspace and external paper indexes: arXiv, Crossref, OpenAlex, Europe PMC, DBLP,
   OpenReview, PubMed, HuggingFace Papers, Semantic Scholar, CORE, NASA ADS, ScholarAPI.
 - Retrieve full-text or structured content from a Zotero attachment or a cached paper.
 - Validate, create, update, or delete Zotero items and collections.
@@ -28,8 +28,10 @@ for downstream agents.
 
 - **MCP (preferred in agent contexts):** use the registered `paperbridge` MCP
   server tools directly — they mirror the CLI commands below.
-- **CLI:** `paperbridge <domain> <action>`. All data commands print JSON on
-  stdout; errors go to stderr. Pipe through `| jq` for inspection.
+- **CLI:** `paperbridge <domain> <action>`. Structured commands print readable
+  text by default; add the global `--json` flag for machine-readable JSON.
+  Runtime errors also use JSON with `--json` and always stay on stderr, so
+  stdout remains safe for automation.
 
 ## First-time setup
 
@@ -48,32 +50,46 @@ Backend modes: `cloud` (api.zotero.org, needs `api_key` + `user_id`),
 ### Search — library, external, and cached
 
 ```bash
-# Zotero library
-paperbridge library query -q "diffusion models" --limit 10
+# Zotero library (paginated envelope)
+paperbridge library query --query "diffusion models" --limit 10
 
-# External papers with conservative local-cache surfacing
-paperbridge papers search -q "intrusion detection" --limit 3 --max-results 10
-paperbridge papers search -q "attention is all you need" --sources arxiv,semantic_scholar
-paperbridge papers search -q "attention is all you need" --sources paperseed  # cache only
+# External papers (compact by default; --limit is PAGE size)
+paperbridge papers search --query "intrusion detection" --per-source 3 --limit 10
+paperbridge papers search --query "attention is all you need" --sources arxiv,openalex
+paperbridge papers search --query "attention is all you need" --sources paperseed  # cache only
+paperbridge papers search --query "What drives detection in GNN" --sources research
+paperbridge papers search --query "transformers" --limit 5 --offset 10 --detail full
 
-# Paginated (agents should page through large result sets)
-paperbridge papers search -q "transformers" --max-results 5 --offset 10
+# Open a hit after search (await-friendly path)
+paperbridge papers open --hit-id "arxiv:1706.03762" --want metadata,structure
+paperbridge papers open --doi "10.1038/nature12373" --want metadata
+paperbridge papers open --url "https://example.org/paper.pdf" --want fulltext
 ```
 
 Results are deduplicated by DOI → arXiv ID → PMID → normalized
-title+first-author. Cached duplicates get a `cache.cached` annotation and may replace the live hit with `source: "paperseed"` so the readable local copy is easy to use. Cache-only hits are gated by stronger relevance by default; use `--sources paperseed` for cache-only search or include `paperseed` in `--sources` to intentionally blend cache hits.
+title+first-author. Each hit includes `hit_id`, `ids`, `match`, `access`, and
+`next` suggested tools. Default `detail=compact` omits full abstracts.
+`diagnostics` lists sources that ran, were skipped (missing key), or failed.
 
-MCP tool: `search_papers { query, limit_per_source?, sources?, cache?, offset?, limit? }`.
-Returns `{ query, total_count, offset, limit, hits: [...] }`. Use `offset` and
-`limit` to page through large result sets.
+MCP tools:
+- `search_papers { query|q, limit?, limit_per_source?, sources?, cache?, offset?, detail?, abstract_max_chars? }`
+  → `{ query, total_count, offset, limit, has_more, next_offset, detail, hits, diagnostics }`
+- `open_paper { hit_id?|doi?|arxiv_id?|item_key?|paper_id?|attachment_key?|url?, want?, max_chars? }`
+- `search_items` / `list_collections` → paginated envelopes (`hits`, not bare arrays)
 
-Available source values: `arxiv`, `paperseed` (local cache), `crossref`,
-`openalex` (`oa`), `europe_pmc` (`epmc`), `dblp`, `openreview` (`or`),
-`pubmed` (`pm`), `hugging_face` (`hf`), `semantic_scholar` (`s2`), `core`,
-`ads` (`nasa_ads`), `scholarapi` (`scholar`).
+Canonical source wire names: `research`, `arxiv`, `paperseed`, `crossref`, `openalex`,
+`europe_pmc`, `dblp`, `openreview`, `pubmed`, `hugging_face`,
+`semantic_scholar`, `core`, `ads`, `scholarapi` (aliases still accepted).
 
 Always-on (no key): arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed.
-Key-gated (silent skip when unset): HuggingFace, Semantic Scholar, CORE, NASA ADS, ScholarAPI.
+Key-gated (appear in `diagnostics.sources_skipped` when unset): HuggingFace,
+Semantic Scholar, CORE, NASA ADS, ScholarAPI.
+
+Springer journal articles are discoverable indirectly when indexed by
+Crossref, OpenAlex, or another configured index. There is no dedicated
+`springer` source adapter, and publisher-hosted full text is available only
+when an open PDF URL, Zotero attachment, or cached Paperseed copy can be
+resolved.
 
 ### Resolve a DOI
 
@@ -97,41 +113,43 @@ paperbridge papers access --url "https://example.org/article"
 Modes are `off`, `fallback`, and `prefer`. `fallback` keeps open-access DOI
 results direct; `prefer` checks institutional holdings first. Institutional DOI
 access returns ranked `access_options` and opens the best provider through
-EZproxy/OpenAthens when required. Use `--no-open` when a script or agent
-only needs the access JSON.
+EZproxy/OpenAthens when required. Use the global `--json` flag with `--no-open`
+when a script or agent only needs the access payload.
 
 MCP tool: `resolve_source_access { doi?, url? }`. Provide exactly one input. MCP
 resolution has no browser side effect; the host should open `selected_url` only
 when `browser_open_allowed` is true.
 
-### Read full-text — Zotero or cached paper
+### Read content — prefer `open_paper`
 
 ```bash
-# Zotero attachment
-paperbridge library read --item-key ABCD1234
-paperbridge library read --item-key ABCD1234 --attachment-key PDF5678
+# After search: open by hit_id / DOI / arXiv / Zotero key
+paperbridge papers open --hit-id "arxiv:1706.03762" --want fulltext --max-chars 8000
+# If the response includes next_offset, pass that UTF-8 byte offset to continue.
+paperbridge papers open --hit-id "arxiv:1706.03762" --want fulltext --max-chars 8000 --offset <next-offset>
+paperbridge papers open --hit-id "research:<yams-hash>" --want structure --max-chars 30000
+paperbridge papers open --item-key ABCD1234 --want structure
+paperbridge papers structure --key ABCD1234
 
-# Search then read (picks best attachment)
+# Vox read-aloud only (not plain fulltext)
+paperbridge library read --item-key ABCD1234
 paperbridge library read-search -q "sparse attention" --result-index 0 --search-limit 5
 ```
 
-**Cache fallback:** `get_pdf_text` and `get_item_fulltext` automatically
-search the local Paperseed cache when Zotero is unreachable. Pass a title, DOI,
-or paper ID as the key — the route treats it as a natural-language query
-against cached papers. If a match is found with extracted fulltext, it is
-returned directly.
+**Agent spine:** `search_items` / `search_papers` → `open_paper` →
+`query_paper` / `resolve_doi`. Use Vox `prepare_*` tools only for read-aloud.
 
 MCP tools:
 
-- `get_pdf_text { attachment_key }` — Zotero attachment or cache query
-- `get_item_fulltext { attachment_key }` — same fallback behavior
-- `prepare_vox_text { text?, attachment_key?, max_chars_per_chunk? }` — chunks for Vox
-- `prepare_item_for_vox { item_key, attachment_key?, max_chars_per_chunk? }` — prefers cached papers
-- `prepare_search_result_for_vox { q, result_index?, ... }` — search → cached-paper check → Zotero fallback
+- `open_paper { hit_id|doi|arxiv_id|item_key|paper_id|attachment_key|url, want, max_chars?, offset? }` — preferred; use `next_offset` to continue fulltext
+- `resolve_source_access { doi?, url? }` — institutional holdings and browser-safe route resolution
+- `get_pdf_text { attachment_key, max_chars?, offset? }` / `get_item_fulltext { attachment_key, max_chars?, offset? }` — low-level bounded attachment/cache paths
+- `prepare_vox_text` / `prepare_item_for_vox` / `prepare_search_result_for_vox` — Vox chunks only
 
 ### Structured paper content
 
-Returns a typed JSON structure with sections, references, and figures.
+Returns a typed structure with sections, references, and figures. Add
+`--json` to CLI calls when the structure will be consumed programmatically.
 Works with both Zotero items and cached paper IDs.
 
 ```bash
@@ -149,24 +167,73 @@ Selectors use dotted paths with bracket indexing (`sections[2].text`,
 `references[0].title`). The `source` field tells you the provenance:
 `grobid`, `zotero_fulltext`, or `grobid_unavailable`.
 
+### Paper → skill scaffold
+
+Turn a paper's structure into a deterministic SKILL.md scaffold (YAML
+frontmatter + markdown body). The mapping is mechanical — abstract →
+"When to use", method/design/implementation → "Method", evaluation/results →
+"Evaluation", plus limitations and key references. The output is a *scaffold*
+for an agent to refine into a real operating procedure, not a finished skill.
+
+```bash
+paperbridge papers skill --key ABCD1234 > SKILL.md
+paperbridge papers skill --key <cached-paper-id>
+```
+
+MCP tool: `prepare_paper_for_skill { item_key, attachment_key? }` → returns
+`{ name, description, markdown }`. Accepts Zotero keys or cached paper IDs
+(same routing as `get_paper_structure`). Fidelity follows the structure's
+`source`: a `zotero_fulltext` scaffold is heuristic and should be verified
+against the paper. The CLI prints the raw markdown for piping into a file.
+
 ### Local Paperseed corpus
 
 Manage the content-addressed local cache and license-gated seed manifests:
 
 ```bash
 paperbridge paperseed corpus status
+paperbridge paperseed corpus list
+paperbridge paperseed corpus show <id-or-unique-hash-prefix>
 paperbridge paperseed corpus import ./paper.pdf --license cc-by
+paperbridge paperseed corpus import ./large.pdf --license cc-by --no-fulltext
 paperbridge paperseed corpus ingest --metadata item.json --file paper.pdf --license cc-by
 paperbridge paperseed corpus query -q "induction heads"
 paperbridge paperseed corpus export --format bibtex
+paperbridge paperseed corpus remove <id-or-unique-hash-prefix>
+paperbridge paperseed corpus reindex
 
 paperbridge paperseed seed check --paper-id <id>
 paperbridge paperseed seed create --paper-id <id>
 ```
 
-Imported PDFs have their text automatically extracted and stored in the
-corpus for full-text search. YAMS provides an experimental
-storage/search backend when `paperseed_yams_enabled = true`.
+`paperseed corpus export` defaults to BibTeX. Pass the global `--json` flag to
+export the corpus as JSON; `--format json` is accepted only with `--json`.
+
+Imported PDFs have their text automatically extracted into content-addressed
+text blobs for full-text search. Use `--no-fulltext` to defer extraction until
+first read; PDF extraction does not perform OCR. `corpus status` reports paper
+and index document counts and warns when they drift. When
+`paperseed_yams_enabled = true`, imports and
+OA mirrors are synchronously added to YAMS with authoritative title, DOI,
+authors, venue, and source metadata. The returned hash is persisted as
+`yams_hash`; search cache summaries expose `yams_indexed`.
+
+The `research` source searches global YAMS documents under research paper
+projects independently of the Paperseed database. Related PDF/TeX fragments
+are collapsed into one paper hit with a stable `research:<hash>` ID. Opening
+that hit assembles readable abstract, introduction, design, evaluation/results,
+related-work, conclusion, and appendix blobs when available. Inspect
+`access.content_state`: `ready` is openable; `stale` means YAMS retained search
+metadata but neither its content blob nor the original file is readable.
+
+**OA auto-mirroring & DOI resolution.** With `paperseed_auto_download = true`,
+search hits are mirrored into the corpus. Hits that already carry an open-access
+PDF url are downloaded directly; hits that only expose a DOI (common for
+metadata-only sources like Crossref, PubMed, and DBLP) are resolved to an open
+PDF via Unpaywall, falling back to OpenAlex's best OA location. Set
+`unpaywall_email` with a real contact address for Unpaywall. Resolver-derived
+licenses are preserved for mirrored files; hits with a direct PDF but no
+license evidence remain `unknown` and are not seedable.
 
 ### Write Zotero items & collections
 
@@ -218,12 +285,22 @@ paperbridge config snippet --target opencode
 
 ## Gotchas
 
+- **CLI output is human-readable by default** — pass the global `--json` flag
+  for stable structured output (for example, `paperbridge --json papers search
+  --query "transformers"`). Runtime failures use `{ error, reason, try }` JSON
+  on stderr with a non-zero exit code. MCP tool results remain JSON.
+
 - **Cloud api_base must be HTTPS** (or `http://localhost` for local mode).
 - **Institutional access is optional** — `off` never rewrites URLs; setup never requests institutional credentials.
-- **Search results are paginated** — use `offset`/`limit` to page through large sets. The `total_count` field tells you how many remain.
+- **`--limit` is page size** (default 10). Fan-out uses `--per-source` / MCP `limit_per_source`.
+- **Search is compact by default** — pass `--detail full` / `detail: "full"` for abstracts. Full abstracts default to 280 characters; set `abstract_max_chars=0` for unlimited text.
+- **Search results are paginated** — use `offset`/`limit`; check `has_more` / `next_offset`. Later pages expand the per-source fetch window automatically, up to a safe window of 200.
+- **Key-gated sources skip loudly** — see `diagnostics.sources_skipped` / `sources_failed`.
 - **Cached papers are conservative by default**: default cache-only hits need strong relevance, and `--sources` without `paperseed` excludes cache hits. Use `--sources paperseed` for explicit cache-only search.
-- **PDF text extraction** happens automatically during local corpus import — no separate step needed.
-- **Read output can be large** — always set `--max-chars-per-chunk` when feeding into an LLM.
+- **Research hits report availability**: use `--sources research` for YAMS-only discovery. Do not attempt to open hits with `access.content_state: stale` until the source is re-indexed.
+- **PDF text extraction** happens automatically during local corpus import unless `--no-fulltext` is passed. Deferred extraction runs on first read; neither path performs OCR.
+- **PDF validation is strict when extracting** — HTML/error pages saved as `.pdf`, malformed or encrypted PDFs, and files over 100 MiB are rejected with recovery guidance. Use `--no-fulltext` only when you deliberately need to retain a PDF for later handling.
+- **Fulltext is paged** — `open_paper`, `get_pdf_text`, and `get_item_fulltext` default to 8,000 characters. When `next_offset` is present, repeat the same call with that UTF-8 byte `offset`. Vox tools use `--max-chars-per-chunk`.
 - **Write operations need `version` on update/delete** (Zotero optimistic concurrency). Re-fetch if you get HTTP 412.
 - **`config get api_key` no longer prints the raw key** — it prints `(set, N chars — pass --show-secret to reveal)`.
 - **Legacy flat commands** (`query`, `create-item`, `backend-info`, `search-papers`, …) still work but emit a deprecation warning. Prefer the canonical domain paths.
@@ -240,3 +317,6 @@ paperbridge config validate
 
 CLI surface changes must be reviewed against
 [`docs/design/cli-design.md`](design/cli-design.md).
+MCP/search/return-shape and agent discover→read changes must also follow
+[`docs/design/llm-interface.md`](design/llm-interface.md) and the backlog in
+[`docs/design/llm-interface-tasks.md`](design/llm-interface-tasks.md).

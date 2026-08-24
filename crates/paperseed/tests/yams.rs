@@ -1,12 +1,13 @@
 use paperseed::app::{
-    CorpusPaths, ImportRequest, import_with_yams, import_with_yams_runner,
-    query_entries_with_yams_runner, query_with_yams,
+    CorpusPaths, ImportRequest, IngestRequest, import_with_yams, import_with_yams_runner,
+    ingest_with_yams_runner, query_entries_with_yams_runner, query_with_yams,
 };
 use paperseed::db::QueryHit;
 use paperseed::models::{License, LocalPaper, PaperMetadata, StoredFile};
 use paperseed::yams::{
     YamsConfig, YamsDownloadRequest, YamsIndexRequest, YamsOutput, YamsRunner,
-    download_with_runner, index_paper_with_runner, parse_yams_hits, query_with_runner,
+    download_with_runner, index_paper_with_runner, parse_research_hits, parse_stored_documents,
+    parse_yams_hits, query_research_with_runner, query_with_runner,
 };
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -62,10 +63,63 @@ fn parses_yams_json_array_and_object_results() {
         vec![QueryHit {
             id: "1".to_string(),
             title: "Paper".to_string(),
-            score: 3,
+            score: 3.0,
             path: PathBuf::from("/tmp/paper.pdf"),
         }]
     );
+}
+
+#[test]
+fn parses_current_yams_research_results() {
+    let hits = parse_research_hits(
+        r#"{
+          "results": [{
+            "id": "0",
+            "hash": "abc123",
+            "path": "/Users/test/work/research/papers/paper-2/paper.pdf",
+            "score": 0.6786919783626283,
+            "snippet": "Which Component Drives Detection? Abstract..."
+          }]
+        }"#,
+    )
+    .unwrap();
+
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].hash, "abc123");
+    assert!((hits[0].score - 0.6786919783626283).abs() < f64::EPSILON);
+    assert!(hits[0].path.ends_with("paper.pdf"));
+}
+
+#[test]
+fn parses_yams_group_documents_for_bundle_assembly() {
+    let documents = parse_stored_documents(
+        r#"{"documents":[{"hash":"results-hash","path":"/research/papers/paper-2/tex/results.tex","indexed":1779725434}]}"#,
+    )
+    .unwrap();
+
+    assert_eq!(documents.len(), 1);
+    assert_eq!(documents[0].hash, "results-hash");
+    assert_eq!(documents[0].indexed, 1_779_725_434);
+}
+
+#[test]
+fn research_query_requests_hashes_for_stable_ids() {
+    let runner = FakeRunner::new(YamsOutput {
+        status_success: true,
+        stdout: r#"{"results":[]}"#.into(),
+        stderr: String::new(),
+    });
+    let config = YamsConfig {
+        enabled: true,
+        binary: "yams".into(),
+    };
+
+    let hits = query_research_with_runner(&config, &runner, "gnn detection", 40).unwrap();
+
+    assert!(hits.is_empty());
+    let calls = runner.calls.borrow();
+    assert!(calls[0].iter().any(|arg| arg == "--show-hash"));
+    assert!(calls[0].windows(2).any(|pair| pair == ["--limit", "40"]));
 }
 
 #[test]
@@ -119,7 +173,7 @@ fn yams_query_maps_paperseed_metadata_for_retrieval() {
 fn yams_index_sends_title_path_and_text() {
     let runner = FakeRunner::new(YamsOutput {
         status_success: true,
-        stdout: r#"[{"success":true,"hash":"yams-hash-1"}]"#.to_string(),
+        stdout: r#"{"results":[{"success":true,"hash":"yams-hash-1"}]}"#.to_string(),
         stderr: String::new(),
     });
     let config = YamsConfig {
@@ -142,7 +196,8 @@ fn yams_index_sends_title_path_and_text() {
 
     let calls = runner.calls.borrow();
     let args = &calls[0];
-    assert!(args.contains(&"add".to_string()));
+    assert_eq!(args[0], "--json");
+    assert_eq!(args[1], "add");
     assert!(args.contains(&paper.file.path.display().to_string()));
     // Flags moved from two-token (`--name`, `<value>`) to single-token
     // (`--name=<value>`) form so values starting with `-` can't be parsed
@@ -155,6 +210,75 @@ fn yams_index_sends_title_path_and_text() {
     assert!(
         args.iter()
             .any(|arg| arg.starts_with("--metadata=paperseed_text_chars="))
+    );
+    assert!(args.iter().any(|arg| arg == "--collection=paperbridge"));
+    assert!(args.iter().any(|arg| arg == "--sync"));
+    assert!(args.iter().any(|arg| arg == "--verify"));
+}
+
+#[test]
+fn ingest_indexes_authoritative_metadata_and_records_yams_hash() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("paper.txt");
+    std::fs::write(&source, "graph intrusion detection body").unwrap();
+    let paths = CorpusPaths::new(dir.path().join("corpus"));
+    let config = YamsConfig {
+        enabled: true,
+        binary: "yams".into(),
+    };
+    let runner = FakeRunner::new(YamsOutput {
+        status_success: true,
+        stdout: r#"[{"success":true,"hash":"indexed-hash"}]"#.into(),
+        stderr: String::new(),
+    });
+
+    let paper = ingest_with_yams_runner(
+        &paths,
+        IngestRequest {
+            path: source,
+            metadata: paperseed::sources::PaperbridgeMetadata {
+                title: Some("Canonical Graph Detector".into()),
+                doi: Some("10.5555/graph-detector".into()),
+                arxiv_id: None,
+                authors: vec!["Ada Lovelace".into()],
+                year: Some(2026),
+                venue: Some("NDSS".into()),
+                abstract_note: None,
+                license: Some("cc-by".into()),
+                source_url: Some("https://example.test/paper".into()),
+            },
+            license: Some("cc-by".into()),
+            yams_hash: None,
+            extract_full_text: true,
+        },
+        &config,
+        &runner,
+    )
+    .unwrap();
+
+    let calls = runner.calls.borrow();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0]
+            .iter()
+            .any(|arg| arg == "--name=Canonical Graph Detector")
+    );
+    assert!(
+        calls[0]
+            .iter()
+            .any(|arg| arg == "--metadata=doi=10.5555/graph-detector")
+    );
+    assert!(
+        calls[0]
+            .iter()
+            .any(|arg| arg == "--metadata=authors=Ada Lovelace")
+    );
+    let db = paperseed::app::status(&paths).unwrap();
+    assert_eq!(
+        db.get(&paper.metadata.id)
+            .unwrap()
+            .and_then(|entry| entry.yams_hash.as_deref()),
+        Some("indexed-hash")
     );
 }
 
@@ -172,6 +296,7 @@ fn import_and_query_with_yams_preserve_fallback_behavior() {
             title: Some("Alpha".to_string()),
             license: Some("private".to_string()),
             yams_hash: None,
+            extract_full_text: true,
         },
         &YamsConfig::disabled(),
     )
@@ -213,6 +338,7 @@ fn append_to_yams_search_and_retrieve_paper_content() {
             title: Some("Spectral Llama".to_string()),
             license: Some("cc-by".to_string()),
             yams_hash: None,
+            extract_full_text: true,
         },
         &config,
         &runner,
@@ -235,11 +361,12 @@ fn append_to_yams_search_and_retrieve_paper_content() {
         .expect("query entries via yams");
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].paper.metadata.id, paper.metadata.id);
-    assert_eq!(entries[0].full_text.as_deref(), Some(body));
+    assert_eq!(entries[0].read_full_text().unwrap().as_deref(), Some(body));
 
     let calls = runner.calls.borrow();
     assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0][0], "add");
+    assert_eq!(calls[0][0], "--json");
+    assert_eq!(calls[0][1], "add");
     assert_eq!(calls[1][0], "search");
     assert_eq!(calls[1][1], "spectral llama");
 }
@@ -306,6 +433,7 @@ fn local_corpus_validates_ten_searches_and_content_without_yams() {
                 title: Some(format!("Local Validation Paper {index}")),
                 license: Some("cc-by".to_string()),
                 yams_hash: None,
+                extract_full_text: true,
             },
             &YamsConfig::disabled(),
         )
@@ -324,7 +452,7 @@ fn local_corpus_validates_ten_searches_and_content_without_yams() {
         // digit is the only term with df=1, so the matching paper must rank first.
         let expected = format!("local validation paper {index} unique-token-{index} body content");
         assert_eq!(
-            entries[0].full_text.as_deref(),
+            entries[0].read_full_text().unwrap().as_deref(),
             Some(expected.as_str()),
             "top hit for unique-token-{index} should be paper {index}"
         );
@@ -337,9 +465,11 @@ fn fake_paper() -> LocalPaper {
             id: "paper1".to_string(),
             title: "YAMS Paper".to_string(),
             doi: Some("10.1/yams".to_string()),
+            arxiv_id: None,
             authors: vec!["Ada Lovelace".to_string()],
             year: Some(2024),
             venue: Some("Journal".to_string()),
+            abstract_note: None,
             license: License::UserOwnedPrivate,
             source_url: None,
         },

@@ -1,4 +1,4 @@
-use crate::models::{PaperSource, SearchCacheMode};
+use crate::models::{PaperSource, SearchCacheMode, SearchDetail};
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
@@ -8,6 +8,10 @@ use clap::{Parser, Subcommand, ValueEnum};
     about = "Paperbridge MCP + CLI for paper discovery and reading"
 )]
 pub struct Cli {
+    /// Print structured command results as JSON
+    #[arg(long, global = true)]
+    pub json: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -251,10 +255,10 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum LibraryAction {
-    /// Search items in the local Zotero library and print JSON
+    /// Search items in the local Zotero library
     Query {
         /// Quick search query
-        #[arg(short = 'q', long)]
+        #[arg(short = 'q', long = "query", visible_alias = "q")]
         q: Option<String>,
         /// Query mode (e.g. titleCreatorYear, everything)
         #[arg(long)]
@@ -265,26 +269,26 @@ pub enum LibraryAction {
         /// Tag filter
         #[arg(long)]
         tag: Option<String>,
-        /// Result limit (1-100, default 25)
+        /// Page size (1-100, default 10)
         #[arg(long)]
         limit: Option<u32>,
-        /// Pagination start index
-        #[arg(long)]
-        start: Option<u32>,
+        /// Pagination offset (alias: --start)
+        #[arg(long, visible_alias = "start")]
+        offset: Option<u32>,
     },
-    /// List Zotero collections and print JSON
+    /// List Zotero collections
     Collections {
         /// If true, list only top-level collections
         #[arg(long)]
         top_only: bool,
-        /// Result limit (1-100, default 50)
+        /// Page size (1-100, default 10)
         #[arg(long)]
         limit: Option<u32>,
-        /// Pagination start index
-        #[arg(long)]
-        start: Option<u32>,
+        /// Pagination offset (alias: --start)
+        #[arg(long, visible_alias = "start")]
+        offset: Option<u32>,
     },
-    /// Prepare one item for read-aloud and print Vox-ready JSON
+    /// Prepare one item for read-aloud and print Vox-ready chunks
     Read {
         /// Zotero item key
         #[arg(long)]
@@ -333,13 +337,13 @@ pub enum ItemAction {
         #[arg(long)]
         online: bool,
     },
-    /// Create an item from a JSON payload file and print JSON
+    /// Create an item from a JSON payload file
     Create {
         /// Path to JSON file matching ItemWriteRequest
         #[arg(long)]
         file: String,
     },
-    /// Update an item from a JSON payload file (requires key + version) and print JSON
+    /// Update an item from a JSON payload file (requires key + version)
     Update {
         /// Path to JSON file matching ItemUpdateRequest
         #[arg(long)]
@@ -355,7 +359,7 @@ pub enum ItemAction {
 
 #[derive(Debug, Subcommand)]
 pub enum CollectionAction {
-    /// Create a collection and print JSON
+    /// Create a collection
     Create {
         /// Collection name
         #[arg(long)]
@@ -364,7 +368,7 @@ pub enum CollectionAction {
         #[arg(long)]
         parent_collection: Option<String>,
     },
-    /// Update a collection from a JSON payload file and print JSON
+    /// Update a collection from a JSON payload file
     Update {
         /// Path to JSON file matching CollectionUpdateRequest
         #[arg(long)]
@@ -380,34 +384,82 @@ pub enum CollectionAction {
 
 #[derive(Debug, Subcommand)]
 pub enum PapersAction {
-    /// Search external paper indexes (arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed, HuggingFace Papers, Semantic Scholar, CORE, NASA ADS, ScholarAPI)
+    /// Search the YAMS research workspace, Paperseed cache, and external paper indexes
     Search {
         /// Free-text search query
-        #[arg(short = 'q', long, value_name = "Q", required_unless_present = "query")]
+        #[arg(
+            short = 'q',
+            long = "query",
+            visible_alias = "q",
+            value_name = "QUERY",
+            required_unless_present = "positional_query"
+        )]
         q: Option<String>,
-        /// Free-text search query (positional shorthand for -q/--q)
+        /// Free-text search query (positional shorthand for --query)
         #[arg(value_name = "QUERY")]
-        query: Option<String>,
-        /// Max hits per source (default 10)
-        #[arg(long)]
-        limit: Option<u32>,
+        positional_query: Option<String>,
+        /// Initial hits per source (default 10; page window maximum 200)
+        #[arg(long = "per-source")]
+        per_source: Option<u32>,
         /// Subset of sources (comma-separated); default is all enabled
         #[arg(long, value_enum, value_delimiter = ',')]
         sources: Option<Vec<PaperSource>>,
         /// Per-source timeout in milliseconds (default 8000)
         #[arg(long)]
         timeout_ms: Option<u64>,
-        /// Local cache behavior (default auto; --sources paperseed implies only)
+        /// Local Paperseed cache behavior (default auto; --sources paperseed implies only)
         #[arg(long, value_enum)]
         cache: Option<SearchCacheMode>,
         /// Zero-based pagination offset (default 0)
         #[arg(long)]
         offset: Option<u32>,
-        /// Maximum results to return; 0 means all (default 0)
+        /// Page size (default 10, max 50). Alias: --max-results
+        #[arg(long, visible_alias = "max-results")]
+        limit: Option<u32>,
+        /// compact (default) or full (include abstracts)
+        #[arg(long, value_enum)]
+        detail: Option<SearchDetail>,
+        /// Abstract cap for --detail full (default 280; 0 means unlimited)
         #[arg(long)]
-        max_results: Option<u32>,
+        abstract_max_chars: Option<usize>,
     },
-    /// Resolve a DOI via Crossref and print structured metadata
+    /// Open a paper by hit_id / DOI / arXiv / research hash / Zotero key / cache id
+    Open {
+        /// hit_id from papers search (research:…, arxiv:…, doi:…, paperseed:…, url:…)
+        #[arg(long)]
+        hit_id: Option<String>,
+        /// DOI
+        #[arg(long)]
+        doi: Option<String>,
+        /// arXiv id
+        #[arg(long)]
+        arxiv_id: Option<String>,
+        /// Zotero item key
+        #[arg(long)]
+        item_key: Option<String>,
+        /// Paperseed paper id
+        #[arg(long)]
+        paper_id: Option<String>,
+        /// Zotero attachment key
+        #[arg(long)]
+        attachment_key: Option<String>,
+        /// Direct HTTP(S) paper or PDF URL
+        #[arg(long)]
+        url: Option<String>,
+        /// Comma-separated: metadata,fulltext,structure,chunks (default metadata)
+        #[arg(long, value_delimiter = ',')]
+        want: Option<Vec<String>>,
+        /// Max fulltext characters (default 8000)
+        #[arg(long)]
+        max_chars: Option<usize>,
+        /// UTF-8 byte offset for the next fulltext page (default 0)
+        #[arg(long)]
+        offset: Option<usize>,
+        /// Structure selector when want includes structure
+        #[arg(long)]
+        selector: Option<String>,
+    },
+    /// Resolve a DOI via Crossref
     ResolveDoi {
         /// DOI to resolve (e.g. 10.1038/nature12373)
         #[arg(long)]
@@ -421,11 +473,11 @@ pub enum PapersAction {
         /// Publisher, article, or PDF URL to route
         #[arg(long, conflicts_with = "doi", required_unless_present = "doi")]
         url: Option<String>,
-        /// Print the resolved access JSON without opening a browser
+        /// Resolve access without opening a browser
         #[arg(long)]
         no_open: bool,
     },
-    /// Fetch the full PaperStructure JSON for a Zotero item or cached paper
+    /// Fetch the full paper structure for a Zotero item or cached paper
     Structure {
         /// Zotero item key or cached paper id
         #[arg(long)]
@@ -446,11 +498,20 @@ pub enum PapersAction {
         #[arg(long)]
         attachment: Option<String>,
     },
+    /// Generate a deterministic SKILL.md scaffold from a paper's structure
+    Skill {
+        /// Zotero item key or cached paper id
+        #[arg(long)]
+        key: String,
+        /// Optional attachment key override
+        #[arg(long)]
+        attachment: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum PaperAction {
-    /// Fetch the full PaperStructure JSON for a Zotero item
+    /// Fetch the full paper structure for a Zotero item
     Structure {
         /// Zotero item key
         #[arg(long)]
@@ -493,6 +554,21 @@ pub enum PaperseedCorpusAction {
     /// Show Paperseed corpus status using Paperbridge config
     Status,
 
+    /// List papers in the local Paperseed corpus
+    List,
+
+    /// Show one cached paper by exact id or unique hash prefix
+    Show {
+        /// Local paper id or unique content-hash prefix
+        id: String,
+    },
+
+    /// Remove one cached paper and its stored file
+    Remove {
+        /// Local paper id or unique content-hash prefix
+        id: String,
+    },
+
     /// Import a PDF/text file that the user has rights to store locally
     Import {
         /// File path to import
@@ -503,6 +579,9 @@ pub enum PaperseedCorpusAction {
         /// Optional license, e.g. cc-by, cc0, public-domain, user-owned-private
         #[arg(long)]
         license: Option<String>,
+        /// Defer full-text extraction until first read
+        #[arg(long)]
+        no_fulltext: bool,
     },
 
     /// Ingest Paperbridge/Zotero-style metadata plus an authorized local file
@@ -516,6 +595,9 @@ pub enum PaperseedCorpusAction {
         /// License override
         #[arg(long)]
         license: Option<String>,
+        /// Defer full-text extraction until first read
+        #[arg(long)]
+        no_fulltext: bool,
     },
 
     /// Search the local Paperseed full-text corpus
@@ -525,12 +607,15 @@ pub enum PaperseedCorpusAction {
         q: String,
     },
 
-    /// Export the local Paperseed corpus
+    /// Export the local Paperseed corpus (BibTeX by default; use --json for JSON)
     Export {
-        /// Export format
-        #[arg(long, value_enum, default_value_t = PaperseedExportFormat::Json)]
-        format: PaperseedExportFormat,
+        /// Export format override (JSON also requires the global --json flag)
+        #[arg(long, value_enum)]
+        format: Option<PaperseedExportFormat>,
     },
+
+    /// Rebuild the Paperseed search index from corpus metadata and text blobs
+    Reindex,
 }
 
 #[derive(Debug, Subcommand)]
@@ -580,9 +665,6 @@ pub enum ConfigAction {
     Validate,
     /// Diagnose config drift, risky defaults, and Paperseed corpus/P2P settings
     Doctor {
-        /// Print structured JSON diagnostics
-        #[arg(long)]
-        json: bool,
         /// Print all checks, including informational advanced/setup hints
         #[arg(long)]
         verbose: bool,
@@ -641,7 +723,32 @@ mod tests {
     #[test]
     fn parse_default_command_none() {
         let cli = Cli::try_parse_from(["paperbridge"]).unwrap();
+        assert!(!cli.json);
         assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn parse_global_json_before_or_after_subcommands() {
+        let before = Cli::try_parse_from([
+            "paperbridge",
+            "--json",
+            "papers",
+            "search",
+            "--query",
+            "attention",
+        ])
+        .unwrap();
+        let after = Cli::try_parse_from([
+            "paperbridge",
+            "papers",
+            "search",
+            "--query",
+            "attention",
+            "--json",
+        ])
+        .unwrap();
+        assert!(before.json);
+        assert!(after.json);
     }
 
     #[test]
@@ -658,16 +765,42 @@ mod tests {
     #[test]
     fn parse_config_doctor() {
         let cli = Cli::try_parse_from(["paperbridge", "config", "doctor", "--json"]).unwrap();
+        assert!(cli.json);
         assert!(matches!(
             cli.command,
             Some(Command::Config {
                 action: ConfigAction::Doctor {
-                    json: true,
                     verbose: false,
                     setup: false,
                 }
             })
         ));
+    }
+
+    #[test]
+    fn parse_paperseed_export_defaults_to_native_output() {
+        let cli = Cli::try_parse_from(["paperbridge", "paperseed", "corpus", "export"]).unwrap();
+        assert!(!cli.json);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Paperseed {
+                action: PaperseedAction::Corpus {
+                    action: PaperseedCorpusAction::Export { format: None }
+                }
+            })
+        ));
+    }
+
+    #[test]
+    fn parse_paperseed_corpus_admin_commands() {
+        for args in [
+            vec!["paperbridge", "paperseed", "corpus", "list"],
+            vec!["paperbridge", "paperseed", "corpus", "show", "abc123"],
+            vec!["paperbridge", "paperseed", "corpus", "remove", "abc123"],
+            vec!["paperbridge", "paperseed", "corpus", "reindex"],
+        ] {
+            Cli::try_parse_from(args).expect("paperseed corpus command should parse");
+        }
     }
 
     #[test]
@@ -742,6 +875,8 @@ mod tests {
             "papers",
             "search",
             "implicit feedback skip recommendation systems",
+            "--per-source",
+            "3",
             "--limit",
             "5",
         ])
@@ -750,14 +885,19 @@ mod tests {
             Some(Command::Papers {
                 action:
                     PapersAction::Search {
-                        q, query, limit, ..
+                        q,
+                        positional_query,
+                        per_source,
+                        limit,
+                        ..
                     },
             }) => {
                 assert!(q.is_none());
                 assert_eq!(
-                    query.as_deref(),
+                    positional_query.as_deref(),
                     Some("implicit feedback skip recommendation systems")
                 );
+                assert_eq!(per_source, Some(3));
                 assert_eq!(limit, Some(5));
             }
             other => panic!("unexpected: {other:?}"),

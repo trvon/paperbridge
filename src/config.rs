@@ -850,6 +850,18 @@ paperseed_corpus_root = {}",
                 "PAPERBRIDGE_UPDATE_CHECK" => {
                     self.update_check_enabled = parse_bool_env(key, value)?;
                 }
+                "PAPERBRIDGE_PAPERSEED_ENABLED" => {
+                    self.paperseed_enabled = parse_bool_env(key, value)?;
+                }
+                "PAPERBRIDGE_PAPERSEED_AUTO_DOWNLOAD" => {
+                    self.paperseed_auto_download = parse_bool_env(key, value)?;
+                }
+                "PAPERBRIDGE_PAPERSEED_YAMS_ENABLED" => {
+                    self.paperseed_yams_enabled = parse_bool_env(key, value)?;
+                }
+                "PAPERBRIDGE_PAPERSEED_CORPUS_ROOT" => {
+                    self.paperseed_corpus_root = optional_string(value);
+                }
                 _ => {}
             }
         }
@@ -1093,6 +1105,9 @@ mod tests {
                 "PAPERBRIDGE_INSTITUTION_GATEWAY_URL",
                 "https://proxy.example.edu/login?url=",
             ),
+            ("PAPERBRIDGE_PAPERSEED_ENABLED", "true"),
+            ("PAPERBRIDGE_PAPERSEED_YAMS_ENABLED", "false"),
+            ("PAPERBRIDGE_PAPERSEED_CORPUS_ROOT", "/tmp/research-corpus"),
         ])
         .unwrap();
 
@@ -1112,6 +1127,12 @@ mod tests {
         assert_eq!(
             cfg.institution_gateway_url.as_deref(),
             Some("https://proxy.example.edu/login?url=")
+        );
+        assert!(cfg.paperseed_enabled);
+        assert!(!cfg.paperseed_yams_enabled);
+        assert_eq!(
+            cfg.paperseed_corpus_root.as_deref(),
+            Some("/tmp/research-corpus")
         );
     }
 

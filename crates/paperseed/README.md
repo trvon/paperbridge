@@ -29,11 +29,15 @@ seeding flows are policy-first:
 
 ```bash
 paperbridge paperseed corpus status
+paperbridge paperseed corpus list
+paperbridge paperseed corpus show <id-or-unique-hash-prefix>
 paperbridge paperseed corpus import ./paper.pdf --title "Example Paper" --license user-owned-private
+paperbridge paperseed corpus import ./large.pdf --license cc-by --no-fulltext
 paperbridge paperseed corpus ingest --metadata ./paperbridge-item.json --file ./oa-paper.pdf --license cc-by
 paperbridge paperseed corpus query --q "induction heads"
-paperbridge paperseed corpus export --format json
 paperbridge paperseed corpus export --format bibtex
+paperbridge paperseed corpus remove <id-or-unique-hash-prefix>
+paperbridge paperseed corpus reindex
 paperbridge paperseed seed check --paper-id <id-or-hash-prefix>
 paperbridge paperseed seed create --paper-id <id-or-hash-prefix>
 ```
@@ -58,12 +62,22 @@ Corpus layout:
 ```text
 <corpus-root>/
 ├── corpus.json
+├── corpus.idx.bin
 ├── files/
-    └── <hash-prefix>/
-        └── <blake3-hash>.<ext>
+│   └── <hash-prefix>/
+│       └── <blake3-hash>.<ext>
+├── text/
+│   └── <hash-prefix>/
+│       └── <blake3-hash>.txt
 └── seeds/
     └── <paper-id>.json
 ```
+
+`corpus.json` contains metadata only; extracted text lives in `text/` blobs and
+the BM25F postings use the binary `corpus.idx.bin`. `corpus status` reports
+paper/index counts and warns on drift. `--no-fulltext` avoids synchronous
+extraction and extracts lazily on first read; PDF extraction does not include
+OCR.
 
 ## Paperbridge integration boundary
 

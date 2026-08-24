@@ -215,9 +215,11 @@ async fn golden_outputs_match_expected_json() {
             paperseed::sources::PaperbridgeMetadata {
                 title: Some("Cached Golden Paper".to_string()),
                 doi: Some("10.5555/golden".to_string()),
+                arxiv_id: None,
                 authors: vec!["Grace Hopper".to_string()],
                 year: Some(2024),
                 venue: Some("Systems Journal".to_string()),
+                abstract_note: None,
                 license: Some("cc-by".to_string()),
                 source_url: Some("https://example.org/golden".to_string()),
             },

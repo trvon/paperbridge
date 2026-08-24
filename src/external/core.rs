@@ -114,6 +114,7 @@ fn convert_work(w: RawCoreWork) -> PaperHit {
     let pdf = w.download_url.or(w.full_text_link);
 
     PaperHit {
+        hit_id: None,
         source: PaperSource::Core,
         title: w.title.unwrap_or_default(),
         authors,
@@ -129,6 +130,10 @@ fn convert_work(w: RawCoreWork) -> PaperHit {
         citation_count: None,
         cache: None,
         relevance_score: None,
+        ids: None,
+        match_info: None,
+        access: None,
+        next: Vec::new(),
     }
 }
 
