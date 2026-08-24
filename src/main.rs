@@ -20,7 +20,7 @@ use paperbridge::zotero_api::build_backend;
 use rmcp::ServiceExt;
 use serde::Serialize;
 use std::io::{self, Write};
-use tracing::warn;
+use std::ops::Not;
 
 fn main() -> paperbridge::Result<()> {
     let cli = Cli::parse();
@@ -192,6 +192,9 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
                 .await?
             }
             PapersAction::ResolveDoi { doi } => handle_papers_resolve_doi(config, doi).await?,
+            PapersAction::Access { doi, url, no_open } => {
+                handle_papers_access(config, doi, url, no_open).await?
+            }
             PapersAction::Structure { key, attachment } => {
                 handle_paper_structure(config, key, attachment).await?
             }
@@ -203,8 +206,8 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
         },
 
         Some(Command::Paper { action }) => {
-            warn!(
-                "'paper' is deprecated; use 'paperbridge papers structure' or 'paperbridge papers query' instead"
+            eprintln!(
+                "warning: 'paper' is deprecated; use 'paperbridge papers structure' or 'paperbridge papers query' instead"
             );
             match action {
                 PaperAction::Structure { key, attachment } => {
@@ -229,7 +232,7 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
             limit,
             start,
         }) => {
-            warn!("'query' is deprecated; use 'paperbridge library query' instead");
+            eprintln!("warning: 'query' is deprecated; use 'paperbridge library query' instead");
             handle_library_query(config, q, qmode, item_type, tag, limit, start).await?;
         }
         Some(Command::Collections {
@@ -237,7 +240,9 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
             limit,
             start,
         }) => {
-            warn!("'collections' is deprecated; use 'paperbridge library collections' instead");
+            eprintln!(
+                "warning: 'collections' is deprecated; use 'paperbridge library collections' instead"
+            );
             handle_library_collections(config, top_only, limit, start).await?;
         }
         Some(Command::Read {
@@ -245,7 +250,7 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
             attachment_key,
             max_chars_per_chunk,
         }) => {
-            warn!("'read' is deprecated; use 'paperbridge library read' instead");
+            eprintln!("warning: 'read' is deprecated; use 'paperbridge library read' instead");
             handle_library_read(config, item_key, attachment_key, max_chars_per_chunk).await?;
         }
         Some(Command::ReadSearch {
@@ -257,7 +262,9 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
             search_limit,
             max_chars_per_chunk,
         }) => {
-            warn!("'read-search' is deprecated; use 'paperbridge library read-search' instead");
+            eprintln!(
+                "warning: 'read-search' is deprecated; use 'paperbridge library read-search' instead"
+            );
             handle_library_read_search(
                 config,
                 q,
@@ -274,35 +281,49 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
             name,
             parent_collection,
         }) => {
-            warn!("'create-collection' is deprecated; use 'paperbridge collection create' instead");
+            eprintln!(
+                "warning: 'create-collection' is deprecated; use 'paperbridge collection create' instead"
+            );
             handle_collection_create(config, name, parent_collection).await?;
         }
         Some(Command::UpdateCollection { file }) => {
-            warn!("'update-collection' is deprecated; use 'paperbridge collection update' instead");
+            eprintln!(
+                "warning: 'update-collection' is deprecated; use 'paperbridge collection update' instead"
+            );
             handle_collection_update(config, file).await?;
         }
         Some(Command::DeleteCollection { file }) => {
-            warn!("'delete-collection' is deprecated; use 'paperbridge collection delete' instead");
+            eprintln!(
+                "warning: 'delete-collection' is deprecated; use 'paperbridge collection delete' instead"
+            );
             handle_collection_delete(config, file).await?;
         }
         Some(Command::ValidateItem { file, online }) => {
-            warn!("'validate-item' is deprecated; use 'paperbridge item validate' instead");
+            eprintln!(
+                "warning: 'validate-item' is deprecated; use 'paperbridge item validate' instead"
+            );
             handle_item_validate(config, file, online).await?;
         }
         Some(Command::CreateItem { file }) => {
-            warn!("'create-item' is deprecated; use 'paperbridge item create' instead");
+            eprintln!(
+                "warning: 'create-item' is deprecated; use 'paperbridge item create' instead"
+            );
             handle_item_create(config, file).await?;
         }
         Some(Command::UpdateItem { file }) => {
-            warn!("'update-item' is deprecated; use 'paperbridge item update' instead");
+            eprintln!(
+                "warning: 'update-item' is deprecated; use 'paperbridge item update' instead"
+            );
             handle_item_update(config, file).await?;
         }
         Some(Command::DeleteItem { file }) => {
-            warn!("'delete-item' is deprecated; use 'paperbridge item delete' instead");
+            eprintln!(
+                "warning: 'delete-item' is deprecated; use 'paperbridge item delete' instead"
+            );
             handle_item_delete(config, file).await?;
         }
         Some(Command::BackendInfo) => {
-            warn!("'backend-info' is deprecated; use 'paperbridge status' instead");
+            eprintln!("warning: 'backend-info' is deprecated; use 'paperbridge status' instead");
             handle_status(config).await?;
         }
         Some(Command::SearchPapers {
@@ -313,7 +334,9 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
             timeout_ms,
             cache,
         }) => {
-            warn!("'search-papers' is deprecated; use 'paperbridge papers search' instead");
+            eprintln!(
+                "warning: 'search-papers' is deprecated; use 'paperbridge papers search' instead"
+            );
             handle_papers_search(
                 config,
                 PapersSearchArgs {
@@ -329,7 +352,9 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
             .await?;
         }
         Some(Command::ResolveDoi { doi }) => {
-            warn!("'resolve-doi' is deprecated; use 'paperbridge papers resolve-doi' instead");
+            eprintln!(
+                "warning: 'resolve-doi' is deprecated; use 'paperbridge papers resolve-doi' instead"
+            );
             handle_papers_resolve_doi(config, doi).await?;
         }
 
@@ -420,7 +445,7 @@ fn handle_config_doctor(json: bool, verbose: bool, setup: bool) -> paperbridge::
     }
     let mut checks = Vec::new();
 
-    if !config_exists {
+    if config_exists.not() {
         checks.push(DoctorCheck {
             id: "config.missing",
             level: DoctorLevel::Warning,
@@ -454,7 +479,7 @@ fn handle_config_doctor(json: bool, verbose: bool, setup: bool) -> paperbridge::
         "paperseed_auto_download",
         "paperseed_yams_enabled",
     ] {
-        if config_exists && !toml_mentions_key(raw, key) {
+        if config_exists && toml_mentions_key(raw, key).not() {
             checks.push(DoctorCheck {
                 id: "paperseed.config-drift",
                 level: DoctorLevel::Warning,
@@ -471,7 +496,7 @@ fn handle_config_doctor(json: bool, verbose: bool, setup: bool) -> paperbridge::
 
     let yams_health = paperseed::yams::yams_health("yams");
     let yams_ready = config.paperseed_yams_enabled && yams_health.ready();
-    if config_exists && !toml_mentions_key(raw, "paperseed_corpus_root") && !yams_ready {
+    if config_exists && toml_mentions_key(raw, "paperseed_corpus_root").not() && yams_ready.not() {
         checks.push(DoctorCheck {
             id: "paperseed.config-drift",
             level: DoctorLevel::Warning,
@@ -500,7 +525,7 @@ fn handle_config_doctor(json: bool, verbose: bool, setup: bool) -> paperbridge::
         });
     }
 
-    if config.paperseed_enabled && !config.paperseed_auto_download {
+    if config.paperseed_enabled && config.paperseed_auto_download.not() {
         checks.push(DoctorCheck {
             id: "paperseed.auto-download-disabled",
             level: DoctorLevel::Warning,
@@ -523,7 +548,7 @@ fn handle_config_doctor(json: bool, verbose: bool, setup: bool) -> paperbridge::
     checks.push(DoctorCheck {
         id: "paperseed.yams",
         level: DoctorLevel::Info,
-        message: if !config.paperseed_yams_enabled {
+        message: if config.paperseed_yams_enabled.not() {
             "Experimental YAMS integration is disabled; Paperseed will use the local corpus only."
                 .to_string()
         } else if yams_health.ready() {
@@ -566,24 +591,29 @@ fn handle_config_doctor(json: bool, verbose: bool, setup: bool) -> paperbridge::
 }
 
 fn run_doctor_setup(config: &mut Config, raw: &str) -> paperbridge::Result<()> {
-    if !toml_mentions_key(raw, "paperseed_enabled") {
+    if toml_mentions_key(raw, "institution_resolver_url").not()
+        && toml_mentions_key(raw, "institution_gateway_url").not()
+    {
+        prompt_institution_access(config)?;
+    }
+    if toml_mentions_key(raw, "paperseed_enabled").not() {
         config.paperseed_enabled =
             prompt_bool("Enable Paperseed OA caching?", config.paperseed_enabled)?;
     }
-    if !toml_mentions_key(raw, "paperseed_auto_download") {
+    if toml_mentions_key(raw, "paperseed_auto_download").not() {
         config.paperseed_auto_download = prompt_bool(
             "Auto-download open-access PDFs into Paperseed?",
             config.paperseed_auto_download,
         )?;
     }
-    if !toml_mentions_key(raw, "paperseed_yams_enabled") {
+    if toml_mentions_key(raw, "paperseed_yams_enabled").not() {
         config.paperseed_yams_enabled = prompt_bool(
             "Enable experimental YAMS indexing/search when the daemon is running?",
             config.paperseed_yams_enabled,
         )?;
     }
     let yams_ready = config.paperseed_yams_enabled && paperseed::yams::yams_health("yams").ready();
-    if !toml_mentions_key(raw, "paperseed_corpus_root") && !yams_ready {
+    if toml_mentions_key(raw, "paperseed_corpus_root").not() && yams_ready.not() {
         let current = config
             .paperseed_corpus_root
             .clone()
@@ -595,6 +625,94 @@ fn run_doctor_setup(config: &mut Config, raw: &str) -> paperbridge::Result<()> {
         println!("YAMS daemon detected; using YAMS retrieval with local fallback defaults.");
     }
     Ok(())
+}
+
+fn prompt_institution_access(config: &mut Config) -> paperbridge::Result<()> {
+    println!(
+        "\nInstitutional access is optional. A holdings resolver answers ‘does my library have this?’; a gateway handles browser sign-in. Leave both blank to disable it."
+    );
+    let mut existing_resolver = config.institution_resolver_url.clone();
+    let mut existing_gateway = config.institution_gateway_url.clone();
+    if existing_resolver.is_none()
+        && existing_gateway.is_none()
+        && let Some(legacy) = config.institution_access_url.as_deref()
+        && let Ok(parsed) = url::Url::parse(legacy)
+    {
+        match paperbridge::access::detect_gateway(&parsed) {
+            paperbridge::access::InstitutionGatewayKind::OpenUrl => {
+                existing_resolver = Some(legacy.to_string());
+            }
+            _ => existing_gateway = Some(legacy.to_string()),
+        }
+    }
+    let resolver = prompt_institution_endpoint(
+        "Institution holdings resolver URL (Find Full Text/OpenURL)",
+        existing_resolver.as_deref(),
+        true,
+    )?;
+    let gateway = prompt_institution_endpoint(
+        "Institution authentication gateway URL (EZproxy/OpenAthens)",
+        existing_gateway.as_deref(),
+        false,
+    )?;
+
+    config.institution_access_url = None;
+    config.institution_resolver_url = resolver;
+    config.institution_gateway_url = gateway;
+    if config.institution_resolver_url.is_none() && config.institution_gateway_url.is_none() {
+        config.institution_access_mode = paperbridge::config::InstitutionAccessMode::Off;
+        println!("Institutional access disabled.");
+    } else {
+        if config.institution_access_mode == paperbridge::config::InstitutionAccessMode::Off {
+            config.institution_access_mode = paperbridge::config::InstitutionAccessMode::Fallback;
+        }
+        println!("Institutional holdings and authentication will be used as a fallback.");
+    }
+    Ok(())
+}
+
+fn prompt_institution_endpoint(
+    prompt: &str,
+    current: Option<&str>,
+    expect_resolver: bool,
+) -> paperbridge::Result<Option<String>> {
+    let default = if current.is_some() { "<set>" } else { "" };
+    let value = prompt_string(prompt, default)?;
+    if value == "<set>" {
+        return Ok(current.map(str::to_string));
+    }
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let parsed = url::Url::parse(value).map_err(|error| {
+        paperbridge::ZoteroMcpError::InvalidInput(format!(
+            "Institution endpoint must be an absolute HTTPS URL: {error}"
+        ))
+    })?;
+    if parsed.scheme() != "https" || parsed.host_str().is_none() {
+        return Err(paperbridge::ZoteroMcpError::InvalidInput(
+            "Institution endpoint must be an absolute HTTPS URL".to_string(),
+        ));
+    }
+    if parsed.username().is_empty().not() || parsed.password().is_some() {
+        return Err(paperbridge::ZoteroMcpError::InvalidInput(
+            "Institution endpoint must not contain embedded credentials".to_string(),
+        ));
+    }
+    let is_resolver = paperbridge::access::detect_gateway(&parsed)
+        == paperbridge::access::InstitutionGatewayKind::OpenUrl;
+    if is_resolver != expect_resolver {
+        let expected = if expect_resolver {
+            "an OpenURL holdings resolver"
+        } else {
+            "an EZproxy or OpenAthens authentication gateway"
+        };
+        return Err(paperbridge::ZoteroMcpError::InvalidInput(format!(
+            "Institution endpoint has the wrong type; expected {expected}"
+        )));
+    }
+    Ok(Some(value.to_string()))
 }
 
 fn prompt_bool(prompt: &str, default: bool) -> paperbridge::Result<bool> {
@@ -634,7 +752,7 @@ fn prompt_string(prompt: &str, default: &str) -> paperbridge::Result<String> {
 fn toml_mentions_key(raw: &str, key: &str) -> bool {
     raw.lines().any(|line| {
         let line = line.trim_start();
-        !line.starts_with('#')
+        line.starts_with('#').not()
             && line.starts_with(key)
             && line[key.len()..].trim_start().starts_with('=')
     })
@@ -663,7 +781,7 @@ fn print_doctor_report(report: &DoctorReport, verbose: bool) {
         .iter()
         .filter(|check| check.id == "paperseed.config-drift")
         .collect();
-    if !config_drift.is_empty() {
+    if config_drift.is_empty().not() {
         let missing = config_drift
             .iter()
             .filter_map(|check| check.message.split('`').nth(1))
@@ -698,7 +816,7 @@ fn print_doctor_report(report: &DoctorReport, verbose: bool) {
         }
     }
 
-    if !verbose {
+    if verbose.not() {
         println!("Advanced: paperbridge config doctor --verbose | --json");
     }
 }
@@ -914,6 +1032,81 @@ async fn handle_papers_resolve_doi(config: Config, doi: String) -> paperbridge::
     print_json(&work)
 }
 
+async fn handle_papers_access(
+    config: Config,
+    doi: Option<String>,
+    url: Option<String>,
+    no_open: bool,
+) -> paperbridge::Result<()> {
+    let service = build_service(config)?;
+    let access = service
+        .resolve_source_access(url.as_deref(), doi.as_deref())
+        .await?;
+    print_json(&access)?;
+    if no_open.not() {
+        if access.browser_open_allowed.not() {
+            return Err(paperbridge::ZoteroMcpError::InvalidInput(
+                "the resolver returned a cross-origin or unverified route, so Paperbridge did not open it automatically. Inspect access_options and open the intended provider manually, or rerun with --no-open"
+                    .to_string(),
+            ));
+        }
+        open_in_default_browser(&access.selected_url)?;
+    }
+    Ok(())
+}
+
+fn open_in_default_browser(url: &str) -> paperbridge::Result<()> {
+    #[cfg(any(target_os = "windows", target_os = "macos", unix))]
+    use std::process::{Command as ProcessCommand, Stdio};
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = ProcessCommand::new("rundll32.exe");
+        command.args(["url.dll,FileProtocolHandler", url]);
+        command
+    };
+
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = ProcessCommand::new("open");
+        command.arg(url);
+        command
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut command = ProcessCommand::new("xdg-open");
+        command.arg(url);
+        command
+    };
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
+    return Err(paperbridge::ZoteroMcpError::Config(
+        "this operating system has no configured browser launcher; open the selected_url manually"
+            .to_string(),
+    ));
+
+    #[cfg(any(target_os = "windows", target_os = "macos", unix))]
+    {
+        let status = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|error| {
+                paperbridge::ZoteroMcpError::Config(format!(
+                    "failed to start the system browser: {error}. Open this URL manually: {url}\nTry JSON-only mode with:\n  paperbridge papers access --no-open --url '<url>'"
+                ))
+            })?;
+        if status.success().not() {
+            return Err(paperbridge::ZoteroMcpError::Config(format!(
+                "the system browser launcher exited with {status}. Open this URL manually: {url}\nTry JSON-only mode with:\n  paperbridge papers access --no-open --url '<url>'"
+            )));
+        }
+        Ok(())
+    }
+}
+
 async fn handle_paper_structure(
     config: Config,
     key: String,
@@ -1036,6 +1229,10 @@ fn build_service(config: Config) -> paperbridge::Result<PaperbridgeService> {
         unpaywall_email: config.unpaywall_email.clone(),
     };
     let unpaywall_email = config.unpaywall_email.clone();
+    let institution_access_mode = config.institution_access_mode;
+    let institution_access_url = config.institution_access_url.clone();
+    let institution_resolver_url = config.institution_resolver_url.clone();
+    let institution_gateway_url = config.institution_gateway_url.clone();
     let paper_config = paperbridge::service::PaperConfig {
         grobid_url: config.grobid_url.clone(),
         grobid_auto_spawn: config.grobid_auto_spawn,
@@ -1053,6 +1250,12 @@ fn build_service(config: Config) -> paperbridge::Result<PaperbridgeService> {
     let backend = build_backend(config)?;
     let service = PaperbridgeService::with_paper_search(backend, paper_search)
         .with_unpaywall(unpaywall_email)
+        .with_institution_profile(
+            institution_access_mode,
+            institution_access_url,
+            institution_resolver_url,
+            institution_gateway_url,
+        )?
         .with_paper_config(paper_config);
     Ok(if paperseed_enabled {
         service.with_paperseed(paperseed_config)
@@ -1133,14 +1336,14 @@ fn print_client_snippet(target: SnippetTarget, binary_path: Option<&str>) {
 async fn handle_config_init(force: bool, interactive: bool) -> paperbridge::Result<()> {
     let path = Config::config_path();
 
-    if !interactive {
+    if interactive.not() {
         let out = Config::init_file(force)?;
         println!("Initialized config at {}", out.display());
         println!("Edit the file, then run: paperbridge config validate");
         return Ok(());
     }
 
-    if path.exists() && !force {
+    if path.exists() && force.not() {
         return Err(paperbridge::ZoteroMcpError::Config(format!(
             "Config already exists at {} (use --force to overwrite)",
             path.display()
@@ -1258,6 +1461,8 @@ async fn handle_config_init(force: bool, interactive: bool) -> paperbridge::Resu
 
     cfg.log_level = prompt_with_default("Log level", &cfg.log_level)?;
 
+    prompt_institution_access(&mut cfg)?;
+
     println!("\nGROBID provides section-aware paper parsing. It is optional; leave blank to skip.");
     let grobid_default = if cfg.grobid_url.is_some() {
         "<set>"
@@ -1303,7 +1508,7 @@ async fn handle_config_init(force: bool, interactive: bool) -> paperbridge::Resu
     Ok(())
 }
 
-const SENSITIVE_CONFIG_KEYS: &[&str] = &[
+const SENSITIVE_CONFIG_KEYS: [&str; 10] = [
     "api_key",
     "hf_token",
     "semantic_scholar_api_key",
@@ -1311,6 +1516,9 @@ const SENSITIVE_CONFIG_KEYS: &[&str] = &[
     "ads_api_token",
     "ncbi_api_key",
     "scholarapi_key",
+    "institution_access_url",
+    "institution_resolver_url",
+    "institution_gateway_url",
 ];
 
 fn handle_config_get(key: Option<&str>, show_secret: bool) -> paperbridge::Result<()> {
@@ -1318,11 +1526,11 @@ fn handle_config_get(key: Option<&str>, show_secret: bool) -> paperbridge::Resul
     if let Some(key) = key {
         let value = cfg.get_value(key).ok_or_else(|| {
             paperbridge::ZoteroMcpError::InvalidInput(format!(
-                "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key, core_api_key, ads_api_token, ncbi_api_key, scholarapi_key, unpaywall_email, grobid_url, grobid_timeout_secs, grobid_auto_spawn, grobid_image, update_check_enabled, paperseed_enabled, paperseed_auto_download, paperseed_yams_enabled, paperseed_corpus_root"
+                "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key, core_api_key, ads_api_token, ncbi_api_key, scholarapi_key, unpaywall_email, institution_access_mode, institution_access_url, institution_resolver_url, institution_gateway_url, grobid_url, grobid_timeout_secs, grobid_auto_spawn, grobid_image, update_check_enabled, paperseed_enabled, paperseed_auto_download, paperseed_yams_enabled, paperseed_corpus_root"
             ))
         })?;
-        if SENSITIVE_CONFIG_KEYS.contains(&key) && !show_secret {
-            if value.is_empty() {
+        if SENSITIVE_CONFIG_KEYS.contains(&key) && show_secret.not() {
+            if value.is_empty() || value == "<unset>" {
                 println!("(unset)");
             } else {
                 println!(
@@ -1476,7 +1684,7 @@ async fn resolve_user_id_from_api_key(api_base: &str, api_key: &str) -> paperbri
         .await
         .map_err(|e| paperbridge::ZoteroMcpError::Http(e.to_string()))?;
 
-    if !response.status().is_success() {
+    if response.status().is_success().not() {
         return Err(paperbridge::ZoteroMcpError::Http(format!(
             "API key lookup failed with status {}",
             response.status()
@@ -1535,7 +1743,7 @@ fn parse_user_id_from_key_response(value: &serde_json::Value) -> paperbridge::Re
 fn parse_user_id_from_profile_html(html: &str) -> Option<u64> {
     let mut remaining = html;
     while let Some(pos) = remaining.find("\"userID\"") {
-        let candidate = &remaining[pos + "\"userID\"".len()..];
+        let candidate = remaining.get(pos + "\"userID\"".len()..)?;
         let colon = candidate.find(':')?;
         let mut chars = candidate[colon + 1..].chars().peekable();
 
@@ -1557,13 +1765,13 @@ fn parse_user_id_from_profile_html(html: &str) -> Option<u64> {
             }
         }
 
-        if !digits.is_empty()
+        if digits.is_empty().not()
             && let Ok(user_id) = digits.parse::<u64>()
         {
             return Some(user_id);
         }
 
-        remaining = &candidate[colon + 1..];
+        remaining = candidate.get(colon + 1..)?;
     }
 
     None

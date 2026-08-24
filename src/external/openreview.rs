@@ -56,7 +56,7 @@ impl OpenReviewClient {
             self.base_url
         );
 
-        let response = send_with_retry(self.client.get(&url)).await?;
+        let response = send_with_retry("openreview", self.client.get(&url)).await?;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();

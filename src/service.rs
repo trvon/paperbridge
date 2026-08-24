@@ -1,4 +1,6 @@
+use crate::access::{HoldingsStatus, InstitutionAccess, SourceAccessResolution};
 use crate::backend::{BackendCapabilities, BackendMode, LibraryBackend};
+use crate::config::InstitutionAccessMode;
 use crate::crossref::CrossrefClient;
 use crate::error::{Result, ZoteroMcpError};
 use crate::external::{PaperSearch, SearchOptions, UnpaywallClient};
@@ -18,9 +20,9 @@ use crate::paperseed_api::PaperseedApi;
 use crate::pdf;
 use crate::validation;
 use std::collections::HashMap;
+use std::ops::Not;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, warn};
 
 pub const DEFAULT_CHUNK_SIZE: usize = 1200;
 pub const DEFAULT_PIPELINE_SEARCH_LIMIT: u32 = 5;
@@ -79,6 +81,7 @@ pub struct PaperbridgeService {
     paper_cache: Arc<Mutex<HashMap<PaperCacheKey, PaperStructure>>>,
     paperseed: Option<PaperseedApi>,
     paperseed_auto_download: bool,
+    institution_access: InstitutionAccess,
 }
 
 impl PaperbridgeService {
@@ -96,12 +99,38 @@ impl PaperbridgeService {
             paper_cache: Arc::new(Mutex::new(HashMap::new())),
             paperseed: None,
             paperseed_auto_download: false,
+            institution_access: InstitutionAccess::disabled(),
         }
     }
 
     pub fn with_unpaywall(mut self, email: Option<String>) -> Self {
         self.unpaywall = email.map(|e| UnpaywallClient::new(None, e));
         self
+    }
+
+    pub fn with_institution_access(
+        mut self,
+        mode: InstitutionAccessMode,
+        url: Option<String>,
+    ) -> Result<Self> {
+        self.institution_access = InstitutionAccess::new(mode, url.as_deref())?;
+        Ok(self)
+    }
+
+    pub fn with_institution_profile(
+        mut self,
+        mode: InstitutionAccessMode,
+        legacy_url: Option<String>,
+        resolver_url: Option<String>,
+        gateway_url: Option<String>,
+    ) -> Result<Self> {
+        self.institution_access = InstitutionAccess::new_profile(
+            mode,
+            legacy_url.as_deref(),
+            resolver_url.as_deref(),
+            gateway_url.as_deref(),
+        )?;
+        Ok(self)
     }
 
     pub fn with_paper_config(mut self, cfg: PaperConfig) -> Self {
@@ -186,7 +215,7 @@ impl PaperbridgeService {
     }
 
     fn mirror_open_access_hits(&self, hits: &[PaperHit]) {
-        if !self.paperseed_auto_download {
+        if self.paperseed_auto_download.not() {
             return;
         }
         let Some(api) = &self.paperseed else {
@@ -213,7 +242,7 @@ impl PaperbridgeService {
                 };
                 rt.block_on(async {
                     if let Err(error) = mirror_open_access_hit(&api, &hit).await {
-                        debug!("paperseed OA mirror skipped '{}': {}", hit.title, error);
+                        let _skipped = (&hit.title, error);
                     }
                 });
             });
@@ -256,6 +285,7 @@ impl PaperbridgeService {
             write_basic: caps.write_basic,
             file_upload: caps.file_upload,
             group_libraries: caps.group_libraries,
+            request_router: crate::request_router::global_request_router().snapshot(),
         }
     }
 
@@ -374,7 +404,6 @@ impl PaperbridgeService {
         {
             let cache = self.paper_cache.lock().await;
             if let Some(cached) = cache.get(&cache_key) {
-                debug!(item_key, attachment_key = %selected_attachment.key, "paper structure cache hit");
                 return Ok(cached.clone());
             }
         }
@@ -386,7 +415,6 @@ impl PaperbridgeService {
             {
                 Ok(s) => s,
                 Err(err) => {
-                    warn!(error = %err, "GROBID path failed, falling back to Zotero fulltext");
                     let fulltext = self
                         .backend
                         .get_item_fulltext(&selected_attachment.key)
@@ -418,7 +446,7 @@ impl PaperbridgeService {
         cfg: &PaperConfig,
     ) -> Result<PaperStructure> {
         let base_url = match &cfg.grobid_url {
-            Some(url) if !url.trim().is_empty() => url.trim().to_string(),
+            Some(url) if url.trim().is_empty().not() => url.trim().to_string(),
             _ if cfg.grobid_auto_spawn => {
                 paper::docker::ensure_grobid_ready(&cfg.grobid_image, GROBID_DEFAULT_PORT).await?
             }
@@ -431,16 +459,12 @@ impl PaperbridgeService {
         };
 
         let client = GrobidClient::new(&base_url, cfg.grobid_timeout_secs)?;
-        if !client.is_alive().await {
+        if client.is_alive().await.not() {
             return Err(ZoteroMcpError::Http(format!(
                 "GROBID not responding at {base_url}/api/isalive"
             )));
         }
 
-        debug!(
-            item_key,
-            attachment_key, "fetching attachment bytes for GROBID"
-        );
         let bytes = self.backend.get_attachment_bytes(attachment_key).await?;
         let tei_xml = client.process_fulltext(bytes).await?;
         tei::parse_tei(item_key, attachment_key, &tei_xml)
@@ -462,7 +486,7 @@ impl PaperbridgeService {
     ) -> Result<CollectionSummary> {
         self.ensure_write_supported("create_collection")?;
         let report = self.validate_collection_request(&req);
-        if !report.valid {
+        if report.valid.not() {
             return Err(ZoteroMcpError::InvalidInput(format!(
                 "collection validation failed: {}",
                 summarize_validation_report(&report)
@@ -474,7 +498,7 @@ impl PaperbridgeService {
     pub async fn create_item(&self, req: ItemWriteRequest) -> Result<ItemDetail> {
         self.ensure_write_supported("create_item")?;
         let report = self.validate_item_request(&req);
-        if !report.valid {
+        if report.valid.not() {
             return Err(ZoteroMcpError::InvalidInput(format!(
                 "item validation failed: {}",
                 summarize_validation_report(&report)
@@ -489,7 +513,7 @@ impl PaperbridgeService {
     ) -> Result<CollectionSummary> {
         self.ensure_write_supported("update_collection")?;
         let report = self.validate_collection_update_request(&req);
-        if !report.valid {
+        if report.valid.not() {
             return Err(ZoteroMcpError::InvalidInput(format!(
                 "collection update validation failed: {}",
                 summarize_validation_report(&report)
@@ -501,7 +525,7 @@ impl PaperbridgeService {
     pub async fn update_item(&self, req: ItemUpdateRequest) -> Result<ItemDetail> {
         self.ensure_write_supported("update_item")?;
         let report = self.validate_item_update_request(&req);
-        if !report.valid {
+        if report.valid.not() {
             return Err(ZoteroMcpError::InvalidInput(format!(
                 "item update validation failed: {}",
                 summarize_validation_report(&report)
@@ -513,7 +537,7 @@ impl PaperbridgeService {
     pub async fn delete_collection(&self, req: DeleteCollectionRequest) -> Result<()> {
         self.ensure_write_supported("delete_collection")?;
         let report = self.validate_delete_collection_request(&req);
-        if !report.valid {
+        if report.valid.not() {
             return Err(ZoteroMcpError::InvalidInput(format!(
                 "delete collection validation failed: {}",
                 summarize_validation_report(&report)
@@ -525,7 +549,7 @@ impl PaperbridgeService {
     pub async fn delete_item(&self, req: DeleteItemRequest) -> Result<()> {
         self.ensure_write_supported("delete_item")?;
         let report = self.validate_delete_item_request(&req);
-        if !report.valid {
+        if report.valid.not() {
             return Err(ZoteroMcpError::InvalidInput(format!(
                 "delete item validation failed: {}",
                 summarize_validation_report(&report)
@@ -540,18 +564,73 @@ impl PaperbridgeService {
             match unpaywall.lookup(&work.doi).await {
                 Ok(pdf) => work.oa_pdf_url = pdf,
                 Err(e) => {
-                    tracing::warn!(error = %e, doi = %work.doi, "unpaywall enrichment failed");
+                    let _enrichment_failure = (&work.doi, e);
                 }
             }
         }
         Ok(work)
     }
 
+    pub async fn resolve_source_access(
+        &self,
+        url: Option<&str>,
+        doi: Option<&str>,
+    ) -> Result<SourceAccessResolution> {
+        let (mut resolution, resolved_doi) = match (url, doi) {
+            (Some(_), Some(_)) => {
+                return Err(ZoteroMcpError::InvalidInput(
+                    "provide exactly one of url or doi".to_string(),
+                ));
+            }
+            (None, None) => {
+                return Err(ZoteroMcpError::InvalidInput(
+                    "provide exactly one of url or doi".to_string(),
+                ));
+            }
+            (Some(target), None) => (self.institution_access.resolve(target, None)?, None),
+            (None, Some(doi)) => {
+                let work = self.resolve_doi(doi).await?;
+                let resolution = if let Some(oa_pdf_url) = work.oa_pdf_url.as_deref() {
+                    self.institution_access
+                        .resolve_direct(oa_pdf_url, Some(&work.doi))?
+                } else {
+                    let target = work
+                        .url
+                        .clone()
+                        .unwrap_or_else(|| format!("https://doi.org/{}", work.doi));
+                    self.institution_access.resolve(&target, Some(&work.doi))?
+                };
+                (resolution, Some(work.doi))
+            }
+        };
+
+        if resolution.resolver.is_some() {
+            match self
+                .institution_access
+                .resolve_holdings(&resolution.target_url, resolved_doi.as_deref())
+                .await
+            {
+                Ok(options) => self
+                    .institution_access
+                    .apply_holdings(&mut resolution, options),
+                Err(_) => {
+                    resolution.holdings_status = HoldingsStatus::Error;
+                    resolution.resolver_error = Some(
+                        "institutional resolver lookup failed; inspect selected_url before opening it manually"
+                            .to_string(),
+                    );
+                    resolution.browser_open_allowed = false;
+                }
+            }
+        }
+        Ok(resolution)
+    }
+
     pub async fn validate_item_online(&self, req: &ItemWriteRequest) -> Result<ValidationReport> {
         let mut report = validation::validate_item_request(req);
 
         let doi = match req.doi.as_deref() {
-            Some(d) if !d.trim().is_empty() && validation::looks_like_doi(d) => d.trim(),
+            Some(d) if d.trim().is_empty().not() && validation::looks_like_doi(d) => d.trim(),
             _ => return Ok(report),
         };
 
@@ -577,7 +656,7 @@ impl PaperbridgeService {
 
         if let Some(req_title) = req.title.as_deref()
             && let Some(cr_title) = work.title.as_deref()
-            && !titles_match(req_title, cr_title)
+            && titles_match(req_title, cr_title).not()
         {
             report.issues.push(ValidationIssue {
                 level: ValidationIssueLevel::Warning,
@@ -591,7 +670,7 @@ impl PaperbridgeService {
 
         if let Some(req_date) = req.date.as_deref()
             && let Some(cr_year) = work.year.as_deref()
-            && !req_date.contains(cr_year)
+            && req_date.contains(cr_year).not()
         {
             report.issues.push(ValidationIssue {
                 level: ValidationIssueLevel::Warning,
@@ -888,7 +967,7 @@ fn effective_cache_mode(
         return SearchCacheMode::Auto;
     };
     let includes_cache = sources.contains(&PaperSource::Paperseed);
-    if !includes_cache {
+    if includes_cache.not() {
         return SearchCacheMode::Off;
     }
     if sources.len() == 1 {
@@ -967,7 +1046,7 @@ fn should_surface_cached_hit(query: &str, hit: &PaperHit) -> bool {
     let title = normalize_search_text(&hit.title);
     let evidence = normalize_search_text(&cache_evidence_text(hit));
     let phrase = normalize_search_text(query);
-    if terms.len() >= 2 && !phrase.is_empty() && evidence.contains(&phrase) {
+    if terms.len() >= 2 && phrase.is_empty().not() && evidence.contains(&phrase) {
         return true;
     }
 
@@ -1035,7 +1114,7 @@ fn meaningful_query_terms(query: &str) -> Vec<String> {
         if term.len() < 3 || is_weak_cache_query_term(term) {
             continue;
         }
-        if !terms.iter().any(|existing| existing == term) {
+        if terms.iter().any(|existing| existing == term).not() {
             terms.push(term.to_string());
         }
     }
@@ -1043,99 +1122,8 @@ fn meaningful_query_terms(query: &str) -> Vec<String> {
 }
 
 fn is_weak_cache_query_term(term: &str) -> bool {
-    matches!(
-        term,
-        "about"
-            | "above"
-            | "after"
-            | "again"
-            | "against"
-            | "also"
-            | "and"
-            | "any"
-            | "are"
-            | "because"
-            | "been"
-            | "before"
-            | "being"
-            | "between"
-            | "both"
-            | "but"
-            | "can"
-            | "could"
-            | "did"
-            | "does"
-            | "doing"
-            | "for"
-            | "from"
-            | "had"
-            | "has"
-            | "have"
-            | "her"
-            | "here"
-            | "hers"
-            | "him"
-            | "his"
-            | "how"
-            | "into"
-            | "its"
-            | "itself"
-            | "just"
-            | "literature"
-            | "more"
-            | "most"
-            | "new"
-            | "nor"
-            | "not"
-            | "now"
-            | "off"
-            | "only"
-            | "our"
-            | "ours"
-            | "out"
-            | "over"
-            | "own"
-            | "paper"
-            | "papers"
-            | "research"
-            | "same"
-            | "she"
-            | "should"
-            | "show"
-            | "some"
-            | "such"
-            | "than"
-            | "that"
-            | "the"
-            | "their"
-            | "them"
-            | "then"
-            | "there"
-            | "these"
-            | "they"
-            | "this"
-            | "those"
-            | "through"
-            | "topic"
-            | "under"
-            | "until"
-            | "use"
-            | "used"
-            | "using"
-            | "very"
-            | "was"
-            | "were"
-            | "what"
-            | "when"
-            | "where"
-            | "which"
-            | "while"
-            | "who"
-            | "why"
-            | "with"
-            | "would"
-            | "your"
-    )
+    const WEAK_TERMS: &str = "|about|above|after|again|against|also|and|any|are|because|been|before|being|between|both|but|can|could|did|does|doing|for|from|had|has|have|her|here|hers|him|his|how|into|its|itself|just|literature|more|most|new|nor|not|now|off|only|our|ours|out|over|own|paper|papers|research|same|she|should|show|some|such|than|that|the|their|them|then|there|these|they|this|those|through|topic|under|until|use|used|using|very|was|were|what|when|where|which|while|who|why|with|would|your|";
+    WEAK_TERMS.contains(&format!("|{term}|"))
 }
 
 fn contains_normalized_token(text: &str, token: &str) -> bool {
@@ -1196,7 +1184,7 @@ fn search_rank(
 
     let exact_title = !query_title.is_empty() && query_title == normalized_title;
     let exact_phrase =
-        !exact_title && !query_title.is_empty() && normalized_title.contains(query_title);
+        exact_title.not() && query_title.is_empty().not() && normalized_title.contains(query_title);
     let token_matches = query_tokens
         .iter()
         .filter(|token| {
@@ -1298,8 +1286,8 @@ fn normalize_arxiv_id(raw: &str) -> Option<String> {
     }
 
     let normalized = if let Some((base, version)) = id.rsplit_once('v')
-        && !base.is_empty()
-        && !version.is_empty()
+        && base.is_empty().not()
+        && version.is_empty().not()
         && version.chars().all(|c| c.is_ascii_digit())
     {
         base.to_string()
@@ -1744,7 +1732,7 @@ mod tests {
             "Planar Induced Subgraphs of Sparse Graphs"
         );
         assert!(
-            !sections.is_empty(),
+            sections.is_empty().not(),
             "expected at least one section in structured JSON"
         );
         assert!(combined.contains("Glencora Borradaile"));
@@ -1849,16 +1837,18 @@ mod tests {
             .unwrap();
         let hits = result.hits;
 
-        assert!(!hits.is_empty());
+        assert!(hits.is_empty().not());
 
         // The arXiv entry "Matched External Paper" collides on title+author with
         // the paperseed-cached copy of the same paper. merge_prefer_cached replaces
         // the external entry with the cached one in place, so the result list has
         // no Arxiv-source duplicate of a cached paper.
         assert!(
-            !hits.iter().any(
-                |hit| hit.source == PaperSource::Arxiv && hit.title == "Matched External Paper"
-            ),
+            hits.iter()
+                .any(|hit| {
+                    hit.source == PaperSource::Arxiv && hit.title == "Matched External Paper"
+                })
+                .not(),
             "external duplicate of cached paper should be replaced by the cache entry"
         );
 
@@ -2487,7 +2477,7 @@ mod tests {
     fn validate_item_request_rejects_missing_title() {
         let report = service().validate_item_request(&item_write_request(None));
         assert!(
-            !report.valid,
+            report.valid.not(),
             "missing title must produce at least one issue"
         );
     }
@@ -2588,6 +2578,93 @@ mod tests {
             err.to_string().contains("Provide either"),
             "unexpected error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn source_access_uses_configured_institution_gateway_for_url() {
+        let service = service()
+            .with_institution_access(
+                InstitutionAccessMode::Fallback,
+                Some("https://proxy.example.edu/login?url=".to_string()),
+            )
+            .unwrap();
+        let access = service
+            .resolve_source_access(Some("https://journals.example.org/article"), None)
+            .await
+            .unwrap();
+
+        assert!(access.authentication_required);
+        assert_eq!(
+            access.gateway,
+            Some(crate::access::InstitutionGatewayKind::Ezproxy)
+        );
+        assert!(
+            access
+                .selected_url
+                .starts_with("https://proxy.example.edu/")
+        );
+    }
+
+    #[tokio::test]
+    async fn source_access_uses_resolver_holdings_option() {
+        let resolver = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/openurl"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(
+                r#"<div class="resource-row">
+                    <a href="/log?U=https%3A%2F%2Fproxy.example.edu%2Flogin%3Furl%3Dhttps%3A%2F%2Fpublisher.example.org%2Farticle" aria-describedby="provider">Full Text Online</a>
+                    <span class="resource-name" id="provider">Publisher Journals</span>
+                </div>"#,
+            ))
+            .mount(&resolver)
+            .await;
+        let service = service()
+            .with_institution_profile(
+                InstitutionAccessMode::Fallback,
+                None,
+                Some(format!("{}/openurl", resolver.uri())),
+                None,
+            )
+            .unwrap();
+
+        let access = service
+            .resolve_source_access(Some("https://publisher.example.org/article"), None)
+            .await
+            .unwrap();
+
+        assert_eq!(access.holdings_status, HoldingsStatus::Available);
+        assert_eq!(access.access_options.len(), 1);
+        assert_eq!(access.access_options[0].provider, "Publisher Journals");
+        assert!(access.authentication_required);
+        assert!(access.selected_url.contains("/log?"));
+    }
+
+    #[tokio::test]
+    async fn source_access_keeps_resolver_page_when_holdings_lookup_fails() {
+        let resolver = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/openurl"))
+            .respond_with(wiremock::ResponseTemplate::new(503))
+            .mount(&resolver)
+            .await;
+        let service = service()
+            .with_institution_profile(
+                InstitutionAccessMode::Fallback,
+                None,
+                Some(format!("{}/openurl", resolver.uri())),
+                None,
+            )
+            .unwrap();
+
+        let access = service
+            .resolve_source_access(Some("https://publisher.example.org/article"), None)
+            .await
+            .unwrap();
+
+        assert_eq!(access.holdings_status, HoldingsStatus::Error);
+        assert!(access.access_options.is_empty());
+        assert!(access.resolver_error.is_some());
+        assert!(access.selected_url.starts_with(&resolver.uri()));
     }
 
     #[test]

@@ -9,6 +9,13 @@ user_id = 123456
 timeout_secs = 20
 log_level = "info"
 
+# Optional institutional library access. Leave off to use normal direct/OA routes.
+institution_access_mode = "off" # off, fallback, or prefer
+# The resolver checks institution holdings; the gateway handles browser sign-in.
+# institution_resolver_url = "https://resolver.example.edu/openurl"
+# institution_gateway_url = "https://proxy.example.edu/login?url="
+# Legacy single-endpoint configs may continue to use institution_access_url.
+
 # Paperseed integration: Paperbridge owns discovery; Paperseed mirrors OA files
 # into a local corpus and prepares license-gated seed manifests.
 paperseed_enabled = false

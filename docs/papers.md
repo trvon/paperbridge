@@ -18,6 +18,38 @@ paperbridge item validate --file item.json --online
 
 When `unpaywall_email` is configured, `paperbridge papers resolve-doi` enriches the Crossref response with an `oa_pdf_url` (best open-access PDF) from Unpaywall. Omit the email and the field is simply absent — no external call is made.
 
+## Optional institutional access
+
+Setup accepts an OpenURL holdings resolver and, independently, an EZproxy or
+OpenAthens authentication gateway without storing institutional credentials:
+
+```bash
+paperbridge config doctor --setup
+paperbridge papers access --doi "10.1038/nature12373"
+paperbridge papers access --url "https://example.org/article"
+```
+
+`institution_access_mode` controls selection:
+
+- `off` (default): never rewrite source URLs
+- `fallback`: keep discovered OA links direct, then use institutional holdings
+- `prefer`: try institutional holdings before direct/OA access
+
+In `fallback` mode, an Unpaywall OA PDF remains direct. In `prefer` mode—and
+for closed-source fallback access—Paperbridge asks the resolver which
+subscribed providers offer full text, returns ranked
+`access_options`, and opens the best trusted option. `holdings_status`
+distinguishes available, unavailable, unparsed, failed, and unchecked
+resolution. Each option reports `auto_open`; foreign cross-origin options remain
+visible but require manual selection. If lookup fails, Paperbridge refuses an
+automatic browser launch and leaves the URL in JSON for inspection. Pass
+`--no-open` for JSON-only automation. Paperbridge does not capture credentials
+or browser cookies.
+
+Legacy `institution_access_url` values are auto-classified as either a resolver
+or gateway. New profiles should use `institution_resolver_url` and
+`institution_gateway_url` so holdings decisions remain separate from sign-in.
+
 ## External paper search
 
 Search across arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed, HuggingFace Papers, Semantic Scholar, CORE, NASA ADS, and ScholarAPI in one call. Sources run in parallel; failures and timeouts per source are non-fatal and log only at `debug` level.

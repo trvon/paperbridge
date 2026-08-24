@@ -55,7 +55,24 @@ paperbridge papers search -q "intrusion detection" --limit 3 --max-results 10
 paperbridge papers search -q "attention is all you need" --sources arxiv,semantic_scholar
 paperbridge papers search -q "attention is all you need" --sources paperseed  # cache only
 paperbridge papers resolve-doi --doi 10.1038/nature12373
+paperbridge papers access --doi 10.1038/nature12373
 ```
+
+Institutional library access is optional and disabled by default. Interactive
+setup separates an OpenURL holdings resolver from an EZproxy/OpenAthens sign-in
+gateway and enables fallback routing without storing institutional credentials:
+
+```bash
+paperbridge config doctor --setup
+paperbridge config set institution_access_mode off       # disable at any time
+paperbridge papers access --url https://example.org/article
+```
+
+`papers access` checks configured holdings, ranks full-text provider options,
+and opens the best route in the default browser. It prints the resolver status
+and all access options as JSON. Use `--no-open` for scripts or agents that only
+need the JSON. In `fallback` mode, open-access DOI results keep their direct OA
+URL; `prefer` routes them through the configured institutional profile first.
 
 Results are paginated (`--offset`, `--max-results`) and deduplicated by DOI,
 arXiv ID, PMID, and normalized title+author. Unconfigured key-gated sources are
@@ -129,6 +146,10 @@ paperseed_enabled = false
 paperseed_auto_download = true
 paperseed_yams_enabled = true
 # paperseed_corpus_root = "/path/to/corpus"
+
+institution_access_mode = "off" # off, fallback, prefer
+# institution_resolver_url = "https://resolver.example.edu/openurl"
+# institution_gateway_url = "https://proxy.example.edu/login?url="
 ```
 
 ## Config doctor

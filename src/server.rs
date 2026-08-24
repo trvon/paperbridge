@@ -163,6 +163,15 @@ pub struct ResolveDoiParams {
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ResolveSourceAccessParams {
+    #[schemars(description = "DOI to resolve before selecting an access route")]
+    pub doi: Option<String>,
+
+    #[schemars(description = "Publisher, article, or PDF URL to route")]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ValidateItemParams {
     #[schemars(description = "Item payload to validate")]
     pub item: ItemWriteRequest,
@@ -491,6 +500,22 @@ impl PaperbridgeServer {
             .await
             .map_err(Self::map_error)?;
         Self::ok_json(&work)
+    }
+
+    #[tool(
+        name = "resolve_source_access",
+        description = "Resolve a DOI or source URL through optional institutional access. Provide exactly one of doi or url. Checks a configured OpenURL holdings resolver, returns ranked full-text access options, and reports whether browser authentication may be required."
+    )]
+    async fn resolve_source_access(
+        &self,
+        Parameters(params): Parameters<ResolveSourceAccessParams>,
+    ) -> std::result::Result<CallToolResult, McpError> {
+        let access = self
+            .service
+            .resolve_source_access(params.url.as_deref(), params.doi.as_deref())
+            .await
+            .map_err(Self::map_error)?;
+        Self::ok_json(&access)
     }
 
     #[tool(
@@ -1027,8 +1052,17 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = parse_call_tool_result(&result);
-        let sections = json["sections"].as_array().expect("sections array");
-        assert_eq!(json["metadata"]["title"], "Graph Learning at Scale");
+        let sections = json
+            .get("sections")
+            .and_then(serde_json::Value::as_array)
+            .expect("sections array");
+        assert_eq!(
+            json.get("metadata")
+                .and_then(|metadata| metadata.get("title")),
+            Some(&serde_json::Value::String(
+                "Graph Learning at Scale".to_string()
+            ))
+        );
         assert_eq!(sections[0]["heading"], "Abstract");
         assert_eq!(sections[1]["heading"], "Introduction");
         assert_eq!(sections[2]["kind"], "evaluation");

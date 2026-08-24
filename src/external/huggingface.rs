@@ -49,7 +49,7 @@ impl HuggingFaceClient {
             req = req.bearer_auth(token);
         }
 
-        let response = send_with_retry(req).await?;
+        let response = send_with_retry("hugging_face", req).await?;
         let status = response.status();
         if !status.is_success() {
             return Err(ZoteroMcpError::Api {

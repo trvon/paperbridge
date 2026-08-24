@@ -413,6 +413,18 @@ pub enum PapersAction {
         #[arg(long)]
         doi: String,
     },
+    /// Check institutional holdings and open the best route in the default browser
+    Access {
+        /// DOI to resolve before selecting an access route
+        #[arg(long, conflicts_with = "url", required_unless_present = "url")]
+        doi: Option<String>,
+        /// Publisher, article, or PDF URL to route
+        #[arg(long, conflicts_with = "doi", required_unless_present = "doi")]
+        url: Option<String>,
+        /// Print the resolved access JSON without opening a browser
+        #[arg(long)]
+        no_open: bool,
+    },
     /// Fetch the full PaperStructure JSON for a Zotero item or cached paper
     Structure {
         /// Zotero item key or cached paper id
@@ -765,6 +777,51 @@ mod tests {
         ])
         .unwrap_err();
         assert!(err.to_string().to_lowercase().contains("invalid value"));
+    }
+
+    #[test]
+    fn parse_canonical_papers_access() {
+        let cli = Cli::try_parse_from([
+            "paperbridge",
+            "papers",
+            "access",
+            "--url",
+            "https://example.org/article",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Papers {
+                action: PapersAction::Access {
+                    doi: None,
+                    url: Some(url),
+                    no_open: false,
+                }
+            }) if url == "https://example.org/article"
+        ));
+    }
+
+    #[test]
+    fn parse_canonical_papers_access_no_open() {
+        let cli = Cli::try_parse_from([
+            "paperbridge",
+            "papers",
+            "access",
+            "--doi",
+            "10.1000/example",
+            "--no-open",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Papers {
+                action: PapersAction::Access {
+                    doi: Some(doi),
+                    url: None,
+                    no_open: true,
+                }
+            }) if doi == "10.1000/example"
+        ));
     }
 
     #[test]

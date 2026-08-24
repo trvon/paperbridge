@@ -54,7 +54,7 @@ impl SemanticScholarClient {
             req = req.header("x-api-key", key);
         }
 
-        let response = send_with_retry(req).await?;
+        let response = send_with_retry("semantic_scholar", req).await?;
         let status = response.status();
         if !status.is_success() {
             return Err(ZoteroMcpError::Api {

@@ -4,6 +4,7 @@ use crate::models::{CrossrefWork, PaperHit, PaperSource};
 use crate::validation::looks_like_doi;
 use reqwest::Client;
 use serde::Deserialize;
+use std::ops::Not;
 use std::time::Duration;
 
 const DEFAULT_BASE_URL: &str = "https://api.crossref.org";
@@ -34,7 +35,7 @@ impl CrossrefClient {
 
     pub async fn resolve_doi(&self, doi: &str) -> Result<CrossrefWork> {
         let trimmed = doi.trim();
-        if !looks_like_doi(trimmed) {
+        if looks_like_doi(trimmed).not() {
             return Err(ZoteroMcpError::InvalidInput(format!(
                 "'{trimmed}' does not look like a valid DOI"
             )));
@@ -43,7 +44,7 @@ impl CrossrefClient {
         let encoded = urlencoding::encode(trimmed);
         let url = format!("{}/works/{encoded}", self.base_url);
 
-        let response = send_with_retry(self.client.get(&url)).await?;
+        let response = send_with_retry("crossref", self.client.get(&url)).await?;
 
         let status = response.status();
         if status == reqwest::StatusCode::NOT_FOUND {
@@ -52,7 +53,7 @@ impl CrossrefClient {
                 message: format!("DOI '{trimmed}' not found in Crossref"),
             });
         }
-        if !status.is_success() {
+        if status.is_success().not() {
             let body = response
                 .text()
                 .await
@@ -78,9 +79,9 @@ impl CrossrefClient {
         let encoded = urlencoding::encode(trimmed);
         let url = format!("{}/works?query={encoded}&rows={limit}", self.base_url);
 
-        let response = send_with_retry(self.client.get(&url)).await?;
+        let response = send_with_retry("crossref", self.client.get(&url)).await?;
         let status = response.status();
-        if !status.is_success() {
+        if status.is_success().not() {
             let body = response
                 .text()
                 .await
@@ -258,7 +259,7 @@ fn strip_xml_tags(input: &str) -> String {
             inside_tag = true;
         } else if ch == '>' {
             inside_tag = false;
-        } else if !inside_tag {
+        } else if inside_tag.not() {
             out.push(ch);
         }
     }

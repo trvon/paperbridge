@@ -120,7 +120,9 @@ Current examples: `--shell`, `--target`, `--sources` all use
 
 Interactive prompts (`config init --interactive`) are allowed only as a
 convenience layer over an explicit non-interactive contract
-(`config init` with compiled defaults + `config set`).
+(`config init` with compiled defaults + `config set`). Action commands may
+perform their named side effect by default: `papers access` opens the selected
+route, while `--no-open` preserves deterministic JSON-only automation.
 
 ### 8. Machine-readable output is stable and complete
 
@@ -235,7 +237,7 @@ papers search → papers resolve-doi → item validate → item create
 | Local Zotero reads | `paperbridge library {query,collections,read,read-search}` | `query`, `collections`, `read`, `read-search` |
 | Item writes | `paperbridge item {create,update,delete,validate}` | `create-item`, `update-item`, `delete-item`, `validate-item` |
 | Collection writes | `paperbridge collection {create,update,delete}` | `create-collection`, `update-collection`, `delete-collection` |
-| Paper discovery and inspection | `paperbridge papers {search,resolve-doi,structure,query}` | `search-papers`, `resolve-doi`, `paper {structure,query}` |
+| Paper discovery, access, and inspection | `paperbridge papers {search,resolve-doi,access,structure,query}` | `search-papers`, `resolve-doi`, `paper {structure,query}` |
 
 ## Current-state Audit
 
@@ -276,7 +278,6 @@ not blockers for this refactor.
 - Interactive-only selection for workflows that agents or scripts need.
 - Separate manual command category lists that can drift from the real
   parser.
-
 
 ## Paperseed boundary
 

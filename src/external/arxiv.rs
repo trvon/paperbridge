@@ -1,8 +1,10 @@
 use crate::error::{Result, ZoteroMcpError};
+use crate::external::send_with_retry;
 use crate::models::{PaperHit, PaperSource};
 use quick_xml::Reader;
 use quick_xml::events::Event;
 use reqwest::Client;
+use std::ops::Not;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -64,9 +66,9 @@ impl ArxivClient {
             self.base_url
         );
 
-        let response = self.client.get(&url).send().await?;
+        let response = send_with_retry("arxiv", self.client.get(&url)).await?;
         let status = response.status();
-        if !status.is_success() {
+        if status.is_success().not() {
             return Err(ZoteroMcpError::Api {
                 status: status.as_u16(),
                 message: format!("arXiv API error at {url}"),
@@ -195,7 +197,7 @@ fn local_name(qualified: &str) -> &str {
     qualified.rsplit(':').next().unwrap_or(qualified)
 }
 
-fn path_ends_with(path: &[String], suffix: &[&str]) -> bool {
+fn path_ends_with<const N: usize>(path: &[String], suffix: &[&str; N]) -> bool {
     if path.len() < suffix.len() {
         return false;
     }

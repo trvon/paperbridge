@@ -83,6 +83,27 @@ paperbridge papers resolve-doi --doi "10.1038/nature12373"
 
 When `unpaywall_email` is configured, the response includes `oa_pdf_url`.
 
+### Resolve optional institutional access
+
+Institutional access is disabled by default. Configure it through the existing
+setup flow; no institutional username, password, or browser cookie is stored:
+
+```bash
+paperbridge config doctor --setup
+paperbridge papers access --doi "10.1038/nature12373"
+paperbridge papers access --url "https://example.org/article"
+```
+
+Modes are `off`, `fallback`, and `prefer`. `fallback` keeps open-access DOI
+results direct; `prefer` checks institutional holdings first. Institutional DOI
+access returns ranked `access_options` and opens the best provider through
+EZproxy/OpenAthens when required. Use `--no-open` when a script or agent
+only needs the access JSON.
+
+MCP tool: `resolve_source_access { doi?, url? }`. Provide exactly one input. MCP
+resolution has no browser side effect; the host should open `selected_url` only
+when `browser_open_allowed` is true.
+
 ### Read full-text — Zotero or cached paper
 
 ```bash
@@ -101,6 +122,7 @@ against cached papers. If a match is found with extracted fulltext, it is
 returned directly.
 
 MCP tools:
+
 - `get_pdf_text { attachment_key }` — Zotero attachment or cache query
 - `get_item_fulltext { attachment_key }` — same fallback behavior
 - `prepare_vox_text { text?, attachment_key?, max_chars_per_chunk? }` — chunks for Vox
@@ -183,6 +205,10 @@ paperbridge config snippet --target opencode
 | `hf_token`, `semantic_scholar_api_key`, `core_api_key`, `ads_api_token`, `scholarapi_key` | gate external sources |
 | `ncbi_api_key` | optional PubMed rate-limit upgrade |
 | `unpaywall_email` | enables OA-PDF enrichment |
+| `institution_access_mode` | institutional routing: `off` (default), `fallback`, `prefer` |
+| `institution_resolver_url` | OpenURL holdings resolver; masked in config output |
+| `institution_gateway_url` | EZproxy or OpenAthens sign-in gateway; masked in config output |
+| `institution_access_url` | backward-compatible single endpoint; new profiles should use the split fields |
 | `grobid_url` | GROBID endpoint; if set, auto-spawn is disabled |
 | `grobid_auto_spawn` | launch GROBID via Docker (default `false`) |
 | `grobid_image` | Docker image for auto-spawn |
@@ -193,6 +219,7 @@ paperbridge config snippet --target opencode
 ## Gotchas
 
 - **Cloud api_base must be HTTPS** (or `http://localhost` for local mode).
+- **Institutional access is optional** — `off` never rewrites URLs; setup never requests institutional credentials.
 - **Search results are paginated** — use `offset`/`limit` to page through large sets. The `total_count` field tells you how many remain.
 - **Cached papers are conservative by default**: default cache-only hits need strong relevance, and `--sources` without `paperseed` excludes cache hits. Use `--sources paperseed` for explicit cache-only search.
 - **PDF text extraction** happens automatically during local corpus import — no separate step needed.

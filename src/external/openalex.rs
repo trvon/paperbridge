@@ -47,7 +47,7 @@ impl OpenAlexClient {
             url.push_str(&format!("&mailto={}", urlencoding::encode(email)));
         }
 
-        let response = send_with_retry(self.client.get(&url)).await?;
+        let response = send_with_retry("openalex", self.client.get(&url)).await?;
         let status = response.status();
         if !status.is_success() {
             return Err(ZoteroMcpError::Api {

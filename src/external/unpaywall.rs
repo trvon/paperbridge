@@ -1,6 +1,8 @@
 use crate::error::{Result, ZoteroMcpError};
+use crate::external::send_with_retry;
 use reqwest::Client;
 use serde::Deserialize;
+use std::ops::Not;
 use std::time::Duration;
 
 const DEFAULT_BASE_URL: &str = "https://api.unpaywall.org/v2";
@@ -42,12 +44,12 @@ impl UnpaywallClient {
         let encoded_email = urlencoding::encode(&self.email);
         let url = format!("{}/{trimmed}?email={encoded_email}", self.base_url);
 
-        let response = self.client.get(&url).send().await?;
+        let response = send_with_retry("unpaywall", self.client.get(&url)).await?;
         let status = response.status();
         if status.as_u16() == 404 {
             return Ok(None);
         }
-        if !status.is_success() {
+        if status.is_success().not() {
             return Err(ZoteroMcpError::Api {
                 status: status.as_u16(),
                 message: format!("Unpaywall API error at {url}"),

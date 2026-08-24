@@ -1,6 +1,7 @@
 use crate::error::{Result, ZoteroMcpError};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::ops::Not;
 use std::path::PathBuf;
 
 const CONFIG_ENV_VAR: &str = "PAPERBRIDGE_CONFIG";
@@ -69,6 +70,41 @@ impl std::str::FromStr for LibraryType {
     }
 }
 
+#[derive(
+    Debug, Clone, Copy, Deserialize, Serialize, Eq, PartialEq, clap::ValueEnum, schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum InstitutionAccessMode {
+    Off,
+    Fallback,
+    Prefer,
+}
+
+impl InstitutionAccessMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Fallback => "fallback",
+            Self::Prefer => "prefer",
+        }
+    }
+}
+
+impl std::str::FromStr for InstitutionAccessMode {
+    type Err = ZoteroMcpError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" | "disabled" | "none" => Ok(Self::Off),
+            "fallback" | "auto" => Ok(Self::Fallback),
+            "prefer" | "preferred" => Ok(Self::Prefer),
+            other => Err(ZoteroMcpError::InvalidInput(format!(
+                "Invalid institution_access_mode '{other}'. Valid values: off, fallback, prefer"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(default)]
 pub struct Config {
@@ -98,6 +134,15 @@ pub struct Config {
     pub scholarapi_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unpaywall_email: Option<String>,
+    pub institution_access_mode: InstitutionAccessMode,
+    /// Backward-compatible single endpoint. New configurations should use the
+    /// resolver and gateway fields below.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub institution_access_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub institution_resolver_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub institution_gateway_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grobid_url: Option<String>,
     pub grobid_timeout_secs: u64,
@@ -130,6 +175,10 @@ impl Default for Config {
             ncbi_api_key: None,
             scholarapi_key: None,
             unpaywall_email: None,
+            institution_access_mode: InstitutionAccessMode::Off,
+            institution_access_url: None,
+            institution_resolver_url: None,
+            institution_gateway_url: None,
             grobid_url: None,
             grobid_timeout_secs: 120,
             grobid_auto_spawn: false,
@@ -163,6 +212,10 @@ struct PartialConfig {
     ncbi_api_key: Option<String>,
     scholarapi_key: Option<String>,
     unpaywall_email: Option<String>,
+    institution_access_mode: Option<InstitutionAccessMode>,
+    institution_access_url: Option<String>,
+    institution_resolver_url: Option<String>,
+    institution_gateway_url: Option<String>,
     grobid_url: Option<String>,
     grobid_timeout_secs: Option<u64>,
     grobid_auto_spawn: Option<bool>,
@@ -254,7 +307,7 @@ impl Config {
         };
         let plain = |opt: &Option<String>| opt.clone().unwrap_or_else(|| "<unset>".to_string());
         format!(
-            "backend_mode = \"{}\"\ncloud_api_base = \"{}\"\nlocal_api_base = \"{}\"\napi_key = {}\nlibrary_type = \"{}\"\nuser_id = {}\ngroup_id = {}\ntimeout_secs = {}\nlog_level = \"{}\"\nhf_token = {}\nsemantic_scholar_api_key = {}\ncore_api_key = {}\nads_api_token = {}\nncbi_api_key = {}\nscholarapi_key = {}\nunpaywall_email = {}\ngrobid_url = {}\ngrobid_timeout_secs = {}\ngrobid_auto_spawn = {}\ngrobid_image = \"{}\"\nupdate_check_enabled = {}
+            "backend_mode = \"{}\"\ncloud_api_base = \"{}\"\nlocal_api_base = \"{}\"\napi_key = {}\nlibrary_type = \"{}\"\nuser_id = {}\ngroup_id = {}\ntimeout_secs = {}\nlog_level = \"{}\"\nhf_token = {}\nsemantic_scholar_api_key = {}\ncore_api_key = {}\nads_api_token = {}\nncbi_api_key = {}\nscholarapi_key = {}\nunpaywall_email = {}\ninstitution_access_mode = \"{}\"\ninstitution_access_url = {}\ninstitution_resolver_url = {}\ninstitution_gateway_url = {}\ngrobid_url = {}\ngrobid_timeout_secs = {}\ngrobid_auto_spawn = {}\ngrobid_image = \"{}\"\nupdate_check_enabled = {}
 paperseed_enabled = {}
 paperseed_auto_download = {}
 paperseed_yams_enabled = {}
@@ -279,6 +332,10 @@ paperseed_corpus_root = {}",
             mask(&self.ncbi_api_key),
             mask(&self.scholarapi_key),
             plain(&self.unpaywall_email),
+            self.institution_access_mode.as_str(),
+            mask(&self.institution_access_url),
+            mask(&self.institution_resolver_url),
+            mask(&self.institution_gateway_url),
             plain(&self.grobid_url),
             self.grobid_timeout_secs,
             self.grobid_auto_spawn,
@@ -306,7 +363,7 @@ paperseed_corpus_root = {}",
 
     pub fn init_file(force: bool) -> Result<PathBuf> {
         let path = Self::config_path();
-        if path.exists() && !force {
+        if path.exists() && force.not() {
             return Err(ZoteroMcpError::Config(format!(
                 "Config already exists at {} (use --force to overwrite)",
                 path.display()
@@ -373,6 +430,22 @@ paperseed_corpus_root = {}",
             ),
             "unpaywall_email" => Some(
                 self.unpaywall_email
+                    .clone()
+                    .unwrap_or_else(|| "<unset>".to_string()),
+            ),
+            "institution_access_mode" => Some(self.institution_access_mode.as_str().to_string()),
+            "institution_access_url" => Some(
+                self.institution_access_url
+                    .clone()
+                    .unwrap_or_else(|| "<unset>".to_string()),
+            ),
+            "institution_resolver_url" => Some(
+                self.institution_resolver_url
+                    .clone()
+                    .unwrap_or_else(|| "<unset>".to_string()),
+            ),
+            "institution_gateway_url" => Some(
+                self.institution_gateway_url
                     .clone()
                     .unwrap_or_else(|| "<unset>".to_string()),
             ),
@@ -467,6 +540,34 @@ paperseed_corpus_root = {}",
             "unpaywall_email" => {
                 self.unpaywall_email = optional_string(v);
             }
+            "institution_access_mode" => {
+                self.institution_access_mode = v.parse::<InstitutionAccessMode>()?;
+            }
+            "institution_access_url" => {
+                let value = optional_string(v);
+                validate_institution_url("institution_access_url", value.as_deref())?;
+                self.institution_access_url = value;
+            }
+            "institution_resolver_url" => {
+                let value = optional_string(v);
+                validate_institution_url("institution_resolver_url", value.as_deref())?;
+                validate_institution_endpoint_role(
+                    "institution_resolver_url",
+                    value.as_deref(),
+                    true,
+                )?;
+                self.institution_resolver_url = value;
+            }
+            "institution_gateway_url" => {
+                let value = optional_string(v);
+                validate_institution_url("institution_gateway_url", value.as_deref())?;
+                validate_institution_endpoint_role(
+                    "institution_gateway_url",
+                    value.as_deref(),
+                    false,
+                )?;
+                self.institution_gateway_url = value;
+            }
             "grobid_url" => {
                 self.grobid_url = optional_string(v);
             }
@@ -514,7 +615,7 @@ paperseed_corpus_root = {}",
             }
             _ => {
                 return Err(ZoteroMcpError::InvalidInput(format!(
-                    "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key, core_api_key, ads_api_token, ncbi_api_key, scholarapi_key, unpaywall_email, grobid_url, grobid_timeout_secs, grobid_auto_spawn, grobid_image, update_check_enabled, paperseed_enabled, paperseed_auto_download, paperseed_yams_enabled, paperseed_corpus_root"
+                    "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key, core_api_key, ads_api_token, ncbi_api_key, scholarapi_key, unpaywall_email, institution_access_mode, institution_access_url, institution_resolver_url, institution_gateway_url, grobid_url, grobid_timeout_secs, grobid_auto_spawn, grobid_image, update_check_enabled, paperseed_enabled, paperseed_auto_download, paperseed_yams_enabled, paperseed_corpus_root"
                 )));
             }
         }
@@ -572,6 +673,18 @@ paperseed_corpus_root = {}",
         }
         if let Some(v) = partial.unpaywall_email {
             self.unpaywall_email = Some(v);
+        }
+        if let Some(v) = partial.institution_access_mode {
+            self.institution_access_mode = v;
+        }
+        if let Some(v) = partial.institution_access_url {
+            self.institution_access_url = Some(v);
+        }
+        if let Some(v) = partial.institution_resolver_url {
+            self.institution_resolver_url = Some(v);
+        }
+        if let Some(v) = partial.institution_gateway_url {
+            self.institution_gateway_url = Some(v);
         }
         if let Some(v) = partial.grobid_url {
             self.grobid_url = Some(v);
@@ -698,6 +811,18 @@ paperseed_corpus_root = {}",
                         self.unpaywall_email = Some(value.to_string());
                     }
                 }
+                "PAPERBRIDGE_INSTITUTION_ACCESS_MODE" => {
+                    self.institution_access_mode = value.parse::<InstitutionAccessMode>()?;
+                }
+                "PAPERBRIDGE_INSTITUTION_ACCESS_URL" => {
+                    self.institution_access_url = optional_string(value);
+                }
+                "PAPERBRIDGE_INSTITUTION_RESOLVER_URL" => {
+                    self.institution_resolver_url = optional_string(value);
+                }
+                "PAPERBRIDGE_INSTITUTION_GATEWAY_URL" => {
+                    self.institution_gateway_url = optional_string(value);
+                }
                 "PAPERBRIDGE_GROBID_URL" | "GROBID_URL" => {
                     if value.trim().is_empty() {
                         self.grobid_url = None;
@@ -765,10 +890,88 @@ paperseed_corpus_root = {}",
             _ => {}
         }
 
+        validate_institution_url(
+            "institution_access_url",
+            self.institution_access_url.as_deref(),
+        )?;
+        validate_institution_url(
+            "institution_resolver_url",
+            self.institution_resolver_url.as_deref(),
+        )?;
+        validate_institution_url(
+            "institution_gateway_url",
+            self.institution_gateway_url.as_deref(),
+        )?;
+        validate_institution_endpoint_role(
+            "institution_resolver_url",
+            self.institution_resolver_url.as_deref(),
+            true,
+        )?;
+        validate_institution_endpoint_role(
+            "institution_gateway_url",
+            self.institution_gateway_url.as_deref(),
+            false,
+        )?;
+        if self.institution_access_mode != InstitutionAccessMode::Off
+            && self.institution_access_url.is_none()
+            && self.institution_resolver_url.is_none()
+            && self.institution_gateway_url.is_none()
+        {
+            return Err(ZoteroMcpError::MissingConfig(
+                "an institutional resolver or gateway URL is required when institution_access_mode is fallback or prefer.\nTry:\n  paperbridge config doctor --setup\n  paperbridge config set institution_access_mode off"
+                    .to_string(),
+            ));
+        }
+
         validate_docker_image_ref("grobid_image", &self.grobid_image)?;
 
         Ok(())
     }
+}
+
+fn validate_institution_endpoint_role(
+    key: &str,
+    raw: Option<&str>,
+    expect_resolver: bool,
+) -> Result<()> {
+    let Some(raw) = raw else {
+        return Ok(());
+    };
+    let url = url::Url::parse(raw)
+        .map_err(|error| ZoteroMcpError::Config(format!("invalid {key}: {error}")))?;
+    let is_resolver =
+        crate::access::detect_gateway(&url) == crate::access::InstitutionGatewayKind::OpenUrl;
+    if is_resolver != expect_resolver {
+        let expected_key = if expect_resolver {
+            "institution_gateway_url"
+        } else {
+            "institution_resolver_url"
+        };
+        return Err(ZoteroMcpError::Config(format!(
+            "{key} has the wrong endpoint type; use {expected_key} instead"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_institution_url(key: &str, raw: Option<&str>) -> Result<()> {
+    let Some(raw) = raw else {
+        return Ok(());
+    };
+    let url = url::Url::parse(raw).map_err(|error| {
+        ZoteroMcpError::Config(format!("{key} must be an absolute HTTPS URL: {error}"))
+    })?;
+    if url.scheme() != "https" || url.host_str().is_none() {
+        return Err(ZoteroMcpError::Config(format!(
+            "{key} must be an absolute HTTPS URL"
+        )));
+    }
+    if url.username().is_empty().not() || url.password().is_some() {
+        return Err(ZoteroMcpError::Config(format!(
+            "{key} must not contain embedded credentials"
+        )));
+    }
+    Ok(())
 }
 
 /// Reject configuration values that would let a config-controlled string
@@ -877,6 +1080,19 @@ mod tests {
             ("PAPERBRIDGE_LIBRARY_TYPE", "group"),
             ("PAPERBRIDGE_GROUP_ID", "777"),
             ("PAPERBRIDGE_TIMEOUT_SECS", "60"),
+            ("PAPERBRIDGE_INSTITUTION_ACCESS_MODE", "fallback"),
+            (
+                "PAPERBRIDGE_INSTITUTION_ACCESS_URL",
+                "https://proxy.example.edu/login?url=",
+            ),
+            (
+                "PAPERBRIDGE_INSTITUTION_RESOLVER_URL",
+                "https://resolver.example.edu/openurl",
+            ),
+            (
+                "PAPERBRIDGE_INSTITUTION_GATEWAY_URL",
+                "https://proxy.example.edu/login?url=",
+            ),
         ])
         .unwrap();
 
@@ -884,6 +1100,19 @@ mod tests {
         assert_eq!(cfg.library_type, LibraryType::Group);
         assert_eq!(cfg.group_id, Some(777));
         assert_eq!(cfg.timeout_secs, 60);
+        assert_eq!(cfg.institution_access_mode, InstitutionAccessMode::Fallback);
+        assert_eq!(
+            cfg.institution_access_url.as_deref(),
+            Some("https://proxy.example.edu/login?url=")
+        );
+        assert_eq!(
+            cfg.institution_resolver_url.as_deref(),
+            Some("https://resolver.example.edu/openurl")
+        );
+        assert_eq!(
+            cfg.institution_gateway_url.as_deref(),
+            Some("https://proxy.example.edu/login?url=")
+        );
     }
 
     #[test]
@@ -952,6 +1181,10 @@ mod tests {
             cfg.get_value("paperseed_yams_enabled").as_deref(),
             Some("true")
         );
+        assert_eq!(
+            cfg.get_value("institution_access_mode").as_deref(),
+            Some("off")
+        );
         assert!(cfg.get_value("unknown").is_none());
     }
 
@@ -1002,5 +1235,151 @@ mod tests {
         assert!(!cfg.paperseed_yams_enabled);
         cfg.set_value("paperseed_yams_enabled", "yes").unwrap();
         assert!(cfg.paperseed_yams_enabled);
+    }
+
+    #[test]
+    fn institution_access_defaults_off() {
+        let cfg = Config::default();
+        assert_eq!(cfg.institution_access_mode, InstitutionAccessMode::Off);
+        assert!(cfg.institution_access_url.is_none());
+        assert!(cfg.institution_resolver_url.is_none());
+        assert!(cfg.institution_gateway_url.is_none());
+    }
+
+    #[test]
+    fn institution_access_mode_parses_supported_values() {
+        assert_eq!(
+            "off".parse::<InstitutionAccessMode>().unwrap(),
+            InstitutionAccessMode::Off
+        );
+        assert_eq!(
+            "fallback".parse::<InstitutionAccessMode>().unwrap(),
+            InstitutionAccessMode::Fallback
+        );
+        assert_eq!(
+            "prefer".parse::<InstitutionAccessMode>().unwrap(),
+            InstitutionAccessMode::Prefer
+        );
+        assert!("always".parse::<InstitutionAccessMode>().is_err());
+    }
+
+    #[test]
+    fn institution_access_validation_requires_url_when_enabled() {
+        let cfg = Config {
+            user_id: Some(1),
+            institution_access_mode: InstitutionAccessMode::Fallback,
+            ..Config::default()
+        };
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("resolver or gateway URL")
+        );
+
+        let resolver_only = Config {
+            user_id: Some(1),
+            institution_access_mode: InstitutionAccessMode::Fallback,
+            institution_resolver_url: Some("https://resolver.example.edu/openurl".to_string()),
+            ..Config::default()
+        };
+        assert!(resolver_only.validate().is_ok());
+    }
+
+    #[test]
+    fn institution_access_validation_rejects_insecure_or_credentialed_url() {
+        let insecure = Config {
+            user_id: Some(1),
+            institution_access_url: Some("http://proxy.example.edu/login?url=".to_string()),
+            ..Config::default()
+        };
+        assert!(insecure.validate().is_err());
+
+        let credentialed = Config {
+            user_id: Some(1),
+            institution_resolver_url: Some(
+                "https://user:secret@resolver.example.edu/openurl".to_string(),
+            ),
+            ..Config::default()
+        };
+        assert!(credentialed.validate().is_err());
+
+        let mut via_set = Config::default();
+        assert!(
+            via_set
+                .set_value(
+                    "institution_gateway_url",
+                    "https://user:secret@proxy.example.edu/login?url=",
+                )
+                .is_err()
+        );
+        assert!(via_set.institution_gateway_url.is_none());
+    }
+
+    #[test]
+    fn institution_access_validation_rejects_swapped_endpoint_roles() {
+        let resolver_as_gateway = Config {
+            user_id: Some(1),
+            institution_access_mode: InstitutionAccessMode::Fallback,
+            institution_gateway_url: Some("https://resolver.example.edu/openurl".to_string()),
+            ..Config::default()
+        };
+        assert!(
+            resolver_as_gateway
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("institution_resolver_url")
+        );
+
+        let gateway_as_resolver = Config {
+            user_id: Some(1),
+            institution_access_mode: InstitutionAccessMode::Fallback,
+            institution_resolver_url: Some("https://proxy.example.edu/login?url=".to_string()),
+            ..Config::default()
+        };
+        assert!(
+            gateway_as_resolver
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("institution_gateway_url")
+        );
+    }
+
+    #[test]
+    fn institution_access_set_value_can_enable_and_disable() {
+        let mut cfg = Config::default();
+        cfg.set_value(
+            "institution_access_url",
+            "https://proxy.example.edu/login?url=",
+        )
+        .unwrap();
+        cfg.set_value("institution_access_mode", "fallback")
+            .unwrap();
+        assert_eq!(cfg.institution_access_mode, InstitutionAccessMode::Fallback);
+        assert!(cfg.institution_access_url.is_some());
+
+        cfg.set_value(
+            "institution_resolver_url",
+            "https://resolver.example.edu/openurl",
+        )
+        .unwrap();
+        cfg.set_value(
+            "institution_gateway_url",
+            "https://proxy.example.edu/login?url=",
+        )
+        .unwrap();
+        assert!(cfg.institution_resolver_url.is_some());
+        assert!(cfg.institution_gateway_url.is_some());
+
+        cfg.set_value("institution_access_mode", "off").unwrap();
+        cfg.set_value("institution_access_url", "unset").unwrap();
+        cfg.set_value("institution_resolver_url", "unset").unwrap();
+        cfg.set_value("institution_gateway_url", "unset").unwrap();
+        assert_eq!(cfg.institution_access_mode, InstitutionAccessMode::Off);
+        assert!(cfg.institution_access_url.is_none());
+        assert!(cfg.institution_resolver_url.is_none());
+        assert!(cfg.institution_gateway_url.is_none());
     }
 }

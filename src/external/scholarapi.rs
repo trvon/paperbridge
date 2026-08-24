@@ -43,8 +43,11 @@ impl ScholarApiClient {
 
         let encoded = urlencoding::encode(trimmed);
         let url = format!("{}/search?q={encoded}&limit={limit}", self.base_url);
-        let response =
-            send_with_retry(self.client.get(&url).header("X-API-Key", &self.api_key)).await?;
+        let response = send_with_retry(
+            "scholarapi",
+            self.client.get(&url).header("X-API-Key", &self.api_key),
+        )
+        .await?;
         let status = response.status();
         if !status.is_success() {
             return Err(ZoteroMcpError::Api {

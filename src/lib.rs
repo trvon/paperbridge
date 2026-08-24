@@ -1,3 +1,4 @@
+pub mod access;
 pub mod backend;
 pub mod backends;
 pub mod chunking;
@@ -10,6 +11,7 @@ pub mod models;
 pub mod paper;
 pub mod paperseed_api;
 pub mod pdf;
+pub mod request_router;
 pub mod security;
 pub mod server;
 pub mod service;

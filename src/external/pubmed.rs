@@ -55,7 +55,7 @@ impl PubmedClient {
             self.base_url
         );
 
-        let resp = send_with_retry(self.client.get(&esearch_url)).await?;
+        let resp = send_with_retry("pubmed", self.client.get(&esearch_url)).await?;
         let status = resp.status();
         if !status.is_success() {
             return Err(ZoteroMcpError::Api {
@@ -74,7 +74,7 @@ impl PubmedClient {
             "{}/esummary.fcgi?db=pubmed&id={id_csv}&retmode=json{key}",
             self.base_url
         );
-        let resp2 = send_with_retry(self.client.get(&esummary_url)).await?;
+        let resp2 = send_with_retry("pubmed", self.client.get(&esummary_url)).await?;
         let status2 = resp2.status();
         if !status2.is_success() {
             return Err(ZoteroMcpError::Api {

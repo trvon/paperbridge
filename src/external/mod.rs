@@ -27,10 +27,11 @@ pub use unpaywall::UnpaywallClient;
 use crate::crossref::CrossrefClient;
 use crate::error::{Result, ZoteroMcpError};
 use crate::models::{PaperHit, PaperSource, SearchCacheMode};
+use crate::request_router::{RoutedResponse, global_request_router};
 use futures::future::BoxFuture;
 use futures::future::FutureExt;
-use reqwest::header::{HeaderMap, RETRY_AFTER};
 use std::collections::HashSet;
+use std::ops::Not;
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -166,14 +167,7 @@ impl PaperSearch {
                 async {
                     match self.s2.as_ref() {
                         Some(c) => c.search(&query, limit).await,
-                        None => {
-                            tracing::debug!(
-                                source = ?PaperSource::SemanticScholar,
-                                reason = "no semantic_scholar_api_key/SEMANTIC_SCHOLAR_API_KEY configured",
-                                "source skipped"
-                            );
-                            Ok(Vec::new())
-                        }
+                        None => Ok(Vec::new()),
                     }
                 },
             )
@@ -196,14 +190,7 @@ impl PaperSearch {
                 async {
                     match self.hf.as_ref() {
                         Some(c) => c.search(&query, limit).await,
-                        None => {
-                            tracing::debug!(
-                                source = ?PaperSource::HuggingFace,
-                                reason = "no hf_token/HF_TOKEN configured",
-                                "source skipped"
-                            );
-                            Ok(Vec::new())
-                        }
+                        None => Ok(Vec::new()),
                     }
                 },
             )
@@ -262,14 +249,7 @@ impl PaperSearch {
                 async {
                     match self.core.as_ref() {
                         Some(c) => c.search(&query, limit).await,
-                        None => {
-                            tracing::debug!(
-                                source = ?PaperSource::Core,
-                                reason = "no core_api_key/CORE_API_KEY configured",
-                                "source skipped"
-                            );
-                            Ok(Vec::new())
-                        }
+                        None => Ok(Vec::new()),
                     }
                 },
             )
@@ -283,14 +263,7 @@ impl PaperSearch {
                 async {
                     match self.ads.as_ref() {
                         Some(c) => c.search(&query, limit).await,
-                        None => {
-                            tracing::debug!(
-                                source = ?PaperSource::Ads,
-                                reason = "no ads_api_token/ADS_API_TOKEN configured",
-                                "source skipped"
-                            );
-                            Ok(Vec::new())
-                        }
+                        None => Ok(Vec::new()),
                     }
                 },
             )
@@ -313,14 +286,7 @@ impl PaperSearch {
                 async {
                     match self.scholarapi.as_ref() {
                         Some(c) => c.search(&query, limit).await,
-                        None => {
-                            tracing::debug!(
-                                source = ?PaperSource::ScholarApi,
-                                reason = "no scholarapi_key/SCHOLARAPI_KEY configured",
-                                "source skipped"
-                            );
-                            Ok(Vec::new())
-                        }
+                        None => Ok(Vec::new()),
                     }
                 },
             )
@@ -349,7 +315,7 @@ async fn run_source<F>(source: PaperSource, enabled: bool, dur: Duration, fut: F
 where
     F: std::future::Future<Output = Result<Vec<PaperHit>>>,
 {
-    if !enabled {
+    if enabled.not() {
         return Vec::new();
     }
     match timeout(dur, fut).await {
@@ -358,53 +324,27 @@ where
             status: 429,
             message,
         })) => {
-            tracing::debug!(?source, status = 429, reason = "rate_limited", %message, "source rate-limited after retry");
+            let _rate_limited = (source, message);
             Vec::new()
         }
-        Ok(Err(e)) => {
-            tracing::debug!(?source, error = %e, "source search failed");
+        Ok(Err(error)) => {
+            let _failed = (source, error);
             Vec::new()
         }
         Err(_) => {
-            tracing::debug!(?source, "source search timed out");
+            let _timed_out = source;
             Vec::new()
         }
     }
 }
 
-const RETRY_AFTER_CAP_MS: u64 = 2000;
-const RETRY_AFTER_DEFAULT_MS: u64 = 500;
-
-/// Send a request, retrying once on 429/503 while respecting the `Retry-After`
-/// header. Retry delay is clamped to [0, 2000] ms so one slow provider can't
-/// starve the parallel fan-out. Non-429/503 responses (including 2xx) are
-/// returned unchanged on the first attempt.
-pub(crate) async fn send_with_retry(req: reqwest::RequestBuilder) -> Result<reqwest::Response> {
-    let retry_req = req
-        .try_clone()
-        .ok_or_else(|| ZoteroMcpError::Http("request not cloneable for retry".into()))?;
-    let resp = req.send().await?;
-    let status = resp.status().as_u16();
-    if status != 429 && status != 503 {
-        return Ok(resp);
-    }
-    let wait_ms = parse_retry_after_ms(resp.headers())
-        .unwrap_or(RETRY_AFTER_DEFAULT_MS)
-        .min(RETRY_AFTER_CAP_MS);
-    tracing::debug!(status, wait_ms, "rate-limit response; retrying once");
-    // Drain the first response body so the connection can be reused.
-    let _ = resp.bytes().await;
-    tokio::time::sleep(Duration::from_millis(wait_ms)).await;
-    Ok(retry_req.send().await?)
-}
-
-fn parse_retry_after_ms(headers: &HeaderMap) -> Option<u64> {
-    let raw = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
-    // Integer-seconds form (e.g. "Retry-After: 30") is what all major providers send;
-    // HTTP-date form is accepted too but not parsed — we fall through to the default.
-    raw.parse::<u64>()
-        .ok()
-        .map(|secs| secs.saturating_mul(1000))
+/// Route an idempotent external request through shared global/per-origin
+/// concurrency limits and one bounded retry for 429/503 responses.
+pub(crate) async fn send_with_retry(
+    component: &'static str,
+    req: reqwest::RequestBuilder,
+) -> Result<RoutedResponse> {
+    global_request_router().send(component, req).await
 }
 
 fn dedupe(hits: Vec<PaperHit>) -> Vec<PaperHit> {
@@ -417,24 +357,24 @@ fn dedupe(hits: Vec<PaperHit>) -> Vec<PaperHit> {
     for hit in hits {
         if let Some(doi) = hit.doi.as_deref() {
             let key = doi.trim().to_ascii_lowercase();
-            if !key.is_empty() && !seen_doi.insert(key) {
+            if key.is_empty().not() && seen_doi.insert(key).not() {
                 continue;
             }
         }
         if let Some(arxiv) = hit.arxiv_id.as_deref() {
             let key = strip_arxiv_version(arxiv).to_ascii_lowercase();
-            if !key.is_empty() && !seen_arxiv.insert(key) {
+            if key.is_empty().not() && seen_arxiv.insert(key).not() {
                 continue;
             }
         }
         if let Some(pmid) = hit.pmid.as_deref() {
             let key = pmid.trim().to_string();
-            if !key.is_empty() && !seen_pmid.insert(key) {
+            if key.is_empty().not() && seen_pmid.insert(key).not() {
                 continue;
             }
         }
         let title_key = title_authors_key(&hit);
-        if !title_key.is_empty() && !seen_titlekey.insert(title_key) {
+        if title_key.is_empty().not() && seen_titlekey.insert(title_key).not() {
             continue;
         }
         out.push(hit);
@@ -528,29 +468,6 @@ mod retry_tests {
     use super::*;
     use reqwest::Client;
 
-    #[test]
-    fn parse_retry_after_accepts_integer_seconds() {
-        let mut h = HeaderMap::new();
-        h.insert(RETRY_AFTER, "2".parse().unwrap());
-        assert_eq!(parse_retry_after_ms(&h), Some(2000));
-    }
-
-    #[test]
-    fn parse_retry_after_rejects_http_date() {
-        let mut h = HeaderMap::new();
-        h.insert(
-            RETRY_AFTER,
-            "Wed, 21 Oct 2015 07:28:00 GMT".parse().unwrap(),
-        );
-        assert_eq!(parse_retry_after_ms(&h), None);
-    }
-
-    #[test]
-    fn parse_retry_after_returns_none_when_missing() {
-        let h = HeaderMap::new();
-        assert_eq!(parse_retry_after_ms(&h), None);
-    }
-
     #[tokio::test]
     async fn send_with_retry_passes_through_200() {
         use wiremock::matchers::method;
@@ -564,7 +481,9 @@ mod retry_tests {
             .await;
 
         let client = Client::new();
-        let resp = send_with_retry(client.get(server.uri())).await.unwrap();
+        let resp = send_with_retry("test", client.get(server.uri()))
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 200);
     }
 
@@ -587,7 +506,9 @@ mod retry_tests {
             .await;
 
         let client = Client::new();
-        let resp = send_with_retry(client.get(server.uri())).await.unwrap();
+        let resp = send_with_retry("test", client.get(server.uri()))
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 200);
     }
 
@@ -604,7 +525,9 @@ mod retry_tests {
             .await;
 
         let client = Client::new();
-        let resp = send_with_retry(client.get(server.uri())).await.unwrap();
+        let resp = send_with_retry("test", client.get(server.uri()))
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 429);
     }
 
@@ -627,7 +550,9 @@ mod retry_tests {
             .await;
 
         let client = Client::new();
-        let resp = send_with_retry(client.get(server.uri())).await.unwrap();
+        let resp = send_with_retry("test", client.get(server.uri()))
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 200);
     }
 
@@ -644,7 +569,9 @@ mod retry_tests {
             .await;
 
         let client = Client::new();
-        let resp = send_with_retry(client.get(server.uri())).await.unwrap();
+        let resp = send_with_retry("test", client.get(server.uri()))
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 500);
     }
 }

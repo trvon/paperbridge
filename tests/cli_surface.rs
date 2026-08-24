@@ -64,23 +64,23 @@ fn top_level_help_hides_legacy_aliases() {
 
 #[test]
 fn legacy_aliases_still_parse() {
-    let cases: &[&[&str]] = &[
-        &["paperbridge", "backend-info"],
-        &["paperbridge", "query", "--q", "x"],
-        &["paperbridge", "collections"],
-        &["paperbridge", "read", "--item-key", "K"],
-        &["paperbridge", "read-search", "--q", "x"],
-        &["paperbridge", "create-item", "--file", "f.json"],
-        &["paperbridge", "update-item", "--file", "f.json"],
-        &["paperbridge", "delete-item", "--file", "f.json"],
-        &["paperbridge", "validate-item", "--file", "f.json"],
-        &["paperbridge", "create-collection", "--name", "n"],
-        &["paperbridge", "update-collection", "--file", "f.json"],
-        &["paperbridge", "delete-collection", "--file", "f.json"],
-        &["paperbridge", "search-papers", "--q", "x"],
-        &["paperbridge", "resolve-doi", "--doi", "10.1/x"],
-        &["paperbridge", "paper", "structure", "--key", "K"],
-        &[
+    let cases = vec![
+        vec!["paperbridge", "backend-info"],
+        vec!["paperbridge", "query", "--q", "x"],
+        vec!["paperbridge", "collections"],
+        vec!["paperbridge", "read", "--item-key", "K"],
+        vec!["paperbridge", "read-search", "--q", "x"],
+        vec!["paperbridge", "create-item", "--file", "f.json"],
+        vec!["paperbridge", "update-item", "--file", "f.json"],
+        vec!["paperbridge", "delete-item", "--file", "f.json"],
+        vec!["paperbridge", "validate-item", "--file", "f.json"],
+        vec!["paperbridge", "create-collection", "--name", "n"],
+        vec!["paperbridge", "update-collection", "--file", "f.json"],
+        vec!["paperbridge", "delete-collection", "--file", "f.json"],
+        vec!["paperbridge", "search-papers", "--q", "x"],
+        vec!["paperbridge", "resolve-doi", "--doi", "10.1/x"],
+        vec!["paperbridge", "paper", "structure", "--key", "K"],
+        vec![
             "paperbridge",
             "paper",
             "query",
@@ -89,9 +89,9 @@ fn legacy_aliases_still_parse() {
             "--selector",
             "metadata.title",
         ],
-        &["paperbridge", "paperseed", "corpus", "status"],
-        &["paperbridge", "paperseed", "corpus", "query", "--q", "x"],
-        &[
+        vec!["paperbridge", "paperseed", "corpus", "status"],
+        vec!["paperbridge", "paperseed", "corpus", "query", "--q", "x"],
+        vec![
             "paperbridge",
             "paperseed",
             "seed",
@@ -102,7 +102,7 @@ fn legacy_aliases_still_parse() {
     ];
 
     for argv in cases {
-        Cli::try_parse_from(*argv)
+        Cli::try_parse_from(argv.iter().copied())
             .unwrap_or_else(|e| panic!("legacy alias should still parse: {argv:?}\n{e}"));
     }
 }
@@ -148,10 +148,23 @@ fn canonical_subtree_help_lists_actions() {
         cmd.find_subcommand_mut("papers")
             .expect("papers subtree exists"),
     );
-    for action in ["search", "resolve-doi", "structure", "query"] {
+    for action in ["search", "resolve-doi", "access", "structure", "query"] {
         assert!(
             papers_help.contains(action),
             "papers --help missing action '{action}'\n{papers_help}"
+        );
+    }
+
+    let access_help = render_help(
+        cmd.find_subcommand_mut("papers")
+            .expect("papers subtree exists")
+            .find_subcommand_mut("access")
+            .expect("papers access command exists"),
+    );
+    for expected in ["default browser", "--no-open"] {
+        assert!(
+            access_help.contains(expected),
+            "papers access --help missing '{expected}'\n{access_help}"
         );
     }
 

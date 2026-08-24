@@ -1,7 +1,9 @@
 use crate::error::{Result, ZoteroMcpError};
+use crate::external::send_with_retry;
 use crate::models::{PaperHit, PaperSource};
 use reqwest::Client;
 use serde::Deserialize;
+use std::ops::Not;
 use std::time::Duration;
 
 const DEFAULT_BASE_URL: &str = "https://api.adsabs.harvard.edu/v1";
@@ -47,14 +49,10 @@ impl AdsClient {
             self.base_url
         );
 
-        let response = self
-            .client
-            .get(&url)
-            .bearer_auth(&self.api_token)
-            .send()
-            .await?;
+        let response =
+            send_with_retry("ads", self.client.get(&url).bearer_auth(&self.api_token)).await?;
         let status = response.status();
-        if !status.is_success() {
+        if status.is_success().not() {
             return Err(ZoteroMcpError::Api {
                 status: status.as_u16(),
                 message: format!("NASA ADS API error at {url}"),

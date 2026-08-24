@@ -150,13 +150,14 @@ pub struct ValidationReport {
     pub issues: Vec<ValidationIssue>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Eq, PartialEq)]
 pub struct BackendInfo {
     pub mode: String,
     pub read_library: bool,
     pub write_basic: bool,
     pub file_upload: bool,
     pub group_libraries: bool,
+    pub request_router: crate::request_router::RequestRouterSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]

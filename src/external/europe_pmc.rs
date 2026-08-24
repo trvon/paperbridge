@@ -45,7 +45,7 @@ impl EuropePmcClient {
             self.base_url
         );
 
-        let response = send_with_retry(self.client.get(&url)).await?;
+        let response = send_with_retry("europe_pmc", self.client.get(&url)).await?;
         let status = response.status();
         if !status.is_success() {
             return Err(ZoteroMcpError::Api {
