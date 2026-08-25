@@ -72,6 +72,7 @@ title+first-author. Each hit includes `hit_id`, `ids`, `match`, `access`, and
 `diagnostics` lists sources that ran, were skipped (missing key), or failed.
 
 MCP tools:
+
 - `search_papers { query|q, limit?, limit_per_source?, sources?, cache?, offset?, detail?, abstract_max_chars? }`
   → `{ query, total_count, offset, limit, has_more, next_offset, detail, hits, diagnostics }`
 - `open_paper { hit_id?|doi?|arxiv_id?|item_key?|paper_id?|attachment_key?|url?, want?, max_chars? }`

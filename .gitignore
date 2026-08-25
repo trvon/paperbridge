@@ -1,4 +1,10 @@
 /target
 .artifacts
 **/*.rs.bk
-.pi
+
+# Local AI agent harness state
+/.pi/
+/.claude/
+/.agents/
+/.agent/
+/.codex/

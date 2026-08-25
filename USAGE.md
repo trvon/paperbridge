@@ -54,7 +54,7 @@ the command when a script or agent needs the stable JSON envelope:
 paperbridge --json library query -q "machine learning" --limit 3
 ```
 
-4. Prepare read-aloud chunks:
+1. Prepare read-aloud chunks:
 
 ```bash
 paperbridge read-search -q "machine learning" --result-index 0 --max-chars-per-chunk 1200
