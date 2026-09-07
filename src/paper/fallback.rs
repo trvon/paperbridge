@@ -399,6 +399,9 @@ fn collapse_lines(lines: &[String]) -> String {
 }
 
 fn extract_doi(item: &ItemDetail) -> Option<String> {
+    if let Some(doi) = item.doi.as_deref().filter(|doi| !doi.trim().is_empty()) {
+        return Some(doi.trim().to_string());
+    }
     // Zotero stores DOI in extra or url frequently. Cheap pass: look in extra
     // for a "DOI: ..." line; otherwise try url if it looks like a doi.org link.
     if let Some(extra) = item.extra.as_deref() {
@@ -433,6 +436,10 @@ mod tests {
             version: Some(7),
             item_type: "journalArticle".to_string(),
             title: "A Paper".to_string(),
+            doi: None,
+            venue: None,
+            isbn: None,
+            creator_details: Vec::new(),
             creators: vec!["Ada Lovelace".to_string()],
             year: Some("2024".to_string()),
             abstract_note: Some("Abstract here".to_string()),

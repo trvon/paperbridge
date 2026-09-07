@@ -35,7 +35,7 @@ Companion backlog: [llm-interface-tasks.md](llm-interface-tasks.md).
 |---------|----------------|--------------------------|---------|--------|
 | Free-text / id query | `query` | `q` | required when searching | Same for library + papers |
 | Page size | `limit` | — | **10** (search/list) | Max 50 for agent defaults; never default 0=all |
-| Per-source fan-out | `limit_per_source` | CLI legacy `--limit` | 10 | Initial source prefix; later offset pages expand it as needed, up to a safe window of 200. CLI prefers `--per-source`. |
+| Per-source fan-out | `limit_per_source` | CLI legacy `--limit` | 10 | Fixed source prefix, max 200; offset never expands it. Increase it and restart at offset 0 to broaden. CLI prefers `--per-source`. |
 | Pagination offset | `offset` | `start` | 0 | Library and paper-search rows; bounded fulltext uses a returned UTF-8 byte offset |
 | Source filter | `sources` | — | all enabled | Canonical wire names below |
 | Cache mode | `cache` | — | `auto` | `auto` \| `include` \| `only` \| `off` |
@@ -81,6 +81,8 @@ All list and search returns (library items, collections, papers) use:
 
 Rules:
 
+- `count_kind` is `candidate_window` for merged paper searches; this total is not the global index count. A fixed source prefix avoids pagination-induced reranking, but upstream changes can still reorder results between calls.
+- Library `total_count` is nullable: `count_kind=unknown` when not proven, `exact` only when exhaustion proves the count. `has_more` uses a fetched sentinel, never an invented extra row.
 - Do not return a bare JSON array for primary agent surfaces.
 - `limit == 0` is rejected or clamped with an actionable error (do not mean “all”).
 - `diagnostics` may be omitted for pure local library calls that cannot fail
@@ -124,12 +126,13 @@ Stable, deterministic, preferred order of minting:
 
 1. `arxiv:{versionless_id}`
 2. `doi:{normalized_doi}`
-3. `pmid:{pmid}`
-4. `zotero:{item_key}`
-5. `paperseed:{paper_id}`
-6. `research:{yams_hash}` for grouped YAMS research documents
-7. `url:{canonical_url}` last resort. This is intentionally reversible so a
+3. `zotero:{item_key}`
+4. `paperseed:{paper_id}`
+5. `research:{yams_hash}` for grouped YAMS research documents
+6. `url:{canonical_url}` last resort. This is intentionally reversible so a
    stateless `open_paper { hit_id }` call can retrieve URL-only hits.
+
+PMID-only records prefer a supported PDF/HTTP URL identity when available; retain `ids.pmid`. With no usable URL/DOI/cache identity, `pmid:` remains a discovery-only identifier with no advertised open action. Explicit PMID opens return actionable unsupported-resolution errors, not cache placeholders.
 
 Same logical paper from different sources should prefer the same id when an
 identifier is shared (dedupe merge must promote best id set onto the kept hit).
@@ -205,7 +208,11 @@ Defaults:
 - Fulltext always respects `max_chars` (default 8,000), reports `total_chars`,
   and returns `next_offset` when another page is available. `next_offset` is a
   UTF-8 byte position; call the same tool with that exact `offset` to continue.
-- Structure path may accept `selector` (same language as `query_paper`).
+- `max_chars` is 1–32,000 per requested content view. Without a selector, structure returns a bounded outline with counts and `structure_page.omitted_fields`. Select against the complete tree first, then bound the selection; selected strings support UTF-8 byte offset paging. Object/array selections expose omissions and selector guidance, not a fabricated cursor.
+- Chunks-only requests preserve pagination in `chunks_page`. Metadata reports `metadata_status` (`retrieved`, `identifier_only`, `failed`) and `metadata_page` completeness. Missing cache identities fail explicitly.
+- `content_provenance` and `structure_provenance` separate origin/retrieval from parser. Paperseed/YAMS/direct PDF text must not be labelled Zotero.
+- MCP `query_paper` wraps arbitrary selected JSON as `{value}` for an object-root schema. CLI keeps native selected JSON.
+- All MCP results expose `outputSchema` and `structuredContent` with compact text compatibility. A 64 KiB whole-result budget (both representations) returns a bounded recovery error on overflow. Key/citation metadata must not be silently replaced to meet that budget.
 
 Low-level tools (`get_pdf_text`, `get_item_fulltext`, `get_paper_structure`)
 remain for power users but skill default path teaches `open_paper`.
@@ -239,8 +246,7 @@ CLI runtime errors emit this envelope on stderr when `--json` is selected and
 return a non-zero exit code; stdout remains empty. Clap parse/usage errors occur
 before runtime dispatch and retain Clap's native formatting.
 
-Map validation failures to MCP `invalid_params`; keep recovery text in the
-message or structured data.
+CLI and MCP share `{error,reason,try,retryable,recovery}`; recovery entries contain a tool name and arguments and never execute automatically. Network error bodies and parse previews are bounded/redacted before exposing them. MCP execution errors use `isError:true`; validation failures use `invalid_params` with the envelope in `data`. Oversized results provide a bounded-read recovery action when the original tool/arguments support it.
 
 ## Default MCP tool spine (skill)
 
@@ -260,8 +266,11 @@ Secondary (skill sections, not default “start here”):
 - Paperseed admin
 - `prepare_paper_for_skill`
 
-Server `instructions` string lists the spine and points at prompt
-`paperbridge_skill`.
+Server `instructions` lists the spine and points at prompt `paperbridge_skill`.
+`serve --profile core` advertises and permits only these six tools; `full` remains
+the compatibility default. Tool annotations distinguish mutations, destructive
+operations, and reads; cache/materialization paths conservatively are not marked
+read-only. Server identity uses the Paperbridge package name/version.
 
 ## Skill / docs rules
 

@@ -115,6 +115,7 @@ fn convert_work(w: RawCoreWork) -> PaperHit {
 
     PaperHit {
         hit_id: None,
+        truncation: None,
         source: PaperSource::Core,
         title: w.title.unwrap_or_default(),
         authors,

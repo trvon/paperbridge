@@ -12,12 +12,19 @@
 * **paperseed:** content-addressed text blobs, incremental BM25F updates, and binary index persistence
 * **search:** arXiv title/id query adapters; Crossref bibliographic query for multi-word titles
 * **search:** DOI-first resolution, conversational GNN query expansion, and query-coverage ranking
-* **search:** later offset pages expand the source prefix; URL-only hits now carry openable `url:` IDs
+* **search:** fixed candidate windows prevent pagination-induced reranking; URL-only/PMID hits prefer executable `url:` IDs when available
+* **MCP:** typed output schemas, structured content, bounded recovery errors, accurate tool annotations/server identity, optional `serve --profile core`
 * **open:** fresh DOI/arXiv/URL hits can produce fulltext or structure without enabling Paperseed
 * **skill:** `prepare_paper_for_skill` / `papers skill` scaffold from paper structure
 * **design:** `docs/design/llm-interface.md` contract + task backlog
 
 ### Breaking changes (agent/CLI consumers)
+
+* Library `total_count` is nullable with `count_kind`; paper-search totals describe a fixed candidate window, not the entire index. Increase `--per-source` and restart instead of relying on offset to expand discovery.
+* `open_paper want=structure` defaults to a bounded outline. Select fields for full content; follow `structure_page` / `chunks_page` continuation and completeness. Metadata reports retrieval status and truncation.
+* MCP `query_paper` returns `{value}` instead of a bare selected JSON value; CLI selection output is unchanged.
+* Key reads require identity matches. PMID-only opens and missing cache IDs fail explicitly, rather than returning misleading placeholders. Structure provenance distinguishes cached, research, Zotero and direct content.
+* MCP runtime execution errors use `isError` with structured recovery; validation errors retain invalid-params. Shared CLI/MCP upstream error code is `upstream_api_error`; raw bodies are bounded and redacted.
 
 * CLI data output is human-readable by default; pass the global `--json` flag for structured success and runtime-error envelopes
 * Library `search_items` / `list_collections` / `library query|collections` return envelopes (`hits`, `has_more`, …), not bare arrays
@@ -28,6 +35,9 @@
 
 ### Bug Fixes
 
+* **identity:** never substitute a relevance-ranked cached paper for a failed Zotero key; reject conflicting IDs during annotation/deduplication
+* **output:** preserve complementary IDs/PDF routes, Zotero DOI/venue/ISBN/creator details, collection versions, and original-query match evidence
+* **read:** select before truncating, preserve UTF-8 chunk cursors, bound all canonical structure paths, and report accurate provenance
 * **open:** require exact DOI, arXiv, or canonical URL identity before reusing cached content
 * **yams:** pass the JSON flag in the supported position, parse current result envelopes, and verify content before storing an index hash
 * **paperseed:** serialize concurrent corpus writers, quarantine corrupt databases, reject ambiguous ids, preserve OA licenses, and verify seed-file integrity

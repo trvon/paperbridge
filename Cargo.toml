@@ -27,6 +27,7 @@ quick-xml = { version = "0.41", features = ["serialize"] }
 paperseed = { path = "crates/paperseed" }
 
 [dev-dependencies]
+jsonschema = { version = "0.33", default-features = false }
 tempfile = "3"
 wiremock = "0.6"
 

@@ -153,6 +153,7 @@ fn convert_work(w: RawOpenAlexWork) -> PaperHit {
 
     PaperHit {
         hit_id: None,
+        truncation: None,
         source: PaperSource::OpenAlex,
         title: w.title.unwrap_or_default(),
         authors,

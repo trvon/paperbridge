@@ -37,6 +37,9 @@ the breakdown:
   Conclusion are split from the indexed text when Zotero preserved heading
   lines. If no recognizable headings are available, the full text is returned
   as a single `Body` section.
+- `{ "kind": "paperseed_fulltext" }` — locally cached text, heuristically sectioned.
+- `{ "kind": "research_fulltext" }` — assembled YAMS research text, heuristically sectioned.
+- `{ "kind": "direct_pdf_text" }` — directly downloaded PDF text, heuristically sectioned.
 - `{ "kind": "grobid_unavailable", "reason": "..." }` — GROBID was configured
   but the call failed; the service fell back to Zotero full text. The
   `reason` string explains what happened (Docker missing, container never
@@ -59,12 +62,17 @@ one PDF attached.
 
 - `get_paper_structure { item_key, attachment_key? }` — returns the full
   `PaperStructure`.
-- `query_paper { item_key, selector, attachment_key? }` — returns the value
-  at the selector path.
+- `query_paper { item_key, selector, attachment_key? }` — returns `{value}`
+  containing the selected JSON value. The CLI still emits the selected value.
+- `open_paper { item_key|hit_id|paper_id, want:["structure"], selector?, max_chars?, offset? }`
+  — preferred bounded path. Without a selector returns an outline and
+  `structure_page` counts/omissions. String selectors support UTF-8 byte pagination;
+  selection always precedes truncation. Low-level oversized MCP results return
+  a `response_too_large` error with a bounded-read recovery action.
 
 Selectors are dotted paths with `[i]` bracket indexing. Arrays are indexed
 numerically; maps are indexed by key. Out-of-range indices or missing keys
-return `null` rather than erroring.
+return an actionable error with available keys and selector examples.
 
 ## Generating a skill scaffold
 

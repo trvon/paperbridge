@@ -5,6 +5,17 @@
   "creators": [
     "Grace Hopper"
   ],
+  "creator_details": [
+    {
+      "creator_type": "editor",
+      "first_name": "Grace",
+      "last_name": "Hopper",
+      "name": null
+    }
+  ],
+  "doi": "10.1234/Original.DOI",
+  "venue": "Original Venue",
+  "isbn": "978-1-23456-789-0",
   "year": "2024",
   "abstract_note": "A practical systems paper.",
   "url": "https://example.org/graph",

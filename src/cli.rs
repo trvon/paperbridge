@@ -19,7 +19,11 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Run MCP server over stdio transport
-    Serve,
+    Serve {
+        /// Tool surface: full (compatible default) or six-tool discovery/read core
+        #[arg(long, value_enum, default_value_t = crate::server::McpProfile::Full)]
+        profile: crate::server::McpProfile,
+    },
 
     /// Generate shell completion script to stdout
     Completions {
@@ -398,8 +402,8 @@ pub enum PapersAction {
         /// Free-text search query (positional shorthand for --query)
         #[arg(value_name = "QUERY")]
         positional_query: Option<String>,
-        /// Initial hits per source (default 10; page window maximum 200)
-        #[arg(long = "per-source")]
+        /// Fixed candidate prefix per source (default 10, max 200); restart pagination to broaden
+        #[arg(long = "per-source", value_parser = clap::value_parser!(u32).range(1..=200))]
         per_source: Option<u32>,
         /// Subset of sources (comma-separated); default is all enabled
         #[arg(long, value_enum, value_delimiter = ',')]
@@ -414,7 +418,7 @@ pub enum PapersAction {
         #[arg(long)]
         offset: Option<u32>,
         /// Page size (default 10, max 50). Alias: --max-results
-        #[arg(long, visible_alias = "max-results")]
+        #[arg(long, visible_alias = "max-results", value_parser = clap::value_parser!(u32).range(1..=50))]
         limit: Option<u32>,
         /// compact (default) or full (include abstracts)
         #[arg(long, value_enum)]
@@ -447,12 +451,12 @@ pub enum PapersAction {
         #[arg(long)]
         url: Option<String>,
         /// Comma-separated: metadata,fulltext,structure,chunks (default metadata)
-        #[arg(long, value_delimiter = ',')]
+        #[arg(long, value_delimiter = ',', value_parser = ["metadata", "fulltext", "structure", "chunks"])]
         want: Option<Vec<String>>,
-        /// Max fulltext characters (default 8000)
+        /// Content character budget per requested view (default 8000, max 32000)
         #[arg(long)]
         max_chars: Option<usize>,
-        /// UTF-8 byte offset for the next fulltext page (default 0)
+        /// UTF-8 byte offset for fulltext/chunks or a selected structure string (default 0)
         #[arg(long)]
         offset: Option<usize>,
         /// Structure selector when want includes structure
@@ -717,7 +721,20 @@ mod tests {
     #[test]
     fn parse_serve() {
         let cli = Cli::try_parse_from(["paperbridge", "serve"]).unwrap();
-        assert!(matches!(cli.command, Some(Command::Serve)));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Serve {
+                profile: crate::server::McpProfile::Full
+            })
+        ));
+        let core = Cli::try_parse_from(["paperbridge", "serve", "--profile", "core"]).unwrap();
+        assert!(matches!(
+            core.command,
+            Some(Command::Serve {
+                profile: crate::server::McpProfile::Core
+            })
+        ));
+        assert!(Cli::try_parse_from(["paperbridge", "serve", "--profile", "invalid"]).is_err());
     }
 
     #[test]

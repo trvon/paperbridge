@@ -352,6 +352,7 @@ impl EntryBuilder {
         let pdf = self.pdf_url;
         Some(PaperHit {
             hit_id: None,
+            truncation: None,
             source: PaperSource::Arxiv,
             title,
             authors: self.authors,

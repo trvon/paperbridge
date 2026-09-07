@@ -46,6 +46,7 @@ fn representative_result(detail: SearchDetail) -> SearchPapersResult {
     SearchPapersResult {
         query: "context efficient paper retrieval".into(),
         total_count: 10,
+        count_kind: paperbridge::models::CountKind::CandidateWindow,
         offset: 0,
         limit: 10,
         has_more: false,

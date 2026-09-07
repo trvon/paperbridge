@@ -128,6 +128,7 @@ fn convert_entry(entry: RawHfPaperEntry) -> PaperHit {
 
     PaperHit {
         hit_id: None,
+        truncation: None,
         source: PaperSource::HuggingFace,
         title: paper.title.unwrap_or_default(),
         authors,

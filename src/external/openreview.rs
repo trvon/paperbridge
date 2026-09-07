@@ -142,6 +142,7 @@ fn convert_note(n: RawOrNote, pdf_host: &str) -> PaperHit {
 
     PaperHit {
         hit_id: None,
+        truncation: None,
         source: PaperSource::OpenReview,
         title,
         authors,

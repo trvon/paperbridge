@@ -6,6 +6,15 @@ when implementing and when re-running the audit.
 
 Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` cancelled
 
+## Model-output re-audit remediation
+
+The current audit and implementation are mapped finding-by-finding in
+[model-output-remediation.md](model-output-remediation.md). It records migration
+notes and explicit limits (fixed stateless search windows and unsupported native
+PMID resolution). Regression coverage includes the actual stdio MCP surface.
+Unrelated original roadmap items below remain open rather than being implicitly
+claimed complete by this remediation.
+
 ---
 
 ## Phase 0 — Design lock
@@ -49,7 +58,7 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` cancelled
 - [x] **T-A3.3** Wrap `list_collections` similarly
 - [ ] **T-A3.4** Surface Zotero total when available (`Total-Results` / equivalent) — heuristic `has_more` for now
 - [x] **T-A3.5** CLI JSON matches MCP envelope (no bare arrays on primary paths)
-- [ ] **T-A3.6** Migration note: breaking change for bare-array consumers; version / changelog
+- [x] **T-A3.6** Migration notes for envelopes, nullable counts, bounded views, and selector wire output in CHANGELOG + remediation notes
 
 **Accept:** No primary agent list endpoint returns a top-level JSON array.
 
@@ -110,7 +119,7 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` cancelled
 ### B5 — ID hygiene + confidence
 
 - [x] **T-B5.1** Normalize DOI/arXiv when minting `hit_id` / `ids`
-- [ ] **T-B5.2** Best-record merge (prefer complete id set, verified fields) instead of pure first-wins when safe
+- [x] **T-B5.2** Merge complementary identifiers/access metadata; reject contradictory strong IDs even when titles match
 - [ ] **T-B5.3** Optional `doi_status` / confidence flags for suspicious DOIs
 - [x] **T-B5.4** Prefer versionless arXiv ids in `ids` and `hit_id`
 
@@ -159,7 +168,7 @@ full text.
 ### C3 — Structure path clarity
 
 - [x] **T-C3.1** `open_paper want=structure` reuses cached structures and parses complete direct/research text before output truncation
-- [ ] **T-C3.2** Selector errors list available top-level keys + examples
+- [x] **T-C3.2** Selector errors list available top-level keys + examples
 - [x] **T-C3.3** Accept DOI/arXiv/paper_id keys via structure path when cached/Zotero resolve works
 
 ### C4 — Background mirror policy
@@ -176,7 +185,7 @@ full text.
 
 ### D1 — Descriptions match behavior
 
-- [ ] **T-D1.1** Fix `prepare_search_result_for_vox` description (papers-first, not “Search Zotero” only) or rename
+- [x] **T-D1.1** `prepare_search_result_for_vox` description accurately states papers-first with cache/Zotero fallback
 - [x] **T-D1.2** Skill separates plain fulltext/structure from Vox read-aloud
 - [x] **T-D1.3** Skill does not teach `library read` as fulltext
 - [x] **T-D1.4** Plain fulltext CLI: `papers open --want fulltext`
@@ -185,23 +194,23 @@ full text.
 ### D2 — Default tool spine / progressive disclosure
 
 - [x] **T-D2.1** Skill documents primary agent spine vs Vox helpers
-- [ ] **T-D2.2** Optionally group or annotate write/vox tools as secondary in descriptions
+- [x] **T-D2.2** Optional core profile excludes secondary write/Vox routes; full profile has explicit annotations
 - [x] **T-D2.3** `paperbridge_skill` embeds `docs/skill.md`
 
 ### D3 — Library search quality
 
 - [ ] **T-D3.1** Default exclude attachment-only noise (or filter `itemType` intelligently)
-- [ ] **T-D3.2** Envelope + totals (ties A3)
+- [x] **T-D3.2** Envelope + honest totals (nullable unknown count, actual sentinel continuation; backend Total-Results support remains A3.4)
 - [ ] **T-D3.3** Actionable empty-result message (try papers search / broader q)
 
 ### D4 — Errors
 
-- [ ] **T-D4.1** Structured error helper shared by CLI stderr/JSON and MCP messages
+- [x] **T-D4.1** Structured bounded/redacted error helper shared by CLI stderr/JSON and MCP
 - [ ] **T-D4.2** Audit top error paths for `try: []` next steps (config, missing key, no PDF, 412 version)
 
-CLI runtime half complete: `--json` now emits the documented error envelope on
-stderr with class-based recovery commands. Sharing the helper with MCP and a
-deeper per-path recovery audit remain open.
+CLI and MCP share the error envelope. MCP returns bounded safe diagnostic actions
+and caller-specific bounded-read recovery for oversized output. More specialized
+per-provider recovery remains a follow-up; suggested actions never execute.
 
 ### D5 — Docs matrix
 
@@ -217,7 +226,7 @@ deeper per-path recovery audit remain open.
 - [ ] **T-E1** Automated tests covering design verification corpus (mock-first)
 - [ ] **T-E2** Optional live smoke script (`scripts/llm-interface-smoke.sh`) for Attention / arXiv id / DOI / diagnostics
 - [x] **T-E3** Deterministic token-size measurement for default `search_papers`
-- [ ] **T-E4** Re-run full LLM interface audit; file residual issues as new tasks
+- [x] **T-E4** Re-run LLM interface audit; map fixes, coverage, and explicit residual limits in model-output-remediation.md
 - [x] **T-E5** `cargo fmt`, `clippy -D warnings`, `cargo test`, `cargo check --tests`
 
 ---

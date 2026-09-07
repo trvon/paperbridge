@@ -14,29 +14,27 @@ pub fn enrich_hit_identity(hit: &mut PaperHit) {
         .and_then(|id| id.strip_prefix("research:"))
         .filter(|hash| !hash.is_empty())
         .map(str::to_string);
-    let arxiv = hit
-        .arxiv_id
-        .as_deref()
-        .map(strip_arxiv_version)
-        .filter(|s| !s.is_empty());
-    let doi = hit
-        .doi
-        .as_deref()
-        .map(|d| {
-            d.trim()
-                .trim_start_matches("https://doi.org/")
-                .trim_start_matches("http://doi.org/")
-                .trim_start_matches("doi:")
-                .to_ascii_lowercase()
-        })
-        .filter(|s| !s.is_empty());
+    let arxiv = hit.arxiv_id.as_deref().and_then(normalize_arxiv_str);
+    let doi = hit.doi.as_deref().and_then(normalize_doi_str);
     let pmid = hit
         .pmid
         .as_deref()
         .map(str::trim)
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
         .map(str::to_string);
-    let paper_id = hit.cache.as_ref().map(|c| c.paper_id.clone());
+    let paper_id = hit
+        .cache
+        .as_ref()
+        .map(|c| c.paper_id.clone())
+        .filter(|p| !p.trim().is_empty());
+    let open_url = [
+        hit.oa_pdf_url.as_deref(),
+        hit.pdf_url.as_deref(),
+        hit.url.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|url| usable_http_url(url));
 
     hit.ids = Some(PaperIds {
         doi: doi.clone(),
@@ -53,28 +51,23 @@ pub fn enrich_hit_identity(hit: &mut PaperHit) {
         format!("arxiv:{a}")
     } else if let Some(ref d) = doi {
         format!("doi:{d}")
-    } else if let Some(ref p) = pmid {
-        format!("pmid:{p}")
     } else if let Some(ref p) = paper_id {
         format!("paperseed:{p}")
-    } else if let Some(url) = hit
-        .oa_pdf_url
-        .as_deref()
-        .or(hit.pdf_url.as_deref())
-        .or(hit.url.as_deref())
-        .filter(|u| !u.is_empty())
-    {
+    } else if let Some(url) = open_url {
         // URL-only hits must remain openable without server-side search state.
         // Prefer a PDF URL so `open_paper { hit_id }` can retrieve content.
         format!("url:{url}")
+    } else if let Some(ref p) = pmid {
+        // PMID-only metadata is discoverable, but no PMID resolver is available.
+        format!("pmid:{p}")
     } else {
         format!("title:{}", short_hash(&hit.title))
     });
 
     let existing_access = hit.access.take();
     let pdf = existing_access.as_ref().is_some_and(|a| a.pdf)
-        || hit.pdf_url.is_some()
-        || hit.oa_pdf_url.is_some();
+        || hit.pdf_url.as_deref().is_some_and(usable_http_url)
+        || hit.oa_pdf_url.as_deref().is_some_and(usable_http_url);
     let cached = existing_access.as_ref().is_some_and(|a| a.cached)
         || hit.cache.as_ref().is_some_and(|c| c.cached);
     let full_text = existing_access.as_ref().is_some_and(|a| a.full_text)
@@ -96,20 +89,19 @@ pub fn enrich_hit_identity(hit: &mut PaperHit) {
     });
 
     let mut next = Vec::new();
-    if cached || full_text {
+    if (cached || full_text) && (paper_id.is_some() || research_hash.is_some()) {
         next.push("open_paper".into());
         next.push("get_paper_structure".into());
-    } else if pdf || doi.is_some() || arxiv.is_some() {
+    } else if open_url.is_some() || doi.is_some() || arxiv.is_some() {
         next.push("open_paper".into());
         if doi.is_some() {
             next.push("resolve_doi".into());
         }
-    } else if doi.is_some() {
-        next.push("resolve_doi".into());
     }
     hit.next = next;
 }
 
+/// Scores are ordinal ranking heuristics, not calibrated probabilities.
 pub fn enrich_match(hit: &mut PaperHit, query: &str) {
     let kind = classify_match(query, hit);
     let score = match kind {
@@ -123,9 +115,16 @@ pub fn enrich_match(hit: &mut PaperHit, query: &str) {
 }
 
 pub fn apply_detail(hit: &mut PaperHit, detail: SearchDetail, abstract_max_chars: Option<usize>) {
-    // Cap authors in compact mode for token cost.
-    if detail == SearchDetail::Compact && hit.authors.len() > 3 {
+    // Mint identity and classify on complete metadata before applying these caps.
+    if detail == SearchDetail::Compact {
+        let mut truncated = hit.truncation.take().unwrap_or_default();
+        truncated.title |= truncate_display(&mut hit.title, 240);
+        truncated.authors |= hit.authors.len() > 3;
         hit.authors.truncate(3);
+        for author in &mut hit.authors {
+            truncated.authors |= truncate_display(author, 80);
+        }
+        hit.truncation = (truncated.title || truncated.authors).then_some(truncated);
     }
 
     match detail {
@@ -152,6 +151,27 @@ pub fn apply_detail(hit: &mut PaperHit, detail: SearchDetail, abstract_max_chars
             }
         }
     }
+}
+
+fn truncate_display(text: &mut String, max_chars: usize) -> bool {
+    if text.chars().count() <= max_chars {
+        return false;
+    }
+    *text = text
+        .chars()
+        .take(max_chars - 1)
+        .chain(std::iter::once('…'))
+        .collect();
+    true
+}
+
+pub(crate) fn usable_http_url(raw: &str) -> bool {
+    url::Url::parse(raw).is_ok_and(|url| {
+        matches!(url.scheme(), "http" | "https")
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+    })
 }
 
 fn classify_match(query: &str, hit: &PaperHit) -> MatchKind {
@@ -221,31 +241,45 @@ fn normalize_doi_str(raw: &str) -> Option<String> {
         .or_else(|| lowered.strip_prefix("doi:"))
         .unwrap_or(lowered.as_str())
         .trim();
-    if n.contains('/') && n.len() > 6 {
-        Some(n.to_string())
-    } else {
-        None
-    }
+    let (prefix, suffix) = n.strip_prefix("10.")?.split_once('/')?;
+    (!prefix.is_empty()
+        && prefix.bytes().all(|b| b.is_ascii_digit())
+        && !suffix.is_empty()
+        && !n.chars().any(char::is_whitespace))
+    .then(|| n.to_string())
 }
 
-fn normalize_arxiv_str(raw: &str) -> Option<String> {
+pub(crate) fn normalize_arxiv_str(raw: &str) -> Option<String> {
     let lowered = raw.trim().to_lowercase();
     let id = lowered
         .strip_prefix("https://arxiv.org/abs/")
         .or_else(|| lowered.strip_prefix("http://arxiv.org/abs/"))
+        .or_else(|| lowered.strip_prefix("https://arxiv.org/pdf/"))
+        .or_else(|| lowered.strip_prefix("http://arxiv.org/pdf/"))
         .or_else(|| lowered.strip_prefix("arxiv:"))
         .unwrap_or(lowered.as_str())
         .trim();
     if id.is_empty() {
         return None;
     }
-    let base = strip_arxiv_version(id);
-    // new-style arxiv ids look like 1706.03762
-    if base.chars().any(|c| c.is_ascii_digit()) && base.contains('.') {
-        Some(base.to_ascii_lowercase())
-    } else {
-        None
-    }
+    let base = strip_arxiv_version(id.trim_end_matches(".pdf"));
+    let modern = base.split_once('.').is_some_and(|(date, number)| {
+        date.len() == 4
+            && (4..=5).contains(&number.len())
+            && date
+                .bytes()
+                .chain(number.bytes())
+                .all(|b| b.is_ascii_digit())
+    });
+    let legacy = base.split_once('/').is_some_and(|(archive, number)| {
+        !archive.is_empty()
+            && archive
+                .bytes()
+                .all(|b| b.is_ascii_alphabetic() || b == b'-' || b == b'.')
+            && number.len() == 7
+            && number.bytes().all(|b| b.is_ascii_digit())
+    });
+    (modern || legacy).then_some(base)
 }
 
 fn strip_arxiv_version(id: &str) -> String {
@@ -349,6 +383,85 @@ mod tests {
         );
         enrich_match(&mut hit, "attention is all you need");
         assert_eq!(hit.match_info.unwrap().kind, MatchKind::ExactTitle);
+    }
+
+    #[test]
+    fn audit_compact_bounds_strings_without_changing_identity() {
+        let mut hit = PaperHit::new(
+            PaperSource::Crossref,
+            "題".repeat(500),
+            vec!["名".repeat(200); 4],
+            None,
+            Some("10.1234/a".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        enrich_hit_identity(&mut hit);
+        let id = hit.hit_id.clone();
+        apply_detail(&mut hit, SearchDetail::Compact, None);
+        assert!(hit.title.chars().count() <= 240);
+        assert!(hit.authors.iter().all(|a| a.chars().count() <= 80));
+        assert_eq!(hit.authors.len(), 3);
+        assert_eq!(hit.hit_id, id);
+        let json = serde_json::to_value(hit).unwrap();
+        assert_eq!(json["truncation"]["title"], true);
+        assert_eq!(json["truncation"]["authors"], true);
+    }
+
+    #[test]
+    fn audit_unusable_identifiers_do_not_advertise_actions() {
+        let mut hit = PaperHit::new(
+            PaperSource::Crossref,
+            "T".into(),
+            vec![],
+            None,
+            Some(" ".into()),
+            Some("garbage".into()),
+            None,
+            None,
+            None,
+            Some("".into()),
+            None,
+            None,
+            None,
+        );
+        enrich_hit_identity(&mut hit);
+        assert!(hit.next.is_empty());
+        assert!(!hit.access.unwrap().pdf);
+    }
+
+    #[test]
+    fn audit_pmid_only_uses_supported_url_or_advertises_no_action() {
+        let mut hit = PaperHit::new(
+            PaperSource::Pubmed,
+            "T".into(),
+            vec![],
+            None,
+            None,
+            None,
+            Some("12345678".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        enrich_hit_identity(&mut hit);
+        assert!(hit.next.is_empty());
+        hit.pdf_url = Some("https://example.test/a.pdf".into());
+        enrich_hit_identity(&mut hit);
+        assert_eq!(
+            hit.hit_id.as_deref(),
+            Some("url:https://example.test/a.pdf")
+        );
+        assert_eq!(hit.next, vec!["open_paper"]);
     }
 
     #[test]
