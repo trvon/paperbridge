@@ -8,16 +8,27 @@ use crate::models::{
 
 pub fn parse_tei(item_key: &str, attachment_key: &str, xml: &str) -> Result<PaperStructure> {
     let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
+    reader.config_mut().trim_text(false);
 
     let mut state = ParseState::default();
-    let mut buf = Vec::new();
+    let mut text_buf = String::new();
 
     loop {
-        match reader
-            .read_event_into(&mut buf)
-            .map_err(|e| ZoteroMcpError::Serde(format!("TEI parse error: {e}")))?
-        {
+        let event = reader
+            .read_event()
+            .map_err(|e| ZoteroMcpError::Serde(format!("TEI parse error: {e}")))?;
+        // Coalesce references with adjacent text before applying element spacing.
+        if !matches!(
+            event,
+            Event::Text(_) | Event::CData(_) | Event::GeneralRef(_)
+        ) {
+            let text = text_buf.trim();
+            if !text.is_empty() {
+                state.handle_text(text);
+            }
+            text_buf.clear();
+        }
+        match event {
             Event::Start(e) => state.handle_start(&e),
             Event::End(e) => {
                 let name = local_name_end(&e);
@@ -28,23 +39,24 @@ pub fn parse_tei(item_key: &str, attachment_key: &str, xml: &str) -> Result<Pape
                 state.handle_start(&e);
                 state.handle_end_name(&name);
             }
-            Event::Text(e) => {
-                let decoded = e
-                    .decode()
-                    .map_err(|err| ZoteroMcpError::Serde(format!("TEI text decode: {err}")))?;
-                let text = quick_xml::escape::unescape(&decoded)
-                    .map(|c| c.into_owned())
-                    .unwrap_or_else(|_| decoded.into_owned());
-                state.handle_text(&text);
+            Event::Text(e) => text_buf.push_str(&e),
+            Event::CData(e) => text_buf.push_str(&e.into_inner()),
+            Event::GeneralRef(e) => {
+                let reference = format!("&{};", &*e);
+                let text = quick_xml::escape::unescape(&reference)
+                    .map_err(|e| ZoteroMcpError::Serde(format!("TEI parse error: {e}")))?;
+                text_buf.push_str(&text);
             }
-            Event::CData(e) => {
-                let text = String::from_utf8_lossy(&e.into_inner()).into_owned();
-                state.handle_text(&text);
+            Event::Eof => {
+                if !state.stack.is_empty() {
+                    return Err(ZoteroMcpError::Serde(
+                        "TEI parse error: unexpected end of input".to_string(),
+                    ));
+                }
+                break;
             }
-            Event::Eof => break,
             _ => {}
         }
-        buf.clear();
     }
 
     Ok(build_structure(item_key, attachment_key, state))
@@ -457,21 +469,24 @@ impl ParseState {
 }
 
 fn local_name(e: &BytesStart<'_>) -> String {
-    let full = String::from_utf8_lossy(e.name().as_ref()).into_owned();
-    full.rsplit(':').next().unwrap_or(&full).to_string()
+    let full = e.name().into_inner();
+    full.rsplit(':').next().unwrap_or(full).to_string()
 }
 
 fn local_name_end(e: &BytesEnd<'_>) -> String {
-    let full = String::from_utf8_lossy(e.name().as_ref()).into_owned();
-    full.rsplit(':').next().unwrap_or(&full).to_string()
+    let full = e.name().into_inner();
+    full.rsplit(':').next().unwrap_or(full).to_string()
 }
 
 fn attr_value(e: &BytesStart<'_>, key: &str) -> Option<String> {
     for attr in e.attributes().flatten() {
-        let k = String::from_utf8_lossy(attr.key.as_ref()).into_owned();
-        let local = k.rsplit(':').next().unwrap_or(&k);
+        let k = attr.key.into_inner();
+        let local = k.rsplit(':').next().unwrap_or(k);
         if local == key {
-            return Some(String::from_utf8_lossy(&attr.value).into_owned());
+            return attr
+                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                .ok()
+                .map(|value| value.into_owned());
         }
     }
     None
@@ -599,6 +614,51 @@ mod tests {
         assert_eq!(r.doi.as_deref(), Some("10.5555/ref1"));
         assert_eq!(r.year.as_deref(), Some("2019"));
         assert_eq!(r.authors, vec!["A One".to_string()]);
+    }
+
+    #[test]
+    fn parses_namespaces_unicode_entities_cdata_and_attributes() {
+        let xml = r#"<tei:TEI xmlns:tei="http://www.tei-c.org/ns/1.0" xmlns:meta="urn:meta">
+  <tei:teiHeader>
+    <tei:title meta:type="ma&#105;n">Étude &amp; &#x3B2; &#946; &lt;test&gt;</tei:title>
+    <tei:date meta:type="published" meta:when="&#50;024-01-01"/>
+    <tei:analytic><tei:author><tei:persName>
+      <tei:forename>Zoë</tei:forename><tei:surname>李</tei:surname>
+    </tei:persName></tei:author></tei:analytic>
+    <tei:abstract>α<![CDATA[研究 <raw> &amp;]]>&amp;amp;ω</tei:abstract>
+  </tei:teiHeader>
+  <tei:text><tei:body><tei:div>
+    <tei:head meta:n="1&#46;2">Méthode</tei:head>
+    <tei:p>α &amp; β &#x3B3; &#948;.</tei:p>
+    <tei:p><![CDATA[<literal> &amp; 研究]]></tei:p>
+  </tei:div></tei:body></tei:text>
+</tei:TEI>"#;
+        let s = parse_tei("X", "Y", xml).unwrap();
+        assert_eq!(s.metadata.title.as_deref(), Some("Étude & β β <test>"));
+        assert_eq!(s.metadata.year.as_deref(), Some("2024"));
+        assert_eq!(s.metadata.authors, ["Zoë 李"]);
+        assert_eq!(
+            s.metadata.abstract_note.as_deref(),
+            Some("α研究 <raw> &amp;&amp;ω")
+        );
+        assert_eq!(s.sections.len(), 1);
+        assert_eq!(s.sections[0].heading, "Méthode");
+        assert_eq!(s.sections[0].level, 2);
+        assert_eq!(s.sections[0].text, "α & β γ δ. <literal> &amp; 研究");
+    }
+
+    #[test]
+    fn rejects_malformed_xml() {
+        for xml in [
+            "<TEI><text></TEI>",
+            "<TEI><text>unfinished",
+            "<TEI><text>&unknown;</text></TEI>",
+            "<TEI><text>&#x110000;</text></TEI>",
+        ] {
+            let err = parse_tei("X", "Y", xml).unwrap_err();
+            assert!(matches!(err, ZoteroMcpError::Serde(_)));
+            assert!(err.to_string().contains("TEI parse error"));
+        }
     }
 
     #[test]

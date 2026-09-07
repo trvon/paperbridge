@@ -91,7 +91,8 @@ impl std::fmt::Debug for ArxivClient {
 
 fn parse_atom_feed(xml: &str) -> Result<Vec<PaperHit>> {
     let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
+    // References are separate events; keep whitespace around them until field cleanup.
+    reader.config_mut().trim_text(false);
 
     let mut hits: Vec<PaperHit> = Vec::new();
     let mut current: Option<EntryBuilder> = None;
@@ -102,8 +103,7 @@ fn parse_atom_feed(xml: &str) -> Result<Vec<PaperHit>> {
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) => {
-                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
-                let local = local_name(&name).to_string();
+                let local = local_name(e.name().into_inner()).to_string();
                 if local == "entry" {
                     current = Some(EntryBuilder::default());
                 } else if local == "author" && current.is_some() {
@@ -113,19 +113,18 @@ fn parse_atom_feed(xml: &str) -> Result<Vec<PaperHit>> {
                 text_buf.clear();
             }
             Ok(Event::Empty(e)) => {
-                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
-                let local = local_name(&name);
+                let local = local_name(e.name().into_inner());
                 if local == "link" && current.is_some() {
                     let mut rel = None;
                     let mut href = None;
                     let mut typ = None;
                     for attr in e.attributes().flatten() {
-                        let k = String::from_utf8_lossy(attr.key.as_ref()).to_string();
+                        let k = attr.key.into_inner();
                         let v = attr
                             .normalized_value(quick_xml::XmlVersion::Implicit1_0)
                             .ok()
                             .map(|c| c.into_owned());
-                        match k.as_str() {
+                        match k {
                             "rel" => rel = v,
                             "href" => href = v,
                             "type" => typ = v,
@@ -137,20 +136,16 @@ fn parse_atom_feed(xml: &str) -> Result<Vec<PaperHit>> {
                     }
                 }
             }
-            Ok(Event::Text(e)) => {
-                let t = e
-                    .decode()
-                    .map(|cow| {
-                        quick_xml::escape::unescape(&cow)
-                            .map(|u| u.into_owned())
-                            .unwrap_or_else(|_| cow.into_owned())
-                    })
-                    .unwrap_or_default();
-                text_buf.push_str(&t);
+            Ok(Event::Text(e)) => text_buf.push_str(&e),
+            Ok(Event::CData(e)) => text_buf.push_str(&e.into_inner()),
+            Ok(Event::GeneralRef(e)) => {
+                let reference = format!("&{};", &*e);
+                let text = quick_xml::escape::unescape(&reference)
+                    .map_err(|e| ZoteroMcpError::Serde(format!("arXiv XML parse error: {e}")))?;
+                text_buf.push_str(&text);
             }
             Ok(Event::End(e)) => {
-                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
-                let local = local_name(&name).to_string();
+                let local = local_name(e.name().into_inner()).to_string();
                 if let Some(entry) = current.as_mut() {
                     match local.as_str() {
                         "id" if path_ends_with(&path, &["entry", "id"]) => {
@@ -193,7 +188,14 @@ fn parse_atom_feed(xml: &str) -> Result<Vec<PaperHit>> {
                 path.pop();
                 text_buf.clear();
             }
-            Ok(Event::Eof) => break,
+            Ok(Event::Eof) => {
+                if !path.is_empty() {
+                    return Err(ZoteroMcpError::Serde(
+                        "arXiv XML parse error: unexpected end of input".to_string(),
+                    ));
+                }
+                break;
+            }
             Err(e) => {
                 return Err(ZoteroMcpError::Serde(format!("arXiv XML parse error: {e}")));
             }
@@ -408,6 +410,48 @@ mod tests {
         );
         assert_eq!(h.url.as_deref(), Some("http://arxiv.org/abs/2301.00001v2"));
         assert_eq!(h.abstract_note.as_deref(), Some("This is the abstract."));
+    }
+
+    #[test]
+    fn parse_atom_feed_preserves_namespaces_unicode_entities_and_cdata() {
+        let xml = r#"<atom:feed xmlns:atom="http://www.w3.org/2005/Atom">
+  <atom:entry>
+    <atom:id>https://arxiv.org/abs/2401.00001v1</atom:id>
+    <atom:title>Étude &amp; &#x3B2; &#946; &lt;test&gt;</atom:title>
+    <atom:summary>α<![CDATA[研究 <raw> &amp;]]>&amp;amp;ω</atom:summary>
+    <atom:author><atom:name>Zoë &amp; 李</atom:name></atom:author>
+    <atom:link rel="alternate" href="https://example.org/研究?a=1&amp;b=&#50;"/>
+    <atom:link type="application/pdf" href="https://example.org/β.pdf?a=1&amp;b=2"/>
+  </atom:entry>
+</atom:feed>"#;
+        let hits = parse_atom_feed(xml).unwrap();
+        assert_eq!(hits.len(), 1);
+        let hit = &hits[0];
+        assert_eq!(hit.title, "Étude & β β <test>");
+        assert_eq!(
+            hit.abstract_note.as_deref(),
+            Some("α研究 <raw> &amp;&amp;ω")
+        );
+        assert_eq!(hit.authors, ["Zoë & 李"]);
+        assert_eq!(hit.url.as_deref(), Some("https://example.org/研究?a=1&b=2"));
+        assert_eq!(
+            hit.pdf_url.as_deref(),
+            Some("https://example.org/β.pdf?a=1&b=2")
+        );
+    }
+
+    #[test]
+    fn parse_atom_feed_rejects_malformed_xml() {
+        for xml in [
+            "<feed><entry></feed>",
+            "<feed><entry><title>unfinished",
+            "<feed><entry><title>&unknown;</title></entry></feed>",
+            "<feed><entry><title>&#x110000;</title></entry></feed>",
+        ] {
+            let err = parse_atom_feed(xml).unwrap_err();
+            assert!(matches!(err, ZoteroMcpError::Serde(_)));
+            assert!(err.to_string().contains("arXiv XML parse error"));
+        }
     }
 
     #[test]
