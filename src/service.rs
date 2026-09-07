@@ -1004,6 +1004,9 @@ impl PaperbridgeService {
     }
 
     pub async fn get_item_fulltext(&self, attachment_key: &str) -> Result<FulltextContent> {
+        if let Some(fulltext) = self.try_cached_fulltext(attachment_key)? {
+            return Ok(fulltext);
+        }
         self.backend.get_item_fulltext(attachment_key).await
     }
 
@@ -4849,6 +4852,21 @@ mod tests {
             yams_enabled: false,
         });
         (dir, service, format!("paperseed:{}", paper.metadata.id))
+    }
+
+    #[tokio::test]
+    async fn read_contract_item_fulltext_accepts_exact_cached_id() {
+        let (_dir, service, hit_id) = cached_read_fixture("éabc complete cached text");
+        let paper_id = hit_id.strip_prefix("paperseed:").unwrap();
+        let fulltext = service.get_item_fulltext(paper_id).await.unwrap();
+        assert_eq!(fulltext.content, "éabc complete cached text");
+        assert_eq!(fulltext.item_key, paper_id);
+        let page = service
+            .get_item_fulltext_page(paper_id, Some(2), None)
+            .await
+            .unwrap();
+        assert_eq!(page.fulltext.content, "éa");
+        assert_eq!(page.next_offset, Some(3));
     }
 
     #[tokio::test]

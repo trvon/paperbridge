@@ -1256,8 +1256,14 @@ mod tests {
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = vec![0; 4096];
-            socket.read(&mut request).await.unwrap();
+            let mut request = Vec::new();
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let mut chunk = [0; 1024];
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "client closed before sending request headers");
+                request.extend_from_slice(&chunk[..read]);
+                assert!(request.len() <= 16 * 1024, "request headers too large");
+            }
             let body = "x".repeat(5000);
             socket.write_all(format!(
                 "HTTP/1.1 404 Not Found\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{body}\r\n",
