@@ -113,6 +113,7 @@ fn convert_doc(d: RawAdsDoc) -> PaperHit {
 
     PaperHit {
         hit_id: None,
+        truncation: None,
         source: PaperSource::Ads,
         title,
         authors: d.author,

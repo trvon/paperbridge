@@ -136,6 +136,7 @@ fn convert_info(info: RawDblpInfo) -> PaperHit {
 
     PaperHit {
         hit_id: None,
+        truncation: None,
         source: PaperSource::Dblp,
         title: info.title.map(decode_html_entities).unwrap_or_default(),
         authors,

@@ -255,6 +255,7 @@ impl PaperseedApi {
             .take(limit)
             .map(|(entry, score)| PaperHit {
                 hit_id: None,
+                truncation: None,
                 source: PaperSource::Paperseed,
                 title: entry.paper.metadata.title.clone(),
                 authors: entry.paper.metadata.authors.clone(),
@@ -291,7 +292,26 @@ impl PaperseedApi {
     pub fn find_cached_hit(&self, hit: &PaperHit) -> Option<IndexedPaper> {
         let db = self.corpus_status().ok()?;
         db.papers.into_iter().find(|entry| {
-            doi_matches(entry, hit) || source_url_matches(entry, hit) || title_matches(entry, hit)
+            let metadata = &entry.paper.metadata;
+            let cached = PaperHit::new(
+                PaperSource::Paperseed,
+                metadata.title.clone(),
+                metadata.authors.clone(),
+                metadata.year.map(|year| year.to_string()),
+                metadata.doi.clone(),
+                metadata
+                    .arxiv_id
+                    .clone()
+                    .or_else(|| metadata.source_url.as_deref().and_then(arxiv_id_from_url)),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            crate::external::compatible_identity(&cached, hit)
         })
     }
 
@@ -353,13 +373,6 @@ fn cached_paper_detail(entry: IndexedPaper) -> CachedPaperDetail {
         yams_hash: entry.yams_hash,
         has_full_text,
     }
-}
-
-fn doi_matches(entry: &IndexedPaper, hit: &PaperHit) -> bool {
-    matches!(
-        (entry.paper.metadata.doi.as_deref(), hit.doi.as_deref()),
-        (Some(left), Some(right)) if left.eq_ignore_ascii_case(right)
-    )
 }
 
 fn entry_doi_matches(entry: &IndexedPaper, expected: &str) -> bool {
@@ -473,25 +486,6 @@ fn canonical_url(raw: &str) -> Option<String> {
         parsed.set_path(&path);
     }
     Some(parsed.to_string())
-}
-
-fn source_url_matches(entry: &IndexedPaper, hit: &PaperHit) -> bool {
-    let Some(source_url) = entry.paper.metadata.source_url.as_deref() else {
-        return false;
-    };
-    hit.url.as_deref() == Some(source_url) || hit.oa_pdf_url.as_deref() == Some(source_url)
-}
-
-fn title_matches(entry: &IndexedPaper, hit: &PaperHit) -> bool {
-    normalize_title(&entry.paper.metadata.title) == normalize_title(&hit.title)
-}
-
-fn normalize_title(value: &str) -> String {
-    value
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || c.is_ascii_whitespace())
-        .flat_map(|c| c.to_lowercase())
-        .collect()
 }
 
 fn summarize_abstract(text: &str) -> String {
@@ -815,6 +809,31 @@ mod tests {
             Some("cc-by".into()),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn audit_cached_annotation_rejects_contradictory_doi_and_uncorroborated_title() {
+        let dir = tempfile::tempdir().unwrap();
+        let api = PaperseedApi::with_yams(dir.path().join("corpus"), None, YamsConfig::disabled());
+        ingest(
+            &api,
+            dir.path(),
+            "same.txt",
+            "10.1234/a",
+            "https://example.test/a.pdf",
+        );
+        let mut hit = api.search_cached_papers("same", 10).unwrap().remove(0);
+        hit.cache = None;
+        hit.doi = Some("10.1234/b".into());
+        assert!(api.find_cached_hit(&hit).is_none());
+        hit.doi = None;
+        hit.url = None;
+        hit.oa_pdf_url = None;
+        hit.pdf_url = None;
+        hit.authors.clear();
+        assert!(api.find_cached_hit(&hit).is_none());
+        hit.authors = vec!["Test Author".into()];
+        assert!(api.find_cached_hit(&hit).is_some());
     }
 
     #[test]

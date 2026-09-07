@@ -223,6 +223,7 @@ fn convert_message_to_hit(msg: RawCrossrefMessage) -> PaperHit {
 
     PaperHit {
         hit_id: None,
+        truncation: None,
         source: PaperSource::Crossref,
         title,
         authors,

@@ -147,26 +147,26 @@ impl ListCollectionsQuery {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
 pub enum ValidationIssueLevel {
     Error,
     Warning,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
 pub struct ValidationIssue {
     pub level: ValidationIssueLevel,
     pub field: String,
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
 pub struct ValidationReport {
     pub valid: bool,
     pub issues: Vec<ValidationIssue>,
 }
 
-#[derive(Debug, Clone, Serialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Eq, PartialEq, schemars::JsonSchema)]
 pub struct BackendInfo {
     pub mode: String,
     pub read_library: bool,
@@ -176,7 +176,7 @@ pub struct BackendInfo {
     pub request_router: crate::request_router::RequestRouterSnapshot,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
 pub struct ItemSummary {
     pub key: String,
     pub item_type: String,
@@ -186,9 +186,11 @@ pub struct ItemSummary {
     pub year: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doi: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
 pub struct AttachmentSummary {
     pub key: String,
     pub title: String,
@@ -200,7 +202,7 @@ pub struct AttachmentSummary {
     pub version: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
 pub struct ItemDetail {
     pub key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -208,6 +210,14 @@ pub struct ItemDetail {
     pub item_type: String,
     pub title: String,
     pub creators: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub creator_details: Vec<CreatorInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doi: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub venue: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isbn: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub year: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -225,9 +235,11 @@ pub struct ItemDetail {
     pub attachments: Vec<AttachmentSummary>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
 pub struct CollectionSummary {
     pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u64>,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_collection: Option<String>,
@@ -235,7 +247,7 @@ pub struct CollectionSummary {
     pub item_count: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
 pub struct FulltextContent {
     pub item_key: String,
     pub content: String,
@@ -253,7 +265,7 @@ pub struct FulltextContent {
 ///
 /// `offset` is an UTF-8 byte position and omitted for the first page. Call
 /// the same read operation with `offset=next_offset` to continue when present.
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
 pub struct FulltextPage {
     #[serde(flatten)]
     pub fulltext: FulltextContent,
@@ -270,7 +282,7 @@ pub struct VoxTextPayload {
     pub chunks: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
 pub struct ItemVoxPayload {
     pub item_key: String,
     pub item_title: String,
@@ -286,7 +298,7 @@ pub struct ItemVoxPayload {
     pub vox: VoxTextPayload,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
 pub struct SearchVoxPayload {
     pub query: String,
     pub result_index: usize,
@@ -475,12 +487,23 @@ pub struct SearchDiagnostics {
     pub sources_failed: Vec<SourceDiagnostic>,
 }
 
+/// Scope of a returned count; candidate windows are not source-wide totals.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CountKind {
+    Exact,
+    Unknown,
+    CandidateWindow,
+}
+
 /// Paginated list envelope for library item search.
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
 pub struct ItemListResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
-    pub total_count: u32,
+    /// Null unless the complete library result count is proven.
+    pub total_count: Option<u32>,
+    pub count_kind: CountKind,
     pub offset: u32,
     pub limit: u32,
     pub has_more: bool,
@@ -490,9 +513,10 @@ pub struct ItemListResult {
 }
 
 /// Paginated list envelope for collections.
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
 pub struct CollectionListResult {
-    pub total_count: u32,
+    pub total_count: Option<u32>,
+    pub count_kind: CountKind,
     pub offset: u32,
     pub limit: u32,
     pub has_more: bool,
@@ -607,6 +631,10 @@ pub enum PaperStructureSource {
     Grobid,
     ZoteroFulltext,
     GrobidUnavailable { reason: String },
+    PaperseedFulltext,
+    ResearchFulltext,
+    DirectPdfText,
+    ZoteroPdfText,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
@@ -637,6 +665,13 @@ pub struct SkillPayload {
     pub markdown: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+pub struct HitTruncation {
+    pub title: bool,
+    /// True if author count or any author string was shortened.
+    pub authors: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct PaperHit {
     /// Stable agent-facing id (`arxiv:…`, `doi:…`, `pmid:…`, `paperseed:…`, …).
@@ -644,6 +679,8 @@ pub struct PaperHit {
     pub hit_id: Option<String>,
     pub source: PaperSource,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncation: Option<HitTruncation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authors: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -711,6 +748,7 @@ impl PaperHit {
             hit_id: None,
             source,
             title,
+            truncation: None,
             authors,
             year,
             doi,
@@ -735,7 +773,9 @@ impl PaperHit {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct SearchPapersResult {
     pub query: String,
+    /// Count of the merged bounded candidate set, not a source-wide total.
     pub total_count: u32,
+    pub count_kind: CountKind,
     pub offset: u32,
     pub limit: u32,
     pub has_more: bool,

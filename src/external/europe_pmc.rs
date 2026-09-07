@@ -149,6 +149,7 @@ fn convert_result(r: RawEpmcResult) -> PaperHit {
 
     PaperHit {
         hit_id: None,
+        truncation: None,
         source: PaperSource::EuropePmc,
         title: r.title.unwrap_or_default(),
         authors,

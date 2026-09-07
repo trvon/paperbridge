@@ -3,6 +3,12 @@ use serde_json::Value;
 
 pub fn evaluate(root: &Value, selector: &str) -> Result<Value> {
     let trimmed = selector.trim();
+    if trimmed.len() > 4096 {
+        return Err(invalid(
+            "<oversized>",
+            "selector exceeds 4096 bytes; select a shallower field",
+        ));
+    }
     if trimmed.is_empty() || trimmed == "." {
         return Ok(root.clone());
     }
@@ -13,7 +19,10 @@ pub fn evaluate(root: &Value, selector: &str) -> Result<Value> {
     let bytes = trimmed.as_bytes();
 
     while i < bytes.len() {
-        let c = bytes[i] as char;
+        let c = trimmed[i..]
+            .chars()
+            .next()
+            .ok_or_else(|| invalid(trimmed, "invalid character"))?;
         if c == '.' {
             if !buf.is_empty() {
                 current = descend_key(current, &buf, trimmed)?;
@@ -38,7 +47,7 @@ pub fn evaluate(root: &Value, selector: &str) -> Result<Value> {
             i = end + 1;
         } else {
             buf.push(c);
-            i += 1;
+            i += c.len_utf8();
         }
     }
 
@@ -102,6 +111,19 @@ mod tests {
                 {"id": "methods", "heading": "Methods", "text": "world"}
             ]
         })
+    }
+
+    #[test]
+    fn unicode_keys_are_not_corrupted() {
+        assert_eq!(
+            evaluate(&json!({"标题": "论文"}), "标题").unwrap(),
+            json!("论文")
+        );
+    }
+
+    #[test]
+    fn excessive_selector_depth_is_rejected() {
+        assert!(evaluate(&json!({}), &".".repeat(20_000)).is_err());
     }
 
     #[test]

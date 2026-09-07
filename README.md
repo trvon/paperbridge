@@ -94,8 +94,12 @@ direct OA URL; `prefer` routes them through the configured institutional profile
 first.
 
 Results are paginated (`--offset`, `--limit`) and deduplicated by DOI, arXiv
-ID, PMID, and normalized title+author. Later pages expand the per-source fetch
-window as needed. Unconfigured key-gated sources appear in
+ID, PMID, and corroborated title+author, preserving complementary identifiers.
+Pages reuse a fixed per-source prefix (`--per-source`, default 10, max 200);
+restart at offset 0 with a larger prefix to broaden discovery. Paper-search
+`total_count` counts this candidate window, not the entire provider index.
+Library totals may be `null` with `count_kind: "unknown"`; use `has_more`.
+Unconfigured key-gated sources appear in
 `diagnostics.sources_skipped`.
 
 Springer journal articles can appear through Crossref, OpenAlex, and other
@@ -131,8 +135,8 @@ reference extraction. See [docs/structured-paper.md](docs/structured-paper.md).
 When papers are cached locally, existing routes become smarter without new
 commands:
 
-- `get_pdf_text` / `get_item_fulltext` fall back to searching the local cache
-  by the key as a natural-language query when Zotero is unreachable.
+- `get_pdf_text` / `get_item_fulltext` accept exact cached paper IDs; failed
+  Zotero identifiers never fall back to a relevance search for another paper.
 - `prepare_item_for_vox` / `prepare_search_result_for_vox` prefer cached papers.
 - `get_paper_structure` / `query_paper` build a fallback structure from cached
   full-text when called with a cached paper id.
@@ -200,6 +204,19 @@ paperbridge config doctor --json       # machine-readable output
 ```
 
 ## MCP server
+
+Use `paperbridge serve --profile core` for the six-tool discovery/read spine;
+plain `serve` retains the full tool surface for compatibility. Results include
+output schemas and `structuredContent`, plus compact JSON text for older hosts.
+The complete tool-result wire payload is capped at 64 KiB; oversized responses
+return a bounded error with recovery guidance, never a silently clipped document.
+
+Prefer `papers open --want structure` for a bounded outline, then select a field
+with `--selector`. String selections and fulltext use UTF-8 byte cursors;
+chunks report continuation through `chunks_page`. Inspect `metadata_status`,
+`metadata_page`, `structure_page`, and provenance before treating results as
+complete evidence. See [the migration notes](docs/design/model-output-remediation.md).
+
 
 ```bash
 paperbridge serve

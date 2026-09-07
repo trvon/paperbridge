@@ -278,17 +278,24 @@ impl PaperbridgeService {
             self.annotate_cached_hits(&mut hits);
         }
         rank_search_hits(&original_query, &mut hits);
+        for diagnostic in diagnostics
+            .sources_failed
+            .iter_mut()
+            .chain(diagnostics.sources_skipped.iter_mut())
+        {
+            diagnostic.reason = crate::error::sanitize_message(&diagnostic.reason, &[]);
+        }
 
-        let match_query = expand_agent_search_query(&original_query);
+        // Persist complete citations, never display-truncated search projections.
+        self.mirror_open_access_hits(&hits);
         for hit in &mut hits {
             enrich_hit_identity(hit);
-            enrich_match(hit, &match_query);
+            enrich_match(hit, &original_query);
             apply_detail(hit, detail, abstract_max_chars);
         }
 
         // Clamp to u32 via .min() — safe, bounded cast.
         let total_count = hits.len().min(u32::MAX as usize) as u32;
-        self.mirror_open_access_hits(&hits);
 
         let offset = opts.offset;
         let page_limit = opts.page_limit();
@@ -305,6 +312,7 @@ impl PaperbridgeService {
         Ok(SearchPapersResult {
             query: original_query,
             total_count,
+            count_kind: crate::models::CountKind::CandidateWindow,
             offset,
             limit: page_limit,
             has_more,
@@ -317,22 +325,9 @@ impl PaperbridgeService {
 
     /// Resolve a paper by id and return requested slices (metadata/fulltext/structure/chunks).
     pub async fn open_paper(&self, req: OpenPaperRequest) -> Result<serde_json::Value> {
-        let max_chars = req.max_chars.unwrap_or(DEFAULT_FULLTEXT_MAX_CHARS);
-        if max_chars == 0 {
-            return Err(ZoteroMcpError::InvalidInput(
-                "max_chars must be at least 1; omit it to use the default of 8000.".into(),
-            ));
-        }
+        let max_chars = validated_fulltext_limit(req.max_chars)?;
         let offset = req.offset.unwrap_or(0);
         let mut resolved = resolve_open_targets(&req)?;
-
-        // Prefer cache when paper_id known or hit_id is paperseed:
-        if resolved.paper_id.is_none()
-            && let Some(pid) = req.paper_id.clone()
-        {
-            resolved.paper_id = Some(pid);
-        }
-
         let mut out = serde_json::Map::new();
 
         let wants: Vec<String> = if req.want.is_empty() {
@@ -344,6 +339,28 @@ impl PaperbridgeService {
                 .collect()
         };
 
+        if wants
+            .iter()
+            .any(|w| !matches!(w.as_str(), "metadata" | "fulltext" | "structure" | "chunks"))
+        {
+            return Err(ZoteroMcpError::InvalidInput(
+                "want accepts only metadata, fulltext, structure, chunks. Try open_paper { hit_id, want: [\"metadata\"] }.".into(),
+            ));
+        }
+        if req.selector.is_some() && !wants.iter().any(|w| w == "structure") {
+            return Err(ZoteroMcpError::InvalidInput(
+                "selector requires want: [\"structure\"].".into(),
+            ));
+        }
+        if let Some(pid) = resolved.paper_id.as_deref() {
+            let api = self
+                .paperseed
+                .as_ref()
+                .ok_or_else(|| missing_cached_paper(pid))?;
+            api.get_cached_paper(pid)
+                .map_err(|_| missing_cached_paper(pid))?;
+        }
+
         if wants.iter().any(|w| w == "metadata") {
             if let Some(doi) = resolved.doi.as_deref() {
                 match self.resolve_doi(doi).await {
@@ -351,10 +368,18 @@ impl PaperbridgeService {
                         out.insert("metadata".into(), serde_json::to_value(work)?);
                     }
                     Err(e) => {
-                        out.insert("metadata_error".into(), serde_json::json!(e.to_string()));
+                        out.insert(
+                            "metadata_error".into(),
+                            serde_json::to_value(crate::error::ErrorEnvelope::from_error(&e))?,
+                        );
+                        out.insert("metadata_status".into(), serde_json::json!("failed"));
                     }
                 }
-            } else if let Some(key) = resolved.item_key.as_deref() {
+            } else if let Some(key) = resolved
+                .item_key
+                .as_deref()
+                .or(resolved.attachment_key.as_deref())
+            {
                 let item = self.get_item(key).await?;
                 out.insert("metadata".into(), serde_json::to_value(item)?);
             } else if let Some(pid) = resolved.paper_id.as_deref() {
@@ -363,7 +388,7 @@ impl PaperbridgeService {
                 {
                     out.insert("metadata".into(), serde_json::to_value(detail)?);
                 } else {
-                    out.insert("metadata".into(), serde_json::json!({"paper_id": pid}));
+                    return Err(missing_cached_paper(pid));
                 }
             } else if let Some(arxiv) = resolved.arxiv_id.as_deref() {
                 out.insert(
@@ -384,6 +409,29 @@ impl PaperbridgeService {
             }
         }
 
+        if out.contains_key("metadata") {
+            let identifier_only = resolved.arxiv_id.is_some()
+                || resolved.url.is_some()
+                || resolved.research_hash.is_some();
+            out.insert(
+                "metadata_status".into(),
+                serde_json::json!(if identifier_only
+                    && resolved.paper_id.is_none()
+                    && resolved.doi.is_none()
+                {
+                    "identifier_only"
+                } else {
+                    "retrieved"
+                }),
+            );
+        }
+
+        if let Some(metadata) = out.get_mut("metadata") {
+            let page = bound_open_metadata(metadata, max_chars);
+            out.insert("metadata_page".into(), page);
+        }
+
+        let mut opened_fulltext = None;
         if wants.iter().any(|w| w == "fulltext" || w == "chunks") {
             let fulltext = self.resolve_fulltext_for_open(&mut resolved).await?;
             let page = paginate_fulltext(&fulltext, max_chars, offset)?;
@@ -398,19 +446,40 @@ impl PaperbridgeService {
                     chunk_size,
                 );
                 out.insert("chunks".into(), serde_json::to_value(vox)?);
+                out.insert("chunks_page".into(), fulltext_page_info(&page));
             }
+            out.insert(
+                "content_provenance".into(),
+                open_content_provenance(&resolved),
+            );
+            opened_fulltext = Some(fulltext);
         }
 
         if wants.iter().any(|w| w == "structure") {
             let structure = self
-                .resolve_structure_for_open(&mut resolved, max_chars)
+                .resolve_structure_for_open(&mut resolved, opened_fulltext.as_ref())
                 .await?;
-            if let Some(selector) = req.selector.as_deref() {
-                let value = paper::query(&structure, selector)?;
-                out.insert("structure".into(), value);
+            let parser = if matches!(
+                structure.source,
+                crate::models::PaperStructureSource::Grobid
+            ) {
+                "grobid"
             } else {
-                out.insert("structure".into(), serde_json::to_value(structure)?);
-            }
+                "heuristic_fulltext"
+            };
+            out.insert(
+                "structure_provenance".into(),
+                serde_json::json!({
+                    "origin": resolved.content_origin.unwrap_or("unknown"),
+                    "parser": parser,
+                }),
+            );
+            let (value, page) =
+                bounded_structure_output(&structure, req.selector.as_deref(), max_chars, offset)?;
+            out.insert("structure".into(), value);
+            out.insert("structure_page".into(), page);
+            out.entry("content_provenance")
+                .or_insert_with(|| open_content_provenance(&resolved));
         }
 
         if out.is_empty() {
@@ -436,6 +505,7 @@ impl PaperbridgeService {
                 )
             })?;
             let content = api.get_research_content(hash)?;
+            resolved.content_origin = Some("research_fulltext");
             let chars = u32::try_from(content.chars().count()).ok();
             return Ok(FulltextContent {
                 item_key: format!("research:{hash}"),
@@ -447,12 +517,19 @@ impl PaperbridgeService {
             });
         }
         if let Some(att) = resolved.attachment_key.as_deref() {
-            return self.get_pdf_text(att).await;
+            if let Some(fulltext) = self.try_cached_fulltext(att)? {
+                resolved.paper_id = Some(att.to_string());
+                resolved.content_origin = Some("paperseed_fulltext");
+                return Ok(fulltext);
+            }
+            resolved.content_origin = Some("zotero_fulltext");
+            return self.backend.get_pdf_text(att).await;
         }
-        if let Some(pid) = resolved.paper_id.as_deref()
-            && let Some(ft) = self.try_cached_fulltext(pid)?
-        {
-            return Ok(ft);
+        if let Some(pid) = resolved.paper_id.as_deref() {
+            resolved.content_origin = Some("paperseed_fulltext");
+            return self
+                .try_cached_fulltext(pid)?
+                .ok_or_else(|| missing_cached_paper(pid));
         }
         if let Some(key) = resolved.item_key.as_deref() {
             let item = self.get_item(key).await?;
@@ -462,10 +539,13 @@ impl PaperbridgeService {
                         "No attachments for item '{key}'. Try get_item and pick attachment_key."
                     ))
                 })?;
-            return self.get_pdf_text(&att.key).await;
+            resolved.attachment_key = Some(att.key.clone());
+            resolved.content_origin = Some("zotero_fulltext");
+            return self.backend.get_pdf_text(&att.key).await;
         }
         if let Some((paper_id, fulltext)) = self.try_cached_fulltext_by_identity(resolved)? {
             resolved.paper_id = Some(paper_id);
+            resolved.content_origin = Some("paperseed_fulltext");
             return Ok(fulltext);
         }
 
@@ -479,12 +559,14 @@ impl PaperbridgeService {
                     self.try_cached_fulltext_by_identity(resolved)?
                 {
                     resolved.paper_id = Some(paper_id);
+                    resolved.content_origin = Some("paperseed_fulltext");
                     return Ok(fulltext);
                 }
             }
         }
 
         if let Some(fulltext) = self.download_open_fulltext(resolved).await? {
+            resolved.content_origin = Some("direct_pdf_text");
             return Ok(fulltext);
         }
 
@@ -496,27 +578,45 @@ impl PaperbridgeService {
     async fn resolve_structure_for_open(
         &self,
         resolved: &mut OpenResolved,
-        max_chars: usize,
+        opened_fulltext: Option<&FulltextContent>,
     ) -> Result<PaperStructure> {
+        // Item-backed structure preserves Zotero metadata and the configured parser,
+        // even when another requested view already fetched indexed fulltext.
         if let Some(item_key) = resolved.item_key.as_deref() {
-            return self
+            let structure = self
                 .get_paper_structure(item_key, resolved.attachment_key.as_deref())
-                .await;
+                .await?;
+            resolved.attachment_key = structure.attachment_key.clone();
+            resolved.content_origin = Some(match structure.source {
+                crate::models::PaperStructureSource::PaperseedFulltext => "paperseed_fulltext",
+                crate::models::PaperStructureSource::Grobid => "zotero_pdf_text",
+                _ => "zotero_fulltext",
+            });
+            return Ok(structure);
         }
         if let Some(paper_id) = resolved.paper_id.as_deref()
             && let Some(structure) = self.try_cached_paper_structure(paper_id)?
         {
+            resolved.content_origin = Some("paperseed_fulltext");
             return Ok(structure);
         }
 
-        if let Some((paper_id, structure)) =
-            self.try_cached_paper_structure_by_identity(resolved)?
+        if opened_fulltext.is_none()
+            && let Some((paper_id, structure)) =
+                self.try_cached_paper_structure_by_identity(resolved)?
         {
             resolved.paper_id = Some(paper_id);
+            resolved.content_origin = Some("paperseed_fulltext");
             return Ok(structure);
         }
 
-        let fulltext = self.resolve_fulltext_for_open(resolved).await?;
+        let fetched;
+        let fulltext = if let Some(fulltext) = opened_fulltext {
+            fulltext
+        } else {
+            fetched = self.resolve_fulltext_for_open(resolved).await?;
+            &fetched
+        };
         if let Some(paper_id) = resolved.paper_id.as_deref()
             && let Some(structure) = self.try_cached_paper_structure(paper_id)?
         {
@@ -527,18 +627,26 @@ impl PaperbridgeService {
         if metadata.title.is_none() {
             metadata.title = title_from_open_content(&fulltext.content);
         }
-        let mut structure = PaperStructure {
-            item_key: fulltext.item_key.clone(),
-            attachment_key: None,
+        let structure = PaperStructure {
+            item_key: resolved
+                .item_key
+                .clone()
+                .unwrap_or_else(|| fulltext.item_key.clone()),
+            attachment_key: resolved.attachment_key.clone(),
             metadata,
             sections: crate::paper::fallback::build_sections(None, &fulltext.content),
             references: Vec::new(),
             figures: Vec::new(),
-            source: crate::models::PaperStructureSource::GrobidUnavailable {
-                reason: "built from directly downloaded PDF text".into(),
+            source: match resolved.content_origin {
+                Some("research_fulltext") => crate::models::PaperStructureSource::ResearchFulltext,
+                Some("paperseed_fulltext") => {
+                    crate::models::PaperStructureSource::PaperseedFulltext
+                }
+                Some("zotero_fulltext") => crate::models::PaperStructureSource::ZoteroFulltext,
+                Some("zotero_pdf_text") => crate::models::PaperStructureSource::ZoteroPdfText,
+                _ => crate::models::PaperStructureSource::DirectPdfText,
             },
         };
-        truncate_structure_sections(&mut structure.sections, max_chars);
         Ok(structure)
     }
 
@@ -789,20 +897,31 @@ impl PaperbridgeService {
     pub async fn search_items_page(&self, query: SearchItemsQuery) -> Result<ItemListResult> {
         let q_echo = query.q.clone();
         let offset = query.start;
-        let query = query.normalized();
+        let mut query = query.normalized();
         let limit = query.limit;
-        let hits = self.backend.search_items(query).await?;
-        // Zotero local/cloud may not expose total; use has_more heuristic.
-        let page_len = hits.len() as u32;
-        let has_more = page_len >= limit && limit > 0;
-        let total_count = if has_more {
-            offset.saturating_add(page_len).saturating_add(1)
+        // Fetch a real sentinel; backends clamp requests to 100 rows.
+        query.limit = (limit + 1).min(100);
+        let mut hits = self.backend.search_items(query.clone()).await?;
+        let has_more = if limit == 100 && hits.len() == 100 {
+            query.start = offset.checked_add(limit).ok_or_else(|| {
+                ZoteroMcpError::InvalidInput("library page offset exceeds u32 range".into())
+            })?;
+            query.limit = 1;
+            !self.backend.search_items(query).await?.is_empty()
         } else {
-            offset.saturating_add(page_len)
+            hits.len() > limit as usize
         };
+        hits.truncate(limit as usize);
+        // A later empty/short page cannot establish the total (e.g. offset 999).
+        let total_count = (offset == 0 && !has_more).then_some(hits.len() as u32);
         Ok(ItemListResult {
             query: q_echo,
             total_count,
+            count_kind: if total_count.is_some() {
+                crate::models::CountKind::Exact
+            } else {
+                crate::models::CountKind::Unknown
+            },
             offset,
             limit,
             has_more,
@@ -827,18 +946,28 @@ impl PaperbridgeService {
         query: ListCollectionsQuery,
     ) -> Result<CollectionListResult> {
         let offset = query.start;
-        let query = query.normalized();
+        let mut query = query.normalized();
         let limit = query.limit;
-        let hits = self.backend.list_collections(query).await?;
-        let page_len = hits.len() as u32;
-        let has_more = page_len >= limit && limit > 0;
-        let total_count = if has_more {
-            offset.saturating_add(page_len).saturating_add(1)
+        query.limit = (limit + 1).min(100);
+        let mut hits = self.backend.list_collections(query.clone()).await?;
+        let has_more = if limit == 100 && hits.len() == 100 {
+            query.start = offset.checked_add(limit).ok_or_else(|| {
+                ZoteroMcpError::InvalidInput("library page offset exceeds u32 range".into())
+            })?;
+            query.limit = 1;
+            !self.backend.list_collections(query).await?.is_empty()
         } else {
-            offset.saturating_add(page_len)
+            hits.len() > limit as usize
         };
+        hits.truncate(limit as usize);
+        let total_count = (offset == 0 && !has_more).then_some(hits.len() as u32);
         Ok(CollectionListResult {
             total_count,
+            count_kind: if total_count.is_some() {
+                crate::models::CountKind::Exact
+            } else {
+                crate::models::CountKind::Unknown
+            },
             offset,
             limit,
             has_more,
@@ -859,15 +988,7 @@ impl PaperbridgeService {
         if let Some(fulltext) = self.try_cached_fulltext(attachment_key)? {
             return Ok(fulltext);
         }
-        match self.backend.get_pdf_text(attachment_key).await {
-            Ok(fulltext) => Ok(fulltext),
-            Err(backend_err) => {
-                if let Some(fulltext) = self.try_cached_fulltext_by_query(attachment_key)? {
-                    return Ok(fulltext);
-                }
-                Err(backend_err)
-            }
-        }
+        self.backend.get_pdf_text(attachment_key).await
     }
 
     /// Fetch a bounded page of PDF text for MCP-style context use.
@@ -883,15 +1004,7 @@ impl PaperbridgeService {
     }
 
     pub async fn get_item_fulltext(&self, attachment_key: &str) -> Result<FulltextContent> {
-        match self.backend.get_item_fulltext(attachment_key).await {
-            Ok(fulltext) => Ok(fulltext),
-            Err(backend_err) => {
-                if let Some(fulltext) = self.try_cached_fulltext_by_query(attachment_key)? {
-                    return Ok(fulltext);
-                }
-                Err(backend_err)
-            }
-        }
+        self.backend.get_item_fulltext(attachment_key).await
     }
 
     /// Fetch a bounded page of indexed full text for MCP-style context use.
@@ -951,7 +1064,7 @@ impl PaperbridgeService {
                         .await?;
                     let mut s = paper::build_from_fulltext(&item, &fulltext);
                     s.source = crate::models::PaperStructureSource::GrobidUnavailable {
-                        reason: err.to_string(),
+                        reason: crate::error::sanitize_message(&err.to_string(), &[]),
                     };
                     s
                 }
@@ -1360,6 +1473,7 @@ impl PaperbridgeService {
                     key: cache.paper_id.clone(),
                     item_type: "cached_paper".to_string(),
                     title: selected.title.clone(),
+                    doi: selected.doi.clone(),
                     creators: selected.authors.clone(),
                     year: selected.year.clone(),
                     url: selected.url.clone().or_else(|| selected.oa_pdf_url.clone()),
@@ -1379,6 +1493,28 @@ impl PaperbridgeService {
             })
             .await?;
         if results.is_empty() {
+            // Only this explicitly natural-language pipeline may fall back to cache search.
+            if result_index == 0
+                && let Some(fulltext) = self.try_cached_fulltext_by_query(&query)?
+                && let Some(prepared) = self
+                    .try_prepare_cached_item_for_vox(&fulltext.item_key, req.max_chars_per_chunk)?
+            {
+                return Ok(SearchVoxPayload {
+                    query,
+                    result_index,
+                    result_count: 1,
+                    selected_item: ItemSummary {
+                        key: prepared.item_key.clone(),
+                        item_type: "cached_paper".into(),
+                        title: prepared.item_title.clone(),
+                        doi: None,
+                        creators: Vec::new(),
+                        year: None,
+                        url: None,
+                    },
+                    prepared,
+                });
+            }
             return Err(ZoteroMcpError::InvalidInput(format!(
                 "No search results found for query '{}'.",
                 query
@@ -1441,9 +1577,8 @@ impl PaperbridgeService {
             .map(|fulltext| (paper_id, fulltext)))
     }
 
-    /// Compatibility fallback for legacy read commands that explicitly treat
-    /// their key argument as a natural-language cache query. `open_paper`
-    /// intentionally does not use this path for identifiers.
+    /// Natural-language fallback for the legacy read-search pipeline only.
+    /// Identifier reads must never use query matches as identity evidence.
     fn try_cached_fulltext_by_query(&self, query: &str) -> Result<Option<FulltextContent>> {
         let Some(api) = &self.paperseed else {
             return Ok(None);
@@ -1578,9 +1713,30 @@ struct OpenResolved {
     attachment_key: Option<String>,
     url: Option<String>,
     research_hash: Option<String>,
+    content_origin: Option<&'static str>,
 }
 
 fn resolve_open_targets(req: &OpenPaperRequest) -> Result<OpenResolved> {
+    let targets = [
+        req.hit_id.as_ref(),
+        req.doi.as_ref(),
+        req.arxiv_id.as_ref(),
+        req.item_key.as_ref(),
+        req.paper_id.as_ref(),
+        req.attachment_key.as_ref(),
+        req.url.as_ref(),
+    ];
+    if targets.iter().flatten().any(|s| s.trim().is_empty()) {
+        return Err(ZoteroMcpError::InvalidInput(
+            "Identifiers must not be empty. Try open_paper { hit_id } using a search result."
+                .into(),
+        ));
+    }
+    let count = targets.iter().flatten().count();
+    let attachment_override = req.item_key.is_some() && req.attachment_key.is_some() && count == 2;
+    if count > 1 && !attachment_override {
+        return Err(ZoteroMcpError::InvalidInput("Provide exactly one target identifier, or item_key plus attachment_key to override its attachment.".into()));
+    }
     let mut r = OpenResolved {
         doi: req.doi.as_ref().and_then(|d| normalize_doi(d)),
         arxiv_id: req.arxiv_id.as_ref().and_then(|a| normalize_arxiv_id(a)),
@@ -1589,24 +1745,26 @@ fn resolve_open_targets(req: &OpenPaperRequest) -> Result<OpenResolved> {
         attachment_key: req.attachment_key.clone(),
         url: req.url.as_deref().map(normalize_open_url).transpose()?,
         research_hash: None,
+        content_origin: None,
     };
 
     if let Some(hit_id) = req.hit_id.as_deref() {
         if let Some(rest) = hit_id.strip_prefix("arxiv:") {
-            r.arxiv_id = Some(strip_arxiv_version_local(rest));
+            r.arxiv_id = normalize_arxiv_id(rest);
         } else if let Some(rest) = hit_id.strip_prefix("doi:") {
             r.doi = normalize_doi(rest);
         } else if let Some(rest) = hit_id.strip_prefix("pmid:") {
-            // PMID-only open is limited; stash as paper query key via paper_id-like
-            r.paper_id = r.paper_id.or_else(|| Some(rest.to_string()));
+            return Err(ZoteroMcpError::InvalidInput(format!(
+                "PMID opening is not supported yet. Try resolve_source_access {{ url: \"https://pubmed.ncbi.nlm.nih.gov/{rest}/\" }} or search_papers {{ query: \"{rest}\", sources: [\"pubmed\", \"europe_pmc\"], detail: \"full\" }}."
+            )));
         } else if let Some(rest) = hit_id.strip_prefix("paperseed:") {
-            r.paper_id = Some(rest.to_string());
+            r.paper_id = (!rest.trim().is_empty()).then(|| rest.to_string());
         } else if let Some(rest) = hit_id.strip_prefix("research:") {
             if !rest.is_empty() {
                 r.research_hash = Some(rest.to_string());
             }
         } else if let Some(rest) = hit_id.strip_prefix("zotero:") {
-            r.item_key = Some(rest.to_string());
+            r.item_key = (!rest.trim().is_empty()).then(|| rest.to_string());
         } else if let Some(rest) = hit_id.strip_prefix("url:") {
             r.url = Some(normalize_open_url(rest)?);
         } else if hit_id.contains('/') {
@@ -1680,16 +1838,6 @@ fn insert_optional_json_string(
     }
 }
 
-fn strip_arxiv_version_local(id: &str) -> String {
-    if let Some(idx) = id.rfind('v') {
-        let (base, ver) = id.split_at(idx);
-        if ver.len() > 1 && ver[1..].chars().all(|c| c.is_ascii_digit()) {
-            return base.to_string();
-        }
-    }
-    id.to_string()
-}
-
 fn paper_hit_from_resolved(resolved: &OpenResolved) -> PaperHit {
     let arxiv = resolved.arxiv_id.clone();
     let doi = resolved.doi.clone();
@@ -1743,10 +1891,10 @@ fn paper_hit_from_resolved(resolved: &OpenResolved) -> PaperHit {
 
 fn validated_fulltext_limit(max_chars: Option<usize>) -> Result<usize> {
     match max_chars.unwrap_or(DEFAULT_FULLTEXT_MAX_CHARS) {
-        0 => Err(ZoteroMcpError::InvalidInput(
-            "max_chars must be at least 1; omit it to use the default of 8000.".into(),
+        limit @ 1..=32_000 => Ok(limit),
+        _ => Err(ZoteroMcpError::InvalidInput(
+            "max_chars must be between 1 and 32000; omit it to use the default of 8000.".into(),
         )),
-        limit => Ok(limit),
     }
 }
 
@@ -1790,27 +1938,21 @@ fn merge_prefer_cached(hits: &mut Vec<PaperHit>, cache_start: usize) {
         return;
     }
     let cached: Vec<PaperHit> = hits.drain(cache_start..).collect();
-    for cache_hit in cached {
+    for mut cache_hit in cached {
         match collision_index(hits, &cache_hit) {
-            Some(idx) => hits[idx] = cache_hit,
+            Some(idx) => {
+                crate::external::merge_hit_metadata(&mut cache_hit, hits[idx].clone());
+                hits[idx] = cache_hit;
+            }
             None => hits.push(cache_hit),
         }
     }
 }
 
 fn collision_index(externals: &[PaperHit], cache_hit: &PaperHit) -> Option<usize> {
-    use crate::external::{arxiv_key, doi_key, pmid_key, title_author_key};
-    let cache_doi = doi_key(cache_hit);
-    let cache_arxiv = arxiv_key(cache_hit);
-    let cache_pmid = pmid_key(cache_hit);
-    let cache_title = title_author_key(cache_hit);
-
-    externals.iter().position(|ext| {
-        (cache_doi.is_some() && cache_doi == doi_key(ext))
-            || (cache_arxiv.is_some() && cache_arxiv == arxiv_key(ext))
-            || (cache_pmid.is_some() && cache_pmid == pmid_key(ext))
-            || (cache_title.is_some() && cache_title == title_author_key(ext))
-    })
+    externals
+        .iter()
+        .position(|ext| crate::external::compatible_identity(ext, cache_hit))
 }
 
 fn cached_paper_structure(paper: &CachedPaperDetail, fulltext: &FulltextContent) -> PaperStructure {
@@ -1828,7 +1970,7 @@ fn cached_paper_structure(paper: &CachedPaperDetail, fulltext: &FulltextContent)
         sections,
         references: Vec::new(),
         figures: Vec::new(),
-        source: crate::models::PaperStructureSource::ZoteroFulltext,
+        source: crate::models::PaperStructureSource::PaperseedFulltext,
     }
 }
 
@@ -1847,29 +1989,290 @@ fn title_from_open_content(content: &str) -> Option<String> {
     })
 }
 
-fn truncate_structure_sections(sections: &mut Vec<crate::models::PaperSection>, max_chars: usize) {
-    let mut remaining = max_chars;
-    truncate_section_list(sections, &mut remaining);
+fn missing_cached_paper(id: &str) -> ZoteroMcpError {
+    ZoteroMcpError::InvalidInput(format!(
+        "Cached paper '{id}' is missing or unreadable. Try search_papers {{ query, cache: \"only\" }} and open a returned paperseed hit_id."
+    ))
 }
 
-fn truncate_section_list(sections: &mut Vec<crate::models::PaperSection>, remaining: &mut usize) {
-    for section in sections.iter_mut() {
-        if *remaining == 0 {
-            section.text.clear();
-            section.subsections.clear();
-            continue;
-        }
-        let count = section.text.chars().count();
-        if count > *remaining {
-            section.text = section.text.chars().take(*remaining).collect();
-            *remaining = 0;
-            section.subsections.clear();
-        } else {
-            *remaining -= count;
-            truncate_section_list(&mut section.subsections, remaining);
+fn bound_open_metadata(metadata: &mut serde_json::Value, max_chars: usize) -> serde_json::Value {
+    let mut identity = serde_json::Map::new();
+    if let Some(map) = metadata.as_object_mut() {
+        for key in ["key", "doi", "paper_id", "arxiv_id", "research_hash", "ids"] {
+            if let Some(value) = map.remove(key) {
+                identity.insert(key.into(), value);
+            }
         }
     }
-    sections.retain(|section| !section.text.is_empty() || !section.subsections.is_empty());
+    let total_chars = json_string_chars(metadata);
+    let mut remaining = max_chars;
+    let mut nodes = max_chars.saturating_add(64).min(1024);
+    let mut omitted = Vec::new();
+    bound_json_strings(
+        metadata,
+        &mut remaining,
+        &mut nodes,
+        "metadata",
+        &mut omitted,
+    );
+    if let Some(map) = metadata.as_object_mut() {
+        map.extend(identity);
+    }
+    serde_json::json!({
+        "truncated": !omitted.is_empty(),
+        "total_chars": total_chars,
+        "returned_chars": max_chars - remaining,
+        "omitted_fields": omitted,
+        "recovery": "Increase max_chars (up to 32000) or use resolved identifiers for a targeted metadata lookup. Identity fields are outside the content character budget.",
+    })
+}
+
+fn fulltext_page_info(page: &FulltextPage) -> serde_json::Value {
+    serde_json::json!({
+        "offset": page.offset.unwrap_or(0),
+        "next_offset": page.next_offset,
+        "total_chars": page.fulltext.total_chars,
+        "returned_chars": page.fulltext.content.chars().count(),
+        "truncated": page.next_offset.is_some() || page.offset.unwrap_or(0) > 0,
+    })
+}
+
+fn open_content_provenance(resolved: &OpenResolved) -> serde_json::Value {
+    let retrieval = match resolved.content_origin {
+        Some("research_fulltext") => "yams",
+        Some("paperseed_fulltext") => "paperseed_cache",
+        Some("zotero_fulltext" | "zotero_pdf_text") => "zotero_backend",
+        Some("direct_pdf_text") => "http_pdf_download",
+        _ => "unknown",
+    };
+    serde_json::json!({"origin": resolved.content_origin.unwrap_or("unknown"), "retrieval": retrieval})
+}
+
+fn bounded_structure_output(
+    structure: &PaperStructure,
+    selector: Option<&str>,
+    max_chars: usize,
+    offset: usize,
+) -> Result<(serde_json::Value, serde_json::Value)> {
+    // Bound recursion before serde or selector cloning touches recursive sections.
+    let mut stack: Vec<_> = structure.sections.iter().map(|s| (s, 0usize)).collect();
+    let mut section_count = 0usize;
+    while let Some((section, depth)) = stack.pop() {
+        section_count = section_count.saturating_add(1);
+        if depth >= 48 || section_count > 100_000 {
+            return Err(ZoteroMcpError::InvalidInput(
+                "Paper structure exceeds safe nesting/section limits. Try open_paper { hit_id, want: [\"fulltext\"] } with max_chars and offset.".into(),
+            ));
+        }
+        stack.extend(section.subsections.iter().map(|s| (s, depth + 1)));
+    }
+    let mut value = if let Some(selector) = selector {
+        paper::query(structure, selector)?
+    } else {
+        serde_json::to_value(structure)?
+    };
+    if let Some(text) = value.as_str() {
+        let fulltext = FulltextContent {
+            item_key: structure.item_key.clone(),
+            content: text.to_string(),
+            indexed_pages: None,
+            total_pages: None,
+            indexed_chars: None,
+            total_chars: None,
+        };
+        let page = paginate_fulltext(&fulltext, max_chars, offset)?;
+        let mut info = fulltext_page_info(&page);
+        info["selector"] = serde_json::json!(selector);
+        return Ok((serde_json::json!(page.fulltext.content), info));
+    }
+    if offset != 0 {
+        return Err(ZoteroMcpError::InvalidInput(
+            "Structure offset requires a string selector, e.g. sections[0].text; use its structure_page.next_offset.".into(),
+        ));
+    }
+    let mut omitted = Vec::new();
+    let outline =
+        selector.is_none() || selector.is_some_and(|s| s.trim().is_empty() || s.trim() == ".");
+    let mut identity = serde_json::Map::new();
+    let mut source_kind = None;
+    if outline && let Some(map) = value.as_object_mut() {
+        for key in ["item_key", "attachment_key"] {
+            if let Some(v) = map.remove(key) {
+                identity.insert(key.into(), v);
+            }
+        }
+        source_kind = map
+            .get_mut("source")
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|source| source.remove("kind"));
+    }
+    let total_chars = json_string_chars(&value);
+    if outline && let Some(map) = value.as_object_mut() {
+        for key in ["references", "figures"] {
+            if map.remove(key).is_some() {
+                omitted.push(key.to_string());
+            }
+        }
+        if let Some(metadata) = map
+            .get_mut("metadata")
+            .and_then(serde_json::Value::as_object_mut)
+            && metadata.remove("abstract").is_some()
+        {
+            omitted.push("metadata.abstract".into());
+        }
+        if let Some(sections) = map.get_mut("sections") {
+            outline_section_text(sections, "sections", &mut omitted);
+        }
+    }
+    let mut remaining = max_chars;
+    let mut nodes = max_chars.saturating_add(64).min(1024);
+    bound_json_strings(&mut value, &mut remaining, &mut nodes, "", &mut omitted);
+    let returned_chars = max_chars - remaining;
+    if let Some(map) = value.as_object_mut() {
+        map.extend(identity);
+        if let Some(kind) = source_kind {
+            let source = map.entry("source").or_insert_with(|| serde_json::json!({}));
+            if !source.is_object() {
+                *source = serde_json::json!({});
+            }
+            source["kind"] = kind;
+        }
+    }
+    let page = serde_json::json!({
+        "mode": if outline { "outline" } else { "selection" },
+        "truncated": !omitted.is_empty(),
+        "total_chars": total_chars,
+        "returned_chars": returned_chars,
+        "offset": 0,
+        "next_offset": null,
+        "section_count": section_count,
+        "reference_count": structure.references.len(),
+        "figure_count": structure.figures.len(),
+        "omitted_fields": omitted,
+        "available_selectors": available_structure_selectors(structure),
+        "recovery": "Select a field using selector with want: [structure]. String selections support max_chars and UTF-8 offset paging. Counts refer to the complete structure; omitted_fields lists up to 16 examples. Identity and source are envelope metadata, outside the content character budget.",
+    });
+    Ok((value, page))
+}
+
+fn available_structure_selectors(structure: &PaperStructure) -> Vec<String> {
+    let mut selectors = Vec::new();
+    if structure.metadata.title.is_some() {
+        selectors.push("metadata.title".into());
+    }
+    if structure.metadata.abstract_note.is_some() {
+        selectors.push("metadata.abstract".into());
+    }
+    for index in 0..structure.sections.len().min(6) {
+        selectors.push(format!("sections[{index}].text"));
+    }
+    if structure.sections.len() > 6 {
+        selectors.push(format!("sections[{}].text", structure.sections.len() - 1));
+    }
+    if !structure.references.is_empty() {
+        selectors.push("references[0]".into());
+    }
+    if !structure.figures.is_empty() {
+        selectors.push("figures[0]".into());
+    }
+    selectors
+}
+
+fn json_string_chars(value: &serde_json::Value) -> usize {
+    let mut stack = vec![value];
+    let mut chars = 0usize;
+    while let Some(value) = stack.pop() {
+        match value {
+            serde_json::Value::String(s) => chars = chars.saturating_add(s.chars().count()),
+            serde_json::Value::Array(a) => stack.extend(a),
+            serde_json::Value::Object(o) => stack.extend(o.values()),
+            _ => {}
+        }
+    }
+    chars
+}
+
+fn record_omission(omitted: &mut Vec<String>, path: &str) {
+    if omitted.len() < 16 {
+        omitted.push(path.to_string());
+    }
+}
+
+fn outline_section_text(value: &mut serde_json::Value, path: &str, omitted: &mut Vec<String>) {
+    if let Some(sections) = value.as_array_mut() {
+        for (index, section) in sections.iter_mut().enumerate() {
+            let path = format!("{path}[{index}]");
+            if let Some(text) = section
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+            {
+                let count = text.chars().count();
+                section["text_chars"] = serde_json::json!(count);
+                if count > 80 {
+                    section["text"] = serde_json::json!(text.chars().take(80).collect::<String>());
+                    record_omission(omitted, &format!("{path}.text"));
+                }
+            }
+            if let Some(children) = section.get_mut("subsections") {
+                outline_section_text(children, &format!("{path}.subsections"), omitted);
+            }
+        }
+    }
+}
+
+fn bound_json_strings(
+    value: &mut serde_json::Value,
+    remaining: &mut usize,
+    nodes: &mut usize,
+    path: &str,
+    omitted: &mut Vec<String>,
+) {
+    if *nodes == 0 {
+        *value = serde_json::Value::Null;
+        record_omission(omitted, path);
+        return;
+    }
+    *nodes -= 1;
+    match value {
+        serde_json::Value::String(s) => {
+            let count = s.chars().count();
+            if count > *remaining {
+                *s = s.chars().take(*remaining).collect();
+                record_omission(omitted, path);
+            }
+            *remaining = remaining.saturating_sub(count);
+        }
+        serde_json::Value::Array(a) => {
+            let mut returned = 0;
+            for (index, child) in a.iter_mut().enumerate() {
+                if *nodes == 0 {
+                    record_omission(omitted, &format!("{path}[{index}..]"));
+                    break;
+                }
+                bound_json_strings(
+                    child,
+                    remaining,
+                    nodes,
+                    &format!("{path}[{index}]"),
+                    omitted,
+                );
+                returned += 1;
+            }
+            a.truncate(returned);
+        }
+        serde_json::Value::Object(o) => {
+            for (key, child) in o {
+                let child_path = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                bound_json_strings(child, remaining, nodes, &child_path, omitted);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn titles_match(a: &str, b: &str) -> bool {
@@ -2166,37 +2569,7 @@ fn normalize_doi(raw: &str) -> Option<String> {
 }
 
 fn normalize_arxiv_id(raw: &str) -> Option<String> {
-    let lowered = raw.trim().to_lowercase();
-    if lowered.is_empty() {
-        return None;
-    }
-
-    let id = lowered
-        .strip_prefix("https://arxiv.org/abs/")
-        .or_else(|| lowered.strip_prefix("http://arxiv.org/abs/"))
-        .or_else(|| lowered.strip_prefix("arxiv:"))
-        .unwrap_or(lowered.as_str())
-        .trim();
-
-    if id.is_empty() {
-        return None;
-    }
-
-    let normalized = if let Some((base, version)) = id.rsplit_once('v')
-        && base.is_empty().not()
-        && version.is_empty().not()
-        && version.chars().all(|c| c.is_ascii_digit())
-    {
-        base.to_string()
-    } else {
-        id.to_string()
-    };
-
-    if normalized.is_empty() {
-        None
-    } else {
-        Some(normalized)
-    }
+    crate::hit_enrich::normalize_arxiv_str(raw)
 }
 
 fn source_rank_bias(source: crate::models::PaperSource) -> u8 {
@@ -2383,7 +2756,17 @@ mod tests {
             Err(ZoteroMcpError::InvalidInput("unused".to_string()))
         }
 
-        async fn get_pdf_text(&self, _attachment_key: &str) -> Result<FulltextContent> {
+        async fn get_pdf_text(&self, attachment_key: &str) -> Result<FulltextContent> {
+            if attachment_key == "READ_CONTRACT_ATTACHMENT" {
+                return Ok(FulltextContent {
+                    item_key: attachment_key.into(),
+                    content: "Indexed Zotero fulltext".into(),
+                    indexed_pages: None,
+                    total_pages: None,
+                    indexed_chars: None,
+                    total_chars: None,
+                });
+            }
             Err(ZoteroMcpError::InvalidInput("unused".to_string()))
         }
 
@@ -2440,6 +2823,7 @@ mod tests {
         let api = PaperseedApi::new(dir.path().join("corpus"), None);
         let hit = PaperHit {
             hit_id: None,
+            truncation: None,
             source: PaperSource::OpenAlex,
             title: "Open Paper".to_string(),
             authors: vec!["Ada Lovelace".to_string()],
@@ -2469,6 +2853,75 @@ mod tests {
             db.papers[0].paper.metadata.doi.as_deref(),
             Some("10.5555/open")
         );
+    }
+
+    #[tokio::test]
+    async fn compact_search_mirroring_preserves_complete_citation_metadata() {
+        use crate::external::{ArxivClient, HuggingFaceClient, SemanticScholarClient};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let title = "Complete citation title ".repeat(20);
+        let author = "Long author name ".repeat(10);
+        let fixture = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("crates/paperseed/tests/fixtures/arxiv_1408_5939_planar_subgraphs.pdf"),
+        )
+        .unwrap();
+        Mock::given(method("GET"))
+            .and(path("/paper.pdf"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(fixture))
+            .mount(&server)
+            .await;
+        let feed = format!(
+            "<feed xmlns='http://www.w3.org/2005/Atom'><entry><id>http://arxiv.org/abs/1408.5939</id><title>{title}</title><author><name>{author}</name></author><summary>Complete abstract</summary><published>2014-08-25T00:00:00Z</published><link href='{}/paper.pdf' title='pdf' type='application/pdf'/></entry></feed>",
+            server.uri()
+        );
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(feed))
+            .mount(&server)
+            .await;
+        let base = server.uri();
+        let search = PaperSearch::with_clients(
+            ArxivClient::new(Some(&base)),
+            HuggingFaceClient::new(Some(&base), None),
+            SemanticScholarClient::new(Some(&base), None),
+            CrossrefClient::new(Some(&base)),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let service =
+            PaperbridgeService::with_paper_search(Arc::new(StubLocalReadOnlyBackend), search)
+                .with_paperseed(PaperseedMirrorConfig {
+                    corpus_root: Some(dir.path().join("corpus").display().to_string()),
+                    unpaywall_email: None,
+                    auto_download: true,
+                    yams_enabled: false,
+                });
+        let mut opts = SearchOptions::new("Complete citation");
+        opts.sources = Some(vec![PaperSource::Arxiv]);
+        let result = service.search_papers(opts).await.unwrap();
+        assert_eq!(result.hits.len(), 1);
+        assert!(
+            result.hits[0]
+                .truncation
+                .as_ref()
+                .is_some_and(|t| t.title && t.authors)
+        );
+        // The production mirror is deliberately detached; wait only for this local fixture.
+        let paper = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let db = service.paperseed.as_ref().unwrap().corpus_status().unwrap();
+                if let Some(paper) = db.papers.into_iter().next() {
+                    break paper;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("local mirror completed");
+        assert_eq!(paper.paper.metadata.title, title.trim());
+        assert_eq!(paper.paper.metadata.authors, vec![author.trim()]);
     }
 
     #[test]
@@ -2609,7 +3062,7 @@ mod tests {
         );
         assert_eq!(
             structure.source,
-            crate::models::PaperStructureSource::ZoteroFulltext
+            crate::models::PaperStructureSource::PaperseedFulltext
         );
         assert_eq!(structure.sections.len(), 1);
         assert_eq!(structure.sections[0].heading, "Body");
@@ -3210,6 +3663,7 @@ mod tests {
     fn make_hit(source: PaperSource, title: &str, doi: Option<&str>) -> PaperHit {
         PaperHit {
             hit_id: None,
+            truncation: None,
             source,
             title: title.to_string(),
             authors: vec!["A. Author".to_string()],
@@ -3372,10 +3826,8 @@ mod tests {
         // The version-stripper had a partial-id case worth pinning down.
         assert_eq!(normalize_arxiv_id(""), None);
         assert_eq!(normalize_arxiv_id("   "), None);
-        // `v7` alone has no base — version-stripper's empty-base guard
-        // kicks in and we keep the raw "v7" as the ID. That's deliberate;
-        // pin it so future regex edits don't silently accept empty bases.
-        assert_eq!(normalize_arxiv_id("v7"), Some("v7".to_string()));
+        assert_eq!(normalize_arxiv_id("v7"), None);
+        assert_eq!(normalize_arxiv_id("GNN"), None);
     }
 
     #[test]
@@ -3386,6 +3838,159 @@ mod tests {
         let out = normalize_search_text("中文 paper");
         assert!(out.contains("中文"), "got {out:?}");
         assert!(out.contains("paper"));
+    }
+
+    #[tokio::test]
+    async fn audit_fixed_candidate_window_pages_without_repeating_reranked_hits() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/paper/search"))
+            .respond_with(|request: &wiremock::Request| {
+                let rows: usize = request.url.query_pairs().find(|(k, _)| k == "limit").unwrap().1.parse().unwrap();
+                assert!(request.url.query_pairs().find(|(k, _)| k == "query").unwrap().1.contains("graph neural network"));
+                let items = vec![
+                    serde_json::json!({"externalIds":{"DOI":"10.1234/a"}, "title":"Unrelated A"}),
+                    serde_json::json!({"externalIds":{"DOI":"10.1234/b"}, "title":"GNN", "citationCount":1}),
+                    serde_json::json!({"externalIds":{"DOI":"10.1234/c"}, "title":"GNN", "citationCount":100}),
+                ];
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data":items.into_iter().take(rows).collect::<Vec<_>>()}))
+            })
+            .expect(2)
+            .mount(&server).await;
+        let base = server.uri();
+        let search = crate::external::PaperSearch::with_clients(
+            crate::external::ArxivClient::new(Some(&base)),
+            crate::external::HuggingFaceClient::new(Some(&base), None),
+            crate::external::SemanticScholarClient::new(Some(&base), None),
+            crate::crossref::CrossrefClient::new(Some(&base)),
+        );
+        let service =
+            PaperbridgeService::with_paper_search(Arc::new(StubLocalReadOnlyBackend), search);
+        let mut opts = SearchOptions::new("GNN");
+        opts.sources = Some(vec![PaperSource::SemanticScholar]);
+        opts.cache_mode = SearchCacheMode::Off;
+        opts.limit_per_source = 2;
+        opts.limit = 1;
+        let first = service.search_papers(opts.clone()).await.unwrap();
+        assert_eq!(first.hits[0].doi.as_deref(), Some("10.1234/b"));
+        assert_eq!(
+            first.hits[0].match_info.as_ref().unwrap().kind,
+            crate::models::MatchKind::ExactTitle
+        );
+        opts.offset = first.next_offset.unwrap();
+        let second = service.search_papers(opts).await.unwrap();
+        assert_eq!(second.hits[0].doi.as_deref(), Some("10.1234/a"));
+        assert_eq!(first.total_count, second.total_count);
+        assert_eq!(first.total_count, 2);
+        assert!(!second.has_more);
+        assert_eq!(
+            serde_json::to_value(first).unwrap()["count_kind"],
+            "candidate_window"
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_library_counts_and_sentinels_are_honest() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        for count in [0_u32, 1, 2, 3, 100, 101] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(move |request: &wiremock::Request| {
+                    let param = |key: &str| request.url.query_pairs().find(|(k, _)| k == key).unwrap().1.parse::<u32>().unwrap();
+                    let start = param("start");
+                    let limit = param("limit");
+                    assert!(limit <= 100);
+                    let rows: Vec<_> = (start..count).take(limit as usize).map(|i| serde_json::json!({
+                        "key":format!("KEY{i}"), "data":{"title":"Item", "itemType":"journalArticle", "name":"Collection"}
+                    })).collect();
+                    ResponseTemplate::new(200).set_body_json(rows)
+                })
+                .mount(&server).await;
+            let backend = crate::zotero_api::build_backend(crate::config::Config {
+                cloud_api_base: server.uri(),
+                user_id: Some(123),
+                ..crate::config::Config::default()
+            })
+            .unwrap();
+            let service = PaperbridgeService::new(backend);
+            for limit in [2_u32, 100] {
+                for offset in [0_u32, 2, 200] {
+                    let items = service
+                        .search_items_page(SearchItemsQuery {
+                            start: offset,
+                            limit,
+                            ..Default::default()
+                        })
+                        .await
+                        .unwrap();
+                    let collections = service
+                        .list_collections_page(ListCollectionsQuery {
+                            start: offset,
+                            limit,
+                            ..Default::default()
+                        })
+                        .await
+                        .unwrap();
+                    for page in [
+                        serde_json::to_value(items).unwrap(),
+                        serde_json::to_value(collections).unwrap(),
+                    ] {
+                        let has_more = count > offset + limit;
+                        assert_eq!(
+                            page["has_more"], has_more,
+                            "count={count}, offset={offset}, limit={limit}"
+                        );
+                        assert_eq!(
+                            page["hits"].as_array().unwrap().len(),
+                            count.saturating_sub(offset).min(limit) as usize
+                        );
+                        if offset == 0 && !has_more {
+                            assert_eq!(page["total_count"], count);
+                            assert_eq!(page["count_kind"], "exact");
+                        } else {
+                            assert!(page["total_count"].is_null());
+                            assert_eq!(page["count_kind"], "unknown");
+                        }
+                        assert_eq!(
+                            page["next_offset"],
+                            if has_more {
+                                serde_json::json!(offset + limit)
+                            } else {
+                                serde_json::Value::Null
+                            }
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn audit_cache_merge_preserves_external_identifiers_and_pdf() {
+        let mut ext = make_hit(PaperSource::Arxiv, "Paper", Some("10.1234/a"));
+        ext.arxiv_id = Some("2401.00001".into());
+        ext.pmid = Some("12345678".into());
+        ext.pdf_url = Some("https://example.test/a.pdf".into());
+        ext.oa_pdf_url = ext.pdf_url.clone();
+        let mut cached = make_cache_hit("Paper", Some("10.1234/a"));
+        cached.pdf_url = Some("/corpus/a.pdf".into());
+        let mut hits = vec![ext, cached];
+        merge_prefer_cached(&mut hits, 1);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].cache.as_ref().unwrap().cached);
+        assert_eq!(hits[0].arxiv_id.as_deref(), Some("2401.00001"));
+        assert_eq!(hits[0].pmid.as_deref(), Some("12345678"));
+        assert_eq!(
+            hits[0].oa_pdf_url.as_deref(),
+            Some("https://example.test/a.pdf")
+        );
+        assert_eq!(
+            hits[0].pdf_url.as_deref(),
+            Some("https://example.test/a.pdf")
+        );
     }
 
     #[test]
@@ -4049,7 +4654,7 @@ mod tests {
                 paper_id: None,
                 attachment_key: None,
                 url: None,
-                want: vec!["structure".into()],
+                want: vec!["structure".into(), "fulltext".into()],
                 max_chars: Some(2_000),
                 offset: None,
                 selector: None,
@@ -4066,6 +4671,16 @@ mod tests {
         assert_eq!(
             value["resolved"]["url"].as_str(),
             Some(format!("{}/paper.pdf", server.uri()).as_str())
+        );
+        assert_eq!(value["content_provenance"]["origin"], "direct_pdf_text");
+        assert_eq!(
+            value["structure_provenance"]["parser"],
+            "heuristic_fulltext"
+        );
+        assert_eq!(value["structure"]["source"]["kind"], "direct_pdf_text");
+        assert_eq!(
+            value["structure"]["item_key"],
+            value["fulltext"]["item_key"]
         );
     }
 
@@ -4185,6 +4800,268 @@ mod tests {
             value["resolved"]["paper_id"].as_str(),
             Some(wrong_paper.metadata.id.as_str())
         );
+    }
+
+    fn read_request(hit_id: &str, wants: &[&str]) -> OpenPaperRequest {
+        OpenPaperRequest {
+            hit_id: Some(hit_id.into()),
+            doi: None,
+            arxiv_id: None,
+            item_key: None,
+            paper_id: None,
+            attachment_key: None,
+            url: None,
+            want: wants.iter().map(|s| (*s).into()).collect(),
+            max_chars: Some(100),
+            offset: None,
+            selector: None,
+            max_chars_per_chunk: None,
+        }
+    }
+
+    fn cached_read_fixture(content: &str) -> (tempfile::TempDir, PaperbridgeService, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = dir.path().join("corpus");
+        let api = PaperseedApi::with_yams(&corpus, None, paperseed::yams::YamsConfig::disabled());
+        let path = dir.path().join("fixture.txt");
+        std::fs::write(&path, content).unwrap();
+        let paper = api
+            .ingest_with_metadata(
+                &path,
+                paperseed::sources::PaperbridgeMetadata {
+                    title: Some("UNRELATEDKEY Cached Fixture".into()),
+                    doi: None,
+                    arxiv_id: None,
+                    authors: vec![],
+                    year: None,
+                    venue: None,
+                    abstract_note: None,
+                    license: Some("cc-by".into()),
+                    source_url: None,
+                },
+                Some("cc-by".into()),
+            )
+            .unwrap();
+        let service = service().with_paperseed(PaperseedMirrorConfig {
+            corpus_root: Some(corpus.display().to_string()),
+            unpaywall_email: None,
+            auto_download: false,
+            yams_enabled: false,
+        });
+        (dir, service, format!("paperseed:{}", paper.metadata.id))
+    }
+
+    #[tokio::test]
+    async fn read_contract_failed_attachment_never_returns_query_match() {
+        let (_dir, service, _) = cached_read_fixture("UNRELATEDKEY is mentioned in another paper");
+        assert!(
+            service
+                .try_cached_fulltext_by_query("UNRELATEDKEY")
+                .unwrap()
+                .is_some()
+        );
+        assert!(service.get_pdf_text("UNRELATEDKEY").await.is_err());
+        assert!(service.get_item_fulltext("UNRELATEDKEY").await.is_err());
+        let mut req = read_request("", &["fulltext"]);
+        req.hit_id = None;
+        req.attachment_key = Some("UNRELATEDKEY".into());
+        assert!(service.open_paper(req).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn read_contract_rejects_invalid_wants_targets_and_limits() {
+        for wants in [vec!["nonsense"], vec!["metadata", "nonsense"]] {
+            assert!(
+                service()
+                    .open_paper(read_request("arxiv:1706.03762", &wants))
+                    .await
+                    .is_err()
+            );
+        }
+        let mut conflict = read_request("arxiv:1706.03762", &["metadata"]);
+        conflict.paper_id = Some("another".into());
+        assert!(resolve_open_targets(&conflict).is_err());
+        let mut valid = read_request("", &["fulltext"]);
+        valid.hit_id = None;
+        valid.item_key = Some("ITEM".into());
+        valid.attachment_key = Some("ATTACH".into());
+        assert!(resolve_open_targets(&valid).is_ok());
+        for limit in [0, 32_001, usize::MAX] {
+            let mut req = read_request("arxiv:1706.03762", &["metadata"]);
+            req.max_chars = Some(limit);
+            assert!(service().open_paper(req).await.is_err());
+        }
+        let mut req = read_request("arxiv:1706.03762", &["metadata"]);
+        req.selector = Some("metadata.title".into());
+        assert!(service().open_paper(req).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn read_contract_missing_ids_and_identifier_only_metadata() {
+        let error = service()
+            .open_paper(read_request("pmid:999999999", &["metadata"]))
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("https://pubmed.ncbi.nlm.nih.gov/999999999/")
+        );
+        assert!(
+            service()
+                .open_paper(read_request("paperseed:missing", &["metadata"]))
+                .await
+                .is_err()
+        );
+        let value = service()
+            .open_paper(read_request("arxiv:1706.03762", &["metadata"]))
+            .await
+            .unwrap();
+        assert_eq!(value["metadata_status"], "identifier_only");
+    }
+
+    #[tokio::test]
+    async fn read_contract_chunks_only_has_utf8_page_cursor() {
+        let (_dir, service, id) = cached_read_fixture("é日abc");
+        let mut req = read_request(&id, &["chunks"]);
+        req.max_chars = Some(2);
+        let first = service.open_paper(req.clone()).await.unwrap();
+        assert_eq!(first["chunks_page"]["offset"], 0);
+        assert_eq!(first["chunks_page"]["next_offset"], 5);
+        assert_eq!(first["chunks_page"]["returned_chars"], 2);
+        assert_eq!(first["chunks_page"]["total_chars"], 5);
+        assert_eq!(first["chunks_page"]["truncated"], true);
+        req.offset = Some(5);
+        let second = service.open_paper(req).await.unwrap();
+        assert_eq!(second["chunks_page"]["next_offset"], 7);
+    }
+
+    #[tokio::test]
+    async fn read_contract_indexed_backend_provenance_is_not_pdf_extraction() {
+        let mut req = read_request("", &["fulltext", "structure"]);
+        req.hit_id = None;
+        req.attachment_key = Some("READ_CONTRACT_ATTACHMENT".into());
+        let value = service().open_paper(req).await.unwrap();
+        assert_eq!(value["content_provenance"]["origin"], "zotero_fulltext");
+        assert_eq!(value["structure_provenance"]["origin"], "zotero_fulltext");
+        assert_eq!(value["structure"]["source"]["kind"], "zotero_fulltext");
+    }
+
+    #[tokio::test]
+    async fn read_contract_metadata_is_bounded_and_failures_are_structured() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/works/10\.5555(%2F|/)large$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "message": {"DOI": "10.5555/large", "title": ["t".repeat(126_000)], "abstract": "a".repeat(126_000)}
+            })))
+            .mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/works/10\.5555(%2F|/)failed$"))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_string(format!("api_key=private-token {}", "é".repeat(10_000))),
+            )
+            .mount(&server)
+            .await;
+        let mut service = service();
+        service.crossref = CrossrefClient::new(Some(&server.uri()));
+        let value = service
+            .open_paper(read_request("doi:10.5555/large", &["metadata"]))
+            .await
+            .unwrap();
+        assert_eq!(value["metadata"]["doi"], "10.5555/large");
+        assert_eq!(value["metadata_page"]["truncated"], true);
+        assert!(value["metadata_page"]["returned_chars"].as_u64().unwrap() <= 100);
+        assert!(value.to_string().len() < 3000);
+        let failed = service
+            .open_paper(read_request("doi:10.5555/failed", &["metadata"]))
+            .await
+            .unwrap();
+        assert_eq!(failed["metadata_status"], "failed");
+        assert!(failed["metadata_error"].is_object());
+        assert!(!failed.to_string().contains("private-token"));
+        assert!(failed.to_string().len() < 30_000);
+    }
+
+    #[test]
+    fn read_contract_structure_budget_includes_metadata_references_and_figures() {
+        let structure: PaperStructure = serde_json::from_value(serde_json::json!({
+            "item_key": "test", "metadata": {"title": "t".repeat(4000), "authors": ["a".repeat(4000)]},
+            "sections": [{"id": "body", "heading": "h".repeat(4000), "level": 1, "text": "b".repeat(4000)}],
+            "references": [{"id": "r", "raw": "r".repeat(4000), "title": "r".repeat(4000)}],
+            "figures": [{"id": "f", "caption": "f".repeat(4000)}],
+            "source": {"kind": "zotero_fulltext"}
+        })).unwrap();
+        for selector in [None, Some("metadata"), Some("references"), Some("figures")] {
+            let (value, page) = bounded_structure_output(&structure, selector, 100, 0).unwrap();
+            assert!(page["returned_chars"].as_u64().unwrap() <= 100);
+            assert_eq!(page["truncated"], true);
+            assert!(value.to_string().len() < 3000);
+            assert!(serde_json::from_str::<serde_json::Value>(&value.to_string()).is_ok());
+        }
+    }
+
+    #[test]
+    fn read_contract_deep_structures_return_error_without_panicking() {
+        let mut section = crate::models::PaperSection {
+            id: "s".into(),
+            heading: "H".into(),
+            kind: None,
+            level: 1,
+            text: "body".into(),
+            subsections: vec![],
+        };
+        for _ in 0..60 {
+            section = crate::models::PaperSection {
+                subsections: vec![section.clone()],
+                ..section
+            };
+        }
+        let structure = PaperStructure {
+            item_key: "deep".into(),
+            attachment_key: None,
+            metadata: crate::models::PaperMetadata {
+                title: None,
+                authors: vec![],
+                abstract_note: None,
+                doi: None,
+                year: None,
+            },
+            sections: vec![section],
+            references: vec![],
+            figures: vec![],
+            source: crate::models::PaperStructureSource::ZoteroFulltext,
+        };
+        assert!(bounded_structure_output(&structure, None, 100, 0).is_err());
+    }
+
+    #[tokio::test]
+    async fn read_contract_bounds_complete_structure_and_pages_selected_late_text() {
+        let content = format!(
+            "1 Introduction\n{}\n2 Evaluation\né日late result",
+            "a".repeat(126_000)
+        );
+        let (_dir, service, id) = cached_read_fixture(&content);
+        let whole = service
+            .open_paper(read_request(&id, &["structure"]))
+            .await
+            .unwrap();
+        assert_eq!(whole["structure_page"]["truncated"], true);
+        assert!(whole["structure_page"]["total_chars"].as_u64().unwrap() > 126_000);
+        assert!(whole["structure_page"]["returned_chars"].as_u64().unwrap() <= 100);
+        assert_eq!(whole["structure"]["source"]["kind"], "paperseed_fulltext");
+        let mut req = read_request(&id, &["structure"]);
+        req.selector = Some("sections[1].text".into());
+        req.max_chars = Some(2);
+        let first = service.open_paper(req.clone()).await.unwrap();
+        assert_eq!(first["structure"], "é日");
+        assert_eq!(first["structure_page"]["next_offset"], 5);
+        req.offset = Some(5);
+        let second = service.open_paper(req).await.unwrap();
+        assert_eq!(second["structure"], "la");
     }
 
     #[tokio::test]

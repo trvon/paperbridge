@@ -172,6 +172,18 @@ fn provenance_note(source: &PaperStructureSource) -> String {
         PaperStructureSource::ZoteroFulltext => {
             "source: zotero_fulltext — heuristic sectioning, verify against the paper".to_string()
         }
+        PaperStructureSource::PaperseedFulltext => {
+            "source: paperseed_fulltext — cached text with heuristic sectioning".into()
+        }
+        PaperStructureSource::ResearchFulltext => {
+            "source: research_fulltext — YAMS research text with heuristic sectioning".into()
+        }
+        PaperStructureSource::DirectPdfText => {
+            "source: direct_pdf_text — downloaded PDF extraction with heuristic sectioning".into()
+        }
+        PaperStructureSource::ZoteroPdfText => {
+            "source: zotero_pdf_text — Zotero PDF extraction with heuristic sectioning".into()
+        }
         PaperStructureSource::GrobidUnavailable { reason } => {
             format!("source: grobid_unavailable ({reason}) — fell back to full text, verify")
         }

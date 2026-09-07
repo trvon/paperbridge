@@ -1,6 +1,6 @@
 use crate::backend::{BackendCapabilities, BackendMode, LibraryBackend};
 use crate::config::Config;
-use crate::error::{Result, ZoteroMcpError};
+use crate::error::{Result, ZoteroMcpError, sanitize_message};
 use crate::models::{
     AttachmentSummary, CollectionSummary, CollectionUpdateRequest, CollectionWriteRequest,
     CreatorInput, DeleteCollectionRequest, DeleteItemRequest, FulltextContent, ItemDetail,
@@ -17,6 +17,7 @@ use tracing::debug;
 
 const ZOTERO_API_VERSION: &str = "3";
 const MAX_RETRIES: u32 = 5;
+const ERROR_BODY_LIMIT: usize = 4096;
 
 #[derive(Clone)]
 pub struct CloudZoteroBackend {
@@ -51,7 +52,7 @@ impl CloudZoteroBackend {
         loop {
             let url = self.build_url(suffix)?;
             ensure_secure_transport(&url)?;
-            debug!(attempt, %url, "zotero request start");
+            debug!(attempt, url = %self.sanitize(&url), "zotero request start");
             let mut req = self
                 .http
                 .get(url)
@@ -68,8 +69,7 @@ impl CloudZoteroBackend {
                     debug!(
                         attempt,
                         has_api_key = self.config.api_key.is_some(),
-                        error = %err,
-                        error_dbg = ?err,
+                        error = %self.sanitize(&err.to_string()),
                         is_timeout = err.is_timeout(),
                         is_connect = err.is_connect(),
                         status = ?err.status(),
@@ -81,9 +81,7 @@ impl CloudZoteroBackend {
                         continue;
                     }
 
-                    return Err(ZoteroMcpError::Http(format!(
-                        "request failed after retries: {err}"
-                    )));
+                    return Err(self.http_error(format!("request failed after retries: {err}")));
                 }
             };
             let status = response.status();
@@ -99,10 +97,7 @@ impl CloudZoteroBackend {
             }
 
             if !status.is_success() {
-                let body = response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "<failed to read error body>".to_string());
+                let body = self.error_body(response).await;
                 debug!(attempt, status=%status, body_preview=%body.chars().take(200).collect::<String>(), "zotero error response");
                 return Err(ZoteroMcpError::Api {
                     status: status.as_u16(),
@@ -114,19 +109,75 @@ impl CloudZoteroBackend {
             let body = response
                 .text()
                 .await
-                .map_err(|e| ZoteroMcpError::Http(format!("Failed to read response body: {e}")))?;
-            let parsed = serde_json::from_str::<T>(&body).map_err(|e| {
-                let preview: String = body.chars().take(220).collect();
-                ZoteroMcpError::Serde(format!(
-                    "Failed to parse API JSON: {e}. Body preview: {preview}"
-                ))
-            })?;
+                .map_err(|e| self.http_error(format!("Failed to read response body: {e}")))?;
+            let parsed = self.parse_json::<T>(&body)?;
             if let Some(secs) = backoff {
                 sleep(Duration::from_secs(secs)).await;
             }
 
             return Ok(parsed);
         }
+    }
+
+    fn sanitize(&self, message: &str) -> String {
+        sanitize_message(
+            message,
+            &[self.config.api_key.as_deref().unwrap_or_default()],
+        )
+    }
+
+    fn http_error(&self, message: impl AsRef<str>) -> ZoteroMcpError {
+        ZoteroMcpError::Http(self.sanitize(message.as_ref()))
+    }
+
+    fn parse_json<T: for<'de> Deserialize<'de>>(&self, body: &str) -> Result<T> {
+        serde_json::from_str(body).map_err(|error| {
+            // Sanitize before shortening so a preview cannot split a credential.
+            let preview: String = self.sanitize(body).chars().take(220).collect();
+            ZoteroMcpError::Serde(self.sanitize(&format!(
+                "Failed to parse API JSON: {error}. Body preview: {preview}"
+            )))
+        })
+    }
+
+    async fn error_body(&self, mut response: reqwest::Response) -> String {
+        // Read at most one byte beyond the cap to distinguish exact-length bodies.
+        // Do not trust Content-Length or buffer the complete response first.
+        let mut bytes = Vec::with_capacity(ERROR_BODY_LIMIT + 1);
+        while bytes.len() <= ERROR_BODY_LIMIT {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    let remaining = ERROR_BODY_LIMIT + 1 - bytes.len();
+                    bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+                }
+                Ok(None) => break,
+                Err(_) => return self.sanitize("<failed to read error body>"),
+            }
+        }
+        let truncated = bytes.len() > ERROR_BODY_LIMIT;
+        bytes.truncate(ERROR_BODY_LIMIT);
+        if truncated
+            && let Err(error) = std::str::from_utf8(&bytes)
+            && error.error_len().is_none()
+        {
+            bytes.truncate(error.valid_up_to());
+        }
+        let mut message = String::from_utf8_lossy(&bytes).into_owned();
+        if truncated {
+            // The cap may split a known key before the sanitizer can match it.
+            if let Some(key) = self.config.api_key.as_deref()
+                && let Some(end) = key
+                    .char_indices()
+                    .map(|(i, _)| i)
+                    .rev()
+                    .find(|&end| end > 0 && message.ends_with(&key[..end]))
+            {
+                message.truncate(message.len() - end);
+                message.push_str("<redacted>");
+            }
+            message.push_str(" [truncated]");
+        }
+        self.sanitize(&message)
     }
 
     fn build_url(&self, suffix: &str) -> Result<String> {
@@ -160,17 +211,23 @@ impl CloudZoteroBackend {
             request = request.header("Zotero-Write-Token", generate_write_token());
         }
 
-        let response = request.json(&body).send().await?;
+        let response = request
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| self.http_error(e.to_string()))?;
         let status = response.status();
-        let text = response.text().await?;
         if !status.is_success() {
             return Err(ZoteroMcpError::Api {
                 status: status.as_u16(),
-                message: text,
+                message: self.error_body(response).await,
             });
         }
 
-        Ok(text)
+        response
+            .text()
+            .await
+            .map_err(|e| self.http_error(e.to_string()))
     }
 
     async fn send_delete(&self, suffix: &str, version: u64) -> Result<()> {
@@ -186,13 +243,15 @@ impl CloudZoteroBackend {
             request = request.header("Zotero-API-Key", api_key);
         }
 
-        let response = request.send().await?;
+        let response = request
+            .send()
+            .await
+            .map_err(|e| self.http_error(e.to_string()))?;
         let status = response.status();
-        let text = response.text().await?;
         if !status.is_success() {
             return Err(ZoteroMcpError::Api {
                 status: status.as_u16(),
-                message: text,
+                message: self.error_body(response).await,
             });
         }
 
@@ -285,13 +344,10 @@ impl LibraryBackend for CloudZoteroBackend {
         let response = req
             .send()
             .await
-            .map_err(|e| ZoteroMcpError::Http(format!("attachment fetch failed: {e}")))?;
+            .map_err(|e| self.http_error(format!("attachment fetch failed: {e}")))?;
         let status = response.status();
         if !status.is_success() {
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<failed to read error body>".to_string());
+            let body = self.error_body(response).await;
             return Err(ZoteroMcpError::Api {
                 status: status.as_u16(),
                 message: body,
@@ -300,7 +356,7 @@ impl LibraryBackend for CloudZoteroBackend {
         let bytes = response
             .bytes()
             .await
-            .map_err(|e| ZoteroMcpError::Http(format!("attachment body read failed: {e}")))?;
+            .map_err(|e| self.http_error(format!("attachment body read failed: {e}")))?;
         Ok(bytes.to_vec())
     }
 
@@ -317,7 +373,7 @@ impl LibraryBackend for CloudZoteroBackend {
         let text = self
             .send_json_write(reqwest::Method::POST, "/collections", body, None)
             .await?;
-        let result: MultiWriteResponse = serde_json::from_str(&text)?;
+        let result: MultiWriteResponse = self.parse_json(&text)?;
         let saved = result.first_successful().ok_or_else(|| {
             ZoteroMcpError::Serde(
                 "create_collection response missing successful object".to_string(),
@@ -325,6 +381,7 @@ impl LibraryBackend for CloudZoteroBackend {
         })?;
         Ok(CollectionSummary {
             key: saved.key,
+            version: saved.version,
             name: saved
                 .data
                 .get("name")
@@ -345,7 +402,7 @@ impl LibraryBackend for CloudZoteroBackend {
         let text = self
             .send_json_write(reqwest::Method::POST, "/items", payload, None)
             .await?;
-        let result: MultiWriteResponse = serde_json::from_str(&text)?;
+        let result: MultiWriteResponse = self.parse_json(&text)?;
         let saved = result.first_successful().ok_or_else(|| {
             ZoteroMcpError::Serde("create_item response missing successful object".to_string())
         })?;
@@ -364,7 +421,7 @@ impl LibraryBackend for CloudZoteroBackend {
                 Some(version),
             )
             .await?;
-        let raw: RawCollectionRecord = serde_json::from_str(&text)?;
+        let raw: RawCollectionRecord = self.parse_json(&text)?;
         Ok(CollectionSummary::from(raw))
     }
 
@@ -386,7 +443,7 @@ impl LibraryBackend for CloudZoteroBackend {
                 Some(version),
             )
             .await?;
-        let raw: RawItemRecord = serde_json::from_str(&text)?;
+        let raw: RawItemRecord = self.parse_json(&text)?;
         let mut item = ItemDetail::from(raw);
 
         let children_path = format!("/items/{key}/children");
@@ -410,6 +467,11 @@ impl LibraryBackend for CloudZoteroBackend {
 }
 
 fn item_detail_from_saved(saved: RawSavedObject) -> ItemDetail {
+    let creators = saved
+        .data
+        .get("creators")
+        .and_then(|v| serde_json::from_value::<Vec<RawCreator>>(v.clone()).ok())
+        .unwrap_or_default();
     ItemDetail {
         key: saved.key,
         version: saved.version,
@@ -425,12 +487,23 @@ fn item_detail_from_saved(saved: RawSavedObject) -> ItemDetail {
             .and_then(|v| v.as_str())
             .map(str::to_string)
             .unwrap_or_else(|| "(untitled)".to_string()),
-        creators: saved
+        creators: creators_to_strings(&creators),
+        creator_details: creators.into_iter().map(CreatorInput::from).collect(),
+        doi: saved
             .data
-            .get("creators")
-            .and_then(|v| serde_json::from_value::<Vec<RawCreator>>(v.clone()).ok())
-            .map(|v| creators_to_strings(&v))
-            .unwrap_or_default(),
+            .get("DOI")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        venue: saved
+            .data
+            .get("publicationTitle")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        isbn: saved
+            .data
+            .get("ISBN")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
         year: extract_year(saved.data.get("date").and_then(|v| v.as_str())),
         abstract_note: saved
             .data
@@ -716,6 +789,12 @@ struct RawItemData {
     url: Option<String>,
     #[serde(default)]
     abstract_note: Option<String>,
+    #[serde(default, rename = "DOI")]
+    doi: Option<String>,
+    #[serde(default)]
+    publication_title: Option<String>,
+    #[serde(default, rename = "ISBN")]
+    isbn: Option<String>,
     #[serde(default)]
     creators: Vec<RawCreator>,
     #[serde(default)]
@@ -735,6 +814,8 @@ struct RawItemData {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawCreator {
+    #[serde(default)]
+    creator_type: String,
     #[serde(default)]
     first_name: Option<String>,
     #[serde(default)]
@@ -760,6 +841,8 @@ struct RawFulltext {
 #[derive(Debug, Deserialize)]
 struct RawCollectionRecord {
     key: String,
+    #[serde(default)]
+    version: Option<u64>,
     data: RawCollectionData,
     #[serde(default)]
     meta: Option<RawCollectionMeta>,
@@ -845,6 +928,7 @@ impl From<RawItemRecord> for ItemSummary {
             creators: creators_to_strings(&value.data.creators),
             year: extract_year(value.data.date.as_deref()),
             url: value.data.url,
+            doi: value.data.doi,
         }
     }
 }
@@ -864,6 +948,15 @@ impl From<RawItemRecord> for ItemDetail {
                 .filter(|v| !v.trim().is_empty())
                 .unwrap_or_else(|| "(untitled)".to_string()),
             creators: creators_to_strings(&value.data.creators),
+            creator_details: value
+                .data
+                .creators
+                .into_iter()
+                .map(CreatorInput::from)
+                .collect(),
+            doi: value.data.doi,
+            venue: value.data.publication_title,
+            isbn: value.data.isbn,
             year: extract_year(value.data.date.as_deref()),
             abstract_note: value.data.abstract_note,
             url: value.data.url,
@@ -897,6 +990,7 @@ impl From<RawCollectionRecord> for CollectionSummary {
     fn from(value: RawCollectionRecord) -> Self {
         Self {
             key: value.key,
+            version: value.version,
             name: value
                 .data
                 .name
@@ -904,6 +998,17 @@ impl From<RawCollectionRecord> for CollectionSummary {
                 .unwrap_or_else(|| "(untitled collection)".to_string()),
             parent_collection: value.data.parent_collection,
             item_count: value.meta.and_then(|meta| meta.num_items),
+        }
+    }
+}
+
+impl From<RawCreator> for CreatorInput {
+    fn from(value: RawCreator) -> Self {
+        Self {
+            creator_type: value.creator_type,
+            first_name: value.first_name,
+            last_name: value.last_name,
+            name: value.name,
         }
     }
 }
@@ -984,6 +1089,271 @@ mod tests {
             extra: None,
             parent_item: None,
         }
+    }
+
+    fn citation_record() -> serde_json::Value {
+        serde_json::json!({
+            "key": "CITE1", "version": 42,
+            "data": {
+                "itemType": "journalArticle", "title": "Original citation",
+                "DOI": "10.1234/Original.DOI", "publicationTitle": "Original Venue",
+                "ISBN": "978-1-23456-789-0",
+                "creators": [{"creatorType": "editor", "firstName": "Grace", "lastName": "Hopper"}]
+            }
+        })
+    }
+
+    fn assert_citation(item: ItemDetail) {
+        let json = serde_json::to_value(item).unwrap();
+        assert_eq!(json["doi"], "10.1234/Original.DOI");
+        assert_eq!(json["venue"], "Original Venue");
+        assert_eq!(json["isbn"], "978-1-23456-789-0");
+        assert_eq!(json["creators"], serde_json::json!(["Grace Hopper"]));
+        assert_eq!(json["creator_details"][0]["creator_type"], "editor");
+    }
+
+    #[tokio::test]
+    async fn citation_metadata_survives_search_get_create_and_update() {
+        let server = MockServer::start().await;
+        for verb in ["GET", "PUT"] {
+            Mock::given(method(verb))
+                .and(path("/users/123/items/CITE1"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(citation_record()))
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path("/users/123/items/CITE1/children"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/users/123/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(vec![citation_record()]))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/users/123/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "successful": {"0": citation_record()}
+            })))
+            .mount(&server)
+            .await;
+        let backend = CloudZoteroBackend::new(test_config(server.uri())).unwrap();
+        let hits = backend
+            .search_items(SearchItemsQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(hits).unwrap()[0]["doi"],
+            "10.1234/Original.DOI"
+        );
+        assert_citation(backend.get_item("CITE1").await.unwrap());
+        assert_citation(
+            backend
+                .create_item(item_request("Original citation"))
+                .await
+                .unwrap(),
+        );
+        let request = serde_json::from_value(serde_json::json!({
+            "key": "CITE1", "version": 41, "title": "Original citation"
+        }))
+        .unwrap();
+        assert_citation(backend.update_item(request).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn collection_version_survives_list_create_and_update() {
+        let server = MockServer::start().await;
+        let record = serde_json::json!({
+            "key": "COLL1", "version": 73, "data": {"name": "Research", "parentCollection": false}
+        });
+        Mock::given(method("GET"))
+            .and(path("/users/123/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(vec![record.clone()]))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/users/123/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": {"0": record.clone()}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/users/123/collections/COLL1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(record))
+            .mount(&server)
+            .await;
+        let backend = CloudZoteroBackend::new(test_config(server.uri())).unwrap();
+        let collections = backend
+            .list_collections(ListCollectionsQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(serde_json::to_value(collections).unwrap()[0]["version"], 73);
+        let created = backend
+            .create_collection(CollectionWriteRequest {
+                name: "Research".to_string(),
+                parent_collection: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(serde_json::to_value(created).unwrap()["version"], 73);
+        let request = serde_json::from_value(serde_json::json!({
+            "key": "COLL1", "version": 72, "name": "Research"
+        }))
+        .unwrap();
+        let updated = backend.update_collection(request).await.unwrap();
+        assert_eq!(serde_json::to_value(updated).unwrap()["version"], 73);
+    }
+
+    #[tokio::test]
+    async fn upstream_error_bodies_are_bounded_and_redacted_for_all_request_paths() {
+        let server = MockServer::start().await;
+        let prefix = "test-key https://example.test/?api_key=url-secret ";
+        let body = format!(
+            "{prefix}{}界TRAILING-MARKER",
+            "x".repeat(4095 - prefix.len())
+        );
+        for verb in ["GET", "POST", "DELETE"] {
+            Mock::given(method(verb))
+                .respond_with(ResponseTemplate::new(404).set_body_string(body.clone()))
+                .mount(&server)
+                .await;
+        }
+        let backend = CloudZoteroBackend::new(test_config(server.uri())).unwrap();
+        let errors = [
+            backend.get_item("MISSING").await.unwrap_err(),
+            backend.create_item(item_request("X")).await.unwrap_err(),
+            backend
+                .delete_item(DeleteItemRequest {
+                    key: "MISSING".to_string(),
+                    version: Some(1),
+                })
+                .await
+                .unwrap_err(),
+            backend.get_attachment_bytes("MISSING").await.unwrap_err(),
+        ];
+        for error in errors {
+            let ZoteroMcpError::Api { status, message } = error else {
+                panic!("expected API error")
+            };
+            assert_eq!(status, 404);
+            assert!(!message.contains("test-key"));
+            assert!(!message.contains("url-secret"));
+            assert!(!message.contains("TRAILING-MARKER"));
+            assert!(!message.contains('\u{fffd}'));
+            assert!(message.contains("[truncated]"));
+            assert!(message.len() < 4300);
+        }
+    }
+
+    #[tokio::test]
+    async fn error_body_cap_does_not_wait_for_chunked_response_to_finish() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 4096];
+            socket.read(&mut request).await.unwrap();
+            let body = "x".repeat(5000);
+            socket.write_all(format!(
+                "HTTP/1.1 404 Not Found\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{body}\r\n",
+                body.len()
+            ).as_bytes()).await.unwrap();
+            // Keep the stream open without a terminal chunk until the client returns.
+            let _ = done_rx.await;
+        });
+        let mut config = test_config(format!("http://{address}"));
+        config.timeout_secs = 2;
+        let backend = CloudZoteroBackend::new(config).unwrap();
+        let error = backend.get_item("MISSING").await.unwrap_err();
+        let _ = done_tx.send(());
+        server.await.unwrap();
+        assert!(error.to_string().contains("[truncated]"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn error_body_does_not_expose_configured_key_split_by_read_cap() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_string(format!("{}test-key trailing", "x".repeat(4090))),
+            )
+            .mount(&server)
+            .await;
+        let backend = CloudZoteroBackend::new(test_config(server.uri())).unwrap();
+        let message = backend.get_item("MISSING").await.unwrap_err().to_string();
+        assert!(!message.contains("test-k"));
+        assert!(message.ends_with("[truncated]"));
+    }
+
+    #[tokio::test]
+    async fn error_body_exact_limit_and_short_unicode_are_not_marked_truncated() {
+        for body in ["x".repeat(4096), "é界".to_string()] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(404).set_body_string(body.clone()))
+                .mount(&server)
+                .await;
+            let backend = CloudZoteroBackend::new(test_config(server.uri())).unwrap();
+            let ZoteroMcpError::Api { message, .. } =
+                backend.get_item("MISSING").await.unwrap_err()
+            else {
+                panic!("expected API error")
+            };
+            assert_eq!(message, body);
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_response_parse_errors_redact_preview_and_serde_error() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "key": "BAD1", "data": {"parentItem": {
+                "secret": "test-key", "url": "https://example.test/?token=url-secret"
+            }}
+        })
+        .to_string();
+        for verb in ["GET", "PUT", "POST"] {
+            Mock::given(method(verb))
+                .respond_with(ResponseTemplate::new(200).set_body_string(body.clone()))
+                .mount(&server)
+                .await;
+        }
+        let backend = CloudZoteroBackend::new(test_config(server.uri())).unwrap();
+        let request =
+            serde_json::from_value(serde_json::json!({"key": "BAD1", "version": 1})).unwrap();
+        let errors = [
+            backend.get_item("BAD1").await.unwrap_err(),
+            backend.update_item(request).await.unwrap_err(),
+        ];
+        for error in errors {
+            let message = error.to_string();
+            assert!(message.contains("parse API JSON"));
+            assert!(!message.contains("test-key"));
+            assert!(!message.contains("url-secret"));
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_fulltext_is_not_limited_by_error_body_cap() {
+        let server = MockServer::start().await;
+        let content = "界".repeat(5000);
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"content": content})),
+            )
+            .mount(&server)
+            .await;
+        let backend = CloudZoteroBackend::new(test_config(server.uri())).unwrap();
+        assert_eq!(
+            backend.get_item_fulltext("TEXT1").await.unwrap().content,
+            content
+        );
     }
 
     #[test]

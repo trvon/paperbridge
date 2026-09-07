@@ -443,9 +443,10 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
             handle_papers_resolve_doi(config, doi, output).await?;
         }
 
-        Some(Command::Serve) | None => {
-            run_stdio(config).await?;
+        Some(Command::Serve { profile }) => {
+            run_stdio(config, profile).await?;
         }
+        None => run_stdio(config, paperbridge::server::McpProfile::Full).await?,
         Some(Command::Config {
             action: ConfigAction::Path,
         }) => unreachable!("path command handled before config load"),
@@ -1509,10 +1510,13 @@ fn build_service(config: Config) -> paperbridge::Result<PaperbridgeService> {
     })
 }
 
-async fn run_stdio(config: Config) -> paperbridge::Result<()> {
+async fn run_stdio(
+    config: Config,
+    profile: paperbridge::server::McpProfile,
+) -> paperbridge::Result<()> {
     eprintln!("paperbridge ready (stdio)");
     let service = build_service(config)?;
-    let server = PaperbridgeServer::new(service);
+    let server = PaperbridgeServer::with_profile(service, profile);
     let service = server
         .serve(rmcp::transport::stdio())
         .await
@@ -1530,17 +1534,9 @@ enum OutputFormat {
     Json,
 }
 
-#[derive(Debug, Serialize, Eq, PartialEq)]
-struct CliErrorEnvelope {
-    error: &'static str,
-    reason: String,
-    #[serde(rename = "try")]
-    suggestions: Vec<String>,
-}
-
 fn print_runtime_error(error: &paperbridge::ZoteroMcpError, output: OutputFormat) {
     if output.is_json() {
-        let envelope = cli_error_envelope(error);
+        let envelope = paperbridge::error::ErrorEnvelope::from_error(error);
         match serde_json::to_string_pretty(&envelope) {
             Ok(json) => eprintln!("{json}"),
             Err(_) => eprintln!(
@@ -1553,123 +1549,11 @@ fn print_runtime_error(error: &paperbridge::ZoteroMcpError, output: OutputFormat
             ),
         }
     } else {
-        eprintln!("Error: {error}");
+        eprintln!(
+            "Error: {}",
+            paperbridge::error::sanitize_message(&error.to_string(), &[])
+        );
     }
-}
-
-fn cli_error_envelope(error: &paperbridge::ZoteroMcpError) -> CliErrorEnvelope {
-    use paperbridge::ZoteroMcpError;
-
-    let (code, reason, suggestions): (&'static str, String, Vec<String>) = match error {
-        ZoteroMcpError::Config(reason) => (
-            "configuration_error",
-            reason.clone(),
-            commands(&["paperbridge config doctor", "paperbridge config validate"]),
-        ),
-        ZoteroMcpError::MissingConfig(key) => (
-            "missing_configuration",
-            format!("Required configuration key '{key}' is not set."),
-            vec![
-                format!("paperbridge config set {key} <value>"),
-                "paperbridge config init --interactive".to_string(),
-            ],
-        ),
-        ZoteroMcpError::InvalidInput(reason) => (
-            "invalid_input",
-            reason.clone(),
-            invalid_input_suggestions(reason),
-        ),
-        ZoteroMcpError::Http(reason) => (
-            "http_error",
-            reason.clone(),
-            commands(&["paperbridge status", "paperbridge config doctor"]),
-        ),
-        ZoteroMcpError::Api { status, message } => (
-            "zotero_api_error",
-            format!("Zotero API returned HTTP {status}: {message}"),
-            commands(api_error_suggestions(*status)),
-        ),
-        ZoteroMcpError::Serde(reason) => (
-            "serialization_error",
-            reason.clone(),
-            commands(&["paperbridge config doctor", "paperbridge --help"]),
-        ),
-    };
-
-    CliErrorEnvelope {
-        error: code,
-        reason: redact_sensitive_values(&reason),
-        suggestions,
-    }
-}
-
-fn commands(values: &[&str]) -> Vec<String> {
-    values.iter().map(|value| (*value).to_string()).collect()
-}
-
-fn invalid_input_suggestions(reason: &str) -> Vec<String> {
-    if reason.contains("Unknown config key") {
-        commands(&["paperbridge config get", "paperbridge config --help"])
-    } else if reason.contains("JSON corpus export requires --json") {
-        commands(&["paperbridge paperseed corpus export --json"])
-    } else if reason.contains("--format bibtex conflicts with --json") {
-        commands(&[
-            "paperbridge paperseed corpus export --format bibtex",
-            "paperbridge paperseed corpus export --json",
-        ])
-    } else if reason.contains("search query") || reason.contains("Search query") {
-        commands(&["paperbridge papers search --help"])
-    } else {
-        commands(&["paperbridge --help"])
-    }
-}
-
-fn api_error_suggestions(status: u16) -> &'static [&'static str] {
-    match status {
-        401 | 403 => &[
-            "paperbridge config set api_key <your-key>",
-            "paperbridge config validate",
-        ],
-        404 => &[
-            "paperbridge papers search --help",
-            "paperbridge library query --help",
-        ],
-        412 => &[
-            "paperbridge library query --help",
-            "paperbridge item update --help",
-        ],
-        429 => &["paperbridge status"],
-        _ => &["paperbridge status", "paperbridge config doctor"],
-    }
-}
-
-fn redact_sensitive_values(reason: &str) -> String {
-    const SECRET_ENV_KEYS: &[&str] = &[
-        "PAPERBRIDGE_API_KEY",
-        "PAPERBRIDGE_HF_TOKEN",
-        "PAPERBRIDGE_SEMANTIC_SCHOLAR_API_KEY",
-        "PAPERBRIDGE_CORE_API_KEY",
-        "PAPERBRIDGE_ADS_API_TOKEN",
-        "PAPERBRIDGE_NCBI_API_KEY",
-        "PAPERBRIDGE_SCHOLARAPI_KEY",
-        "ZOTERO_MCP_API_KEY",
-        "HF_TOKEN",
-        "SEMANTIC_SCHOLAR_API_KEY",
-        "CORE_API_KEY",
-        "ADS_API_TOKEN",
-        "NCBI_API_KEY",
-        "SCHOLARAPI_KEY",
-    ];
-
-    let mut redacted = reason.to_string();
-    for key in SECRET_ENV_KEYS {
-        if let Ok(secret) = std::env::var(key)
-            && !secret.is_empty()
-        {
-            redacted = redacted.replace(&secret, "<redacted>");
-        }
-    }
-    redacted
 }
 
 impl OutputFormat {

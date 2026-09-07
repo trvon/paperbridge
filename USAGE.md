@@ -125,8 +125,13 @@ If `PAPERBRIDGE_API_KEY` is set, init can resolve user ID from the key endpoint.
 Run stdio MCP server:
 
 ```bash
-paperbridge serve
+paperbridge serve                 # full compatibility surface
+paperbridge serve --profile core  # six discovery/read tools
 ```
+
+MCP returns typed structured content and compatible JSON text. See
+[model-output migration notes](docs/design/model-output-remediation.md) for
+bounded reads, nullable library totals, fixed search windows, and recovery errors.
 
 Generate client snippets:
 

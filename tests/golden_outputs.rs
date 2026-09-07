@@ -102,7 +102,10 @@ async fn build_service_with_mocks() -> PaperbridgeService {
                 "title": "Graph Learning at Scale",
                 "date": "2024-08-01",
                 "abstractNote": "A practical systems paper.",
-                "creators": [{"firstName": "Grace", "lastName": "Hopper"}],
+                "DOI": "10.1234/Original.DOI",
+                "publicationTitle": "Original Venue",
+                "ISBN": "978-1-23456-789-0",
+                "creators": [{"creatorType": "editor", "firstName": "Grace", "lastName": "Hopper"}],
                 "url": "https://example.org/graph"
             }
         })))

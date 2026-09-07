@@ -32,8 +32,6 @@ use crate::models::{
 use crate::request_router::{RoutedResponse, global_request_router};
 use futures::future::BoxFuture;
 use futures::future::FutureExt;
-use std::collections::HashSet;
-use std::ops::Not;
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -83,23 +81,22 @@ impl SearchOptions {
         lim.min(MAX_PAGE_LIMIT)
     }
 
-    /// Fetch enough of each source's ranked prefix to cover the requested
-    /// merged page plus one sentinel candidate. This keeps offset pagination
-    /// moving beyond the initial fan-out window even though source adapters do
-    /// not yet expose a uniform offset API.
+    /// Fixed per-source candidate prefix for bounded stateless pagination.
+    /// Offset/page size must not expand this pool: reranking a larger prefix
+    /// between pages can repeat or skip hits. Upstream changes can still reorder it.
     pub fn source_fetch_limit(&self) -> u32 {
-        self.limit_per_source.max(
-            self.offset
-                .saturating_add(self.page_limit())
-                .saturating_add(1),
-        )
+        if self.limit_per_source == 0 {
+            DEFAULT_LIMIT_PER_SOURCE
+        } else {
+            self.limit_per_source
+        }
     }
 
     pub fn validate_source_fetch_limit(&self) -> Result<()> {
         let fetch_limit = self.source_fetch_limit();
         if fetch_limit > MAX_SOURCE_FETCH_LIMIT {
             return Err(ZoteroMcpError::InvalidInput(format!(
-                "search window requires {fetch_limit} hits per source, above the safe maximum of {MAX_SOURCE_FETCH_LIMIT}. Narrow the query or use a smaller offset."
+                "limit_per_source is {fetch_limit}, above the safe maximum of {MAX_SOURCE_FETCH_LIMIT}. Use a smaller limit_per_source."
             )));
         }
         Ok(())
@@ -388,7 +385,7 @@ impl PaperSearch {
                 SourceRunResult::Disabled => {}
                 SourceRunResult::Ok(hits) => {
                     diagnostics.sources_ok.push(name);
-                    merged.extend(hits);
+                    merged.extend(hits.into_iter().take(limit as usize));
                 }
                 SourceRunResult::Skipped { reason } => {
                     diagnostics.sources_skipped.push(SourceDiagnostic {
@@ -461,6 +458,7 @@ where
     match timeout(dur, fut).await {
         Ok(Ok(hits)) => (source, SourceRunResult::Ok(hits)),
         Ok(Err(ZoteroMcpError::MissingConfig(reason))) => {
+            let reason = crate::error::sanitize_message(&reason, &[]);
             tracing::debug!(?source, %reason, "source skipped");
             (source, SourceRunResult::Skipped { reason })
         }
@@ -468,22 +466,14 @@ where
             status: 429,
             message,
         })) => {
-            tracing::debug!(?source, status = 429, reason = "rate_limited", %message, "source rate-limited after retry");
-            (
-                source,
-                SourceRunResult::Failed {
-                    reason: format!("rate_limited: {message}"),
-                },
-            )
+            let reason = crate::error::sanitize_message(&format!("rate_limited: {message}"), &[]);
+            tracing::debug!(?source, status = 429, %reason, "source rate-limited after retry");
+            (source, SourceRunResult::Failed { reason })
         }
         Ok(Err(e)) => {
-            tracing::debug!(?source, error = %e, "source search failed");
-            (
-                source,
-                SourceRunResult::Failed {
-                    reason: e.to_string(),
-                },
-            )
+            let reason = crate::error::sanitize_message(&e.to_string(), &[]);
+            tracing::debug!(?source, %reason, "source search failed");
+            (source, SourceRunResult::Failed { reason })
         }
         Err(_) => {
             tracing::debug!(?source, "source search timed out");
@@ -507,39 +497,111 @@ pub(crate) async fn send_with_retry(
 }
 
 fn dedupe(hits: Vec<PaperHit>) -> Vec<PaperHit> {
-    let mut seen_doi: HashSet<String> = HashSet::new();
-    let mut seen_arxiv: HashSet<String> = HashSet::new();
-    let mut seen_pmid: HashSet<String> = HashSet::new();
-    let mut seen_titlekey: HashSet<String> = HashSet::new();
     let mut out: Vec<PaperHit> = Vec::with_capacity(hits.len());
-
     for hit in hits {
-        if let Some(doi) = hit.doi.as_deref() {
-            let key = normalize_doi_key(doi).unwrap_or_default();
-            if !key.is_empty() && !seen_doi.insert(key) {
-                continue;
+        if let Some(mut index) = out
+            .iter()
+            .position(|existing| compatible_identity(existing, &hit))
+        {
+            merge_hit_metadata(&mut out[index], hit);
+            // Promoted IDs can connect records that previously had no shared ID.
+            // Recheck against the merged evidence; contradictions still veto.
+            let mut candidate = 0;
+            while candidate < out.len() {
+                if candidate != index && compatible_identity(&out[index], &out[candidate]) {
+                    let kept = index.min(candidate);
+                    let other = out.remove(index.max(candidate));
+                    merge_hit_metadata(&mut out[kept], other);
+                    index = kept;
+                    candidate = 0;
+                } else {
+                    candidate += 1;
+                }
             }
+        } else {
+            out.push(hit);
         }
-        if let Some(arxiv) = hit.arxiv_id.as_deref() {
-            let key = strip_arxiv_version(arxiv).to_ascii_lowercase();
-            if key.is_empty().not() && seen_arxiv.insert(key).not() {
-                continue;
-            }
-        }
-        if let Some(pmid) = hit.pmid.as_deref() {
-            let key = pmid.trim().to_string();
-            if key.is_empty().not() && seen_pmid.insert(key).not() {
-                continue;
-            }
-        }
-        let title_key = title_authors_key(&hit);
-        if title_key.is_empty().not() && seen_titlekey.insert(title_key).not() {
-            continue;
-        }
-        out.push(hit);
     }
-
     out
+}
+
+/// Strong-ID contradictions veto even a matching title or another shared ID.
+/// Without a shared ID, require both title and a nonempty author to corroborate.
+pub(crate) fn compatible_identity(left: &PaperHit, right: &PaperHit) -> bool {
+    let pairs = [
+        (doi_key(left), doi_key(right)),
+        (arxiv_key(left), arxiv_key(right)),
+        (pmid_key(left), pmid_key(right)),
+    ];
+    if pairs
+        .iter()
+        .any(|(a, b)| matches!((a, b), (Some(a), Some(b)) if a != b))
+    {
+        return false;
+    }
+    pairs.iter().any(|(a, b)| a.is_some() && a == b)
+        || title_author_key(left).is_some_and(|key| Some(key) == title_author_key(right))
+}
+
+/// Keep the preferred source/cached record while promoting complementary metadata.
+pub(crate) fn merge_hit_metadata(kept: &mut PaperHit, other: PaperHit) {
+    kept.doi = kept
+        .doi
+        .take()
+        .filter(|s| !s.trim().is_empty())
+        .or(other.doi);
+    kept.arxiv_id = kept
+        .arxiv_id
+        .take()
+        .filter(|s| !s.trim().is_empty())
+        .or(other.arxiv_id);
+    kept.pmid = kept
+        .pmid
+        .take()
+        .filter(|s| !s.trim().is_empty())
+        .or(other.pmid);
+    kept.year = kept.year.take().or(other.year);
+    kept.abstract_note = kept.abstract_note.take().or(other.abstract_note);
+    kept.url = kept.url.take().or(other.url);
+    // Local file paths remain reachable through cache.paper_id; retain the
+    // externally usable PDF URL instead when the preferred hit only has a path.
+    if !kept
+        .pdf_url
+        .as_deref()
+        .is_some_and(crate::hit_enrich::usable_http_url)
+        && other
+            .pdf_url
+            .as_deref()
+            .is_some_and(crate::hit_enrich::usable_http_url)
+    {
+        kept.pdf_url = other.pdf_url;
+    } else {
+        kept.pdf_url = kept.pdf_url.take().or(other.pdf_url);
+    }
+    kept.oa_pdf_url = kept.oa_pdf_url.take().or(other.oa_pdf_url);
+    kept.venue = kept.venue.take().or(other.venue);
+    kept.citation_count = kept.citation_count.max(other.citation_count);
+    kept.cache = kept.cache.take().or(other.cache);
+    kept.relevance_score = kept.relevance_score.or(other.relevance_score);
+    for author in other.authors {
+        if !kept
+            .authors
+            .iter()
+            .any(|a| normalize_text_key(a) == normalize_text_key(&author))
+        {
+            kept.authors.push(author);
+        }
+    }
+    if let Some(access) = other.access {
+        if let Some(existing) = kept.access.as_mut() {
+            existing.pdf |= access.pdf;
+            existing.cached |= access.cached;
+            existing.full_text |= access.full_text;
+            existing.content_state = existing.content_state.or(access.content_state);
+        } else {
+            kept.access = Some(access);
+        }
+    }
 }
 
 pub(crate) fn doi_key(hit: &PaperHit) -> Option<String> {
@@ -583,7 +645,7 @@ fn title_authors_key(hit: &PaperHit) -> String {
         .map(|a| normalize_text_key(a))
         .unwrap_or_default();
 
-    if title_norm.is_empty() {
+    if title_norm.is_empty() || first_author_norm.is_empty() {
         String::new()
     } else {
         format!("{title_norm}||{first_author_norm}")
@@ -748,6 +810,7 @@ mod tests {
     ) -> PaperHit {
         PaperHit {
             hit_id: None,
+            truncation: None,
             source,
             title: title.to_string(),
             authors: author.map(|a| vec![a.to_string()]).unwrap_or_default(),
@@ -889,6 +952,128 @@ mod tests {
     }
 
     #[test]
+    fn audit_dedupe_preserves_complementary_identity_and_access() {
+        let first = mk(
+            PaperSource::Crossref,
+            "Paper",
+            Some("10.1234/p"),
+            None,
+            None,
+        );
+        let mut second = mk(
+            PaperSource::Arxiv,
+            "Paper",
+            Some("10.1234/p"),
+            Some("2401.00001"),
+            Some("Author"),
+        );
+        second.pdf_url = Some("https://example.test/p.pdf".into());
+        second.oa_pdf_url = second.pdf_url.clone();
+        second.pmid = Some("12345678".into());
+        let out = dedupe(vec![first, second]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].arxiv_id.as_deref(), Some("2401.00001"));
+        assert_eq!(out[0].pmid.as_deref(), Some("12345678"));
+        assert_eq!(out[0].authors, vec!["Author"]);
+        assert_eq!(
+            out[0].pdf_url.as_deref(),
+            Some("https://example.test/p.pdf")
+        );
+        assert_eq!(out[0].oa_pdf_url, out[0].pdf_url);
+    }
+
+    #[test]
+    fn audit_dedupe_rejects_conflicting_ids_even_with_title_author_match() {
+        let first = mk(
+            PaperSource::Crossref,
+            "Paper",
+            Some("10.1234/a"),
+            None,
+            Some("Author"),
+        );
+        let second = mk(
+            PaperSource::Arxiv,
+            "Paper",
+            Some("10.1234/b"),
+            None,
+            Some("Author"),
+        );
+        assert_eq!(dedupe(vec![first, second]).len(), 2);
+        let first = mk(
+            PaperSource::Crossref,
+            "Paper",
+            Some("10.1234/a"),
+            Some("2401.00001"),
+            Some("Author"),
+        );
+        let second = mk(
+            PaperSource::Arxiv,
+            "Paper",
+            Some("10.1234/a"),
+            Some("2401.00002"),
+            Some("Author"),
+        );
+        assert_eq!(dedupe(vec![first, second]).len(), 2);
+    }
+
+    #[test]
+    fn audit_dedupe_promoted_ids_join_previously_disjoint_records() {
+        let doi = mk(
+            PaperSource::Crossref,
+            "DOI title",
+            Some("10.1234/a"),
+            None,
+            None,
+        );
+        let arxiv = mk(
+            PaperSource::Arxiv,
+            "Preprint title",
+            None,
+            Some("2401.00001"),
+            Some("Author"),
+        );
+        let bridge = mk(
+            PaperSource::SemanticScholar,
+            "Bridge",
+            Some("10.1234/a"),
+            Some("2401.00001v2"),
+            None,
+        );
+        let out = dedupe(vec![doi, arxiv, bridge]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].source, PaperSource::Crossref);
+        assert_eq!(out[0].authors, vec!["Author"]);
+    }
+
+    #[test]
+    fn audit_dedupe_empty_metadata_does_not_hide_complementary_ids() {
+        let first = mk(
+            PaperSource::Crossref,
+            "Paper",
+            Some(" "),
+            None,
+            Some("Author"),
+        );
+        let second = mk(
+            PaperSource::Arxiv,
+            "Paper",
+            Some("10.1234/a"),
+            None,
+            Some("Author"),
+        );
+        let out = dedupe(vec![first, second]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].doi.as_deref(), Some("10.1234/a"));
+    }
+
+    #[test]
+    fn audit_dedupe_requires_author_corroboration_for_title_fallback() {
+        let first = mk(PaperSource::Crossref, "Paper", None, None, None);
+        let second = mk(PaperSource::Arxiv, "Paper", None, None, None);
+        assert_eq!(dedupe(vec![first, second]).len(), 2);
+    }
+
+    #[test]
     fn dedupe_keeps_distinct_hits() {
         let hits = vec![
             mk(
@@ -936,19 +1121,78 @@ mod tests {
     }
 
     #[test]
-    fn source_fetch_limit_expands_for_later_pages() {
+    fn source_fetch_limit_is_fixed_across_pages() {
         let mut opts = SearchOptions::new("q");
-        opts.limit_per_source = 10;
-        opts.offset = 10;
-        opts.limit = 5;
-        assert_eq!(opts.source_fetch_limit(), 16);
+        assert_eq!(opts.source_fetch_limit(), 10);
+        opts.limit_per_source = 2;
+        for offset in [0, 1, 10, u32::MAX] {
+            opts.offset = offset;
+            opts.limit = 50;
+            assert_eq!(opts.source_fetch_limit(), 2);
+            assert!(opts.validate_source_fetch_limit().is_ok());
+        }
+        opts.limit_per_source = 0;
+        assert_eq!(opts.source_fetch_limit(), 10);
     }
 
     #[test]
     fn source_fetch_limit_rejects_unsafe_windows() {
         let mut opts = SearchOptions::new("q");
-        opts.offset = MAX_SOURCE_FETCH_LIMIT;
+        opts.limit_per_source = MAX_SOURCE_FETCH_LIMIT + 1;
         assert!(opts.validate_source_fetch_limit().is_err());
+    }
+
+    #[tokio::test]
+    async fn diagnostic_conversion_bounds_provider_error_not_just_timeouts() {
+        let message = format!(
+            "https://example.org?api_key=provider-secret {}",
+            "é".repeat(5000)
+        );
+        let (_, result) = run_source(
+            PaperSource::Arxiv,
+            true,
+            Duration::from_secs(1),
+            async {
+                Err::<Vec<PaperHit>, _>(ZoteroMcpError::Api {
+                    status: 500,
+                    message,
+                })
+            },
+            false,
+        )
+        .await;
+        let SourceRunResult::Failed { reason } = result else {
+            panic!("expected source failure")
+        };
+        assert!(reason.len() <= crate::error::MAX_ERROR_BYTES);
+        assert!(!reason.contains("provider-secret"));
+    }
+
+    #[tokio::test]
+    async fn audit_search_diagnostics_bound_and_redact_upstream_errors() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500).set_body_string(format!(
+                "https://example.test/?api_key=secret-token {}",
+                "é".repeat(5000)
+            )))
+            .mount(&server)
+            .await;
+        let base = server.uri();
+        let search = PaperSearch::with_clients(
+            ArxivClient::new(Some(&base)),
+            HuggingFaceClient::new(Some(&base), None),
+            SemanticScholarClient::new(Some(&base), None),
+            CrossrefClient::new(Some(&base)),
+        );
+        let mut opts = SearchOptions::new("test");
+        opts.sources = Some(vec![PaperSource::SemanticScholar]);
+        let result = search.search(opts).await.unwrap();
+        let reason = &result.diagnostics.sources_failed[0].reason;
+        assert!(reason.len() <= crate::error::MAX_ERROR_BYTES);
+        assert!(!reason.contains("secret-token"));
     }
 
     #[tokio::test]

@@ -196,6 +196,7 @@ fn convert_doc(uid: String, d: RawSummaryDoc) -> PaperHit {
 
     PaperHit {
         hit_id: None,
+        truncation: None,
         source: PaperSource::Pubmed,
         title: d.title.unwrap_or_default(),
         authors,
