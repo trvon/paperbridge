@@ -6,7 +6,7 @@ description = "BM25F index for the paperseed local paper corpus"
 license = "MIT"
 
 [dependencies]
-bincode = "1"
+bincode = "3"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 unicode-normalization = "0.1"
