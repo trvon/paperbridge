@@ -1,7 +1,7 @@
 class Paperbridge < Formula
   desc "MCP and CLI bridge for Zotero search and PDF/full-text retrieval"
   homepage "https://github.com/trvon/paperbridge"
-  version "1.0.1" # x-release-please-version
+  version "2.0.0" # x-release-please-version
   license "MIT"
 
   on_macos do
