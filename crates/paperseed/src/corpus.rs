@@ -33,6 +33,8 @@ pub fn paper_from_stored_file(
             title: title.into(),
             doi: None,
             arxiv_id: None,
+            isbn: None,
+            work_type: None,
             authors: Vec::new(),
             year: None,
             venue: None,

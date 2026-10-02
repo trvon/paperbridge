@@ -1,6 +1,7 @@
 pub mod access;
 pub mod backend;
 pub mod backends;
+pub mod book;
 pub mod chunking;
 pub mod cli;
 pub mod config;

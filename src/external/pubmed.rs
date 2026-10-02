@@ -215,6 +215,8 @@ fn convert_doc(uid: String, d: RawSummaryDoc) -> PaperHit {
         ids: None,
         match_info: None,
         access: None,
+        work_type: None,
+        isbn: None,
         next: Vec::new(),
     }
 }

@@ -124,6 +124,147 @@ fn hard_split(sentence: &str, max_chars: usize) -> Vec<String> {
     out
 }
 
+/// Split technical text (such as book chapters or code-heavy documentation)
+/// while preserving markdown fenced code blocks and optional breadcrumbs.
+pub(crate) fn split_technical_content(
+    input: &str,
+    max_chars: usize,
+    breadcrumb: Option<&str>,
+) -> Vec<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let prefix = breadcrumb.map(|b| format!("{b}\n\n")).unwrap_or_default();
+    let prefix_len = prefix.chars().count();
+    let target_max = max_chars.saturating_sub(prefix_len).clamp(1, max_chars);
+
+    let blocks = segment_markdown_blocks(trimmed);
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+
+    for block in blocks {
+        let block_len = block.chars().count();
+        if block_len > target_max {
+            if !current.is_empty() {
+                chunks.push(format!("{prefix}{}", current.trim()));
+                current.clear();
+            }
+            for part in line_split_block(&block, target_max) {
+                chunks.push(format!("{prefix}{}", part.trim()));
+            }
+            continue;
+        }
+
+        if current.is_empty() {
+            current.push_str(&block);
+            continue;
+        }
+
+        let needed = current.chars().count() + 2 + block_len;
+        if needed <= target_max {
+            current.push_str("\n\n");
+            current.push_str(&block);
+        } else {
+            chunks.push(format!("{prefix}{}", current.trim()));
+            current.clear();
+            current.push_str(&block);
+        }
+    }
+
+    if !current.is_empty() {
+        chunks.push(format!("{prefix}{}", current.trim()));
+    }
+
+    chunks
+}
+
+fn segment_markdown_blocks(text: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current_block = String::new();
+    let mut in_code_block = false;
+
+    for line in text.lines() {
+        let trimmed_line = line.trim();
+        if trimmed_line.starts_with("```") {
+            in_code_block = !in_code_block;
+            current_block.push_str(line);
+            current_block.push('\n');
+            if !in_code_block {
+                blocks.push(current_block.trim_end().to_string());
+                current_block.clear();
+            }
+            continue;
+        }
+
+        if in_code_block {
+            current_block.push_str(line);
+            current_block.push('\n');
+            continue;
+        }
+
+        if trimmed_line.is_empty() {
+            if !current_block.trim().is_empty() {
+                blocks.push(current_block.trim_end().to_string());
+                current_block.clear();
+            }
+        } else {
+            if !current_block.is_empty() {
+                current_block.push('\n');
+            }
+            current_block.push_str(line);
+        }
+    }
+
+    if !current_block.trim().is_empty() {
+        blocks.push(current_block.trim_end().to_string());
+    }
+
+    blocks
+}
+
+fn line_split_block(block: &str, max_chars: usize) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+
+    for line in block.lines() {
+        if line.chars().count() > max_chars {
+            if !current.is_empty() {
+                parts.push(current.trim_end().to_string());
+                current.clear();
+            }
+            for chunk in hard_split(line, max_chars) {
+                parts.push(chunk);
+            }
+            continue;
+        }
+
+        let needed = if current.is_empty() {
+            line.chars().count()
+        } else {
+            current.chars().count() + 1 + line.chars().count()
+        };
+
+        if needed <= max_chars {
+            if !current.is_empty() {
+                current.push('\n');
+            }
+            current.push_str(line);
+        } else {
+            parts.push(current.trim_end().to_string());
+            current.clear();
+            current.push_str(line);
+        }
+    }
+
+    if !current.is_empty() {
+        parts.push(current.trim_end().to_string());
+    }
+
+    parts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,5 +289,27 @@ mod tests {
         let chunks = split_for_tts(input, 40);
         assert!(chunks.len() > 1);
         assert!(chunks.iter().all(|c| c.len() <= 40));
+    }
+
+    #[test]
+    fn split_technical_content_preserves_code_blocks_and_breadcrumb() {
+        let input = "\
+Overview of data encoding.
+
+```rust
+struct Record {
+    id: u64,
+    name: String,
+}
+```
+
+Summary of binary serialization.";
+
+        let chunks = split_technical_content(input, 200, Some("[Designing Data > Chapter 4]"));
+        assert!(!chunks.is_empty());
+        assert!(chunks[0].starts_with("[Designing Data > Chapter 4]"));
+        // Check code block is intact in one of the chunks
+        let has_code = chunks.iter().any(|c| c.contains("```rust\nstruct Record"));
+        assert!(has_code);
     }
 }

@@ -4,7 +4,7 @@ use crate::config::InstitutionAccessMode;
 use crate::crossref::CrossrefClient;
 use crate::error::{Result, ZoteroMcpError};
 use crate::external::{PaperSearch, PaperSearchOutcome, SearchOptions, UnpaywallClient};
-use crate::hit_enrich::{apply_detail, enrich_hit_identity, enrich_match};
+use crate::hit_enrich::{apply_detail, enrich_hit_identity};
 use crate::models::{
     BackendInfo, CachedPaperDetail, CachedPaperSummary, CollectionListResult, CollectionSummary,
     CollectionUpdateRequest, CollectionWriteRequest, ContentState, CrossrefWork,
@@ -56,11 +56,13 @@ pub struct PrepareSearchResultForVoxRequest {
     pub max_chars_per_chunk: Option<usize>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct OpenPaperRequest {
     pub hit_id: Option<String>,
     pub doi: Option<String>,
     pub arxiv_id: Option<String>,
+    pub isbn: Option<String>,
+    pub chapter: Option<u32>,
     pub item_key: Option<String>,
     pub paper_id: Option<String>,
     pub attachment_key: Option<String>,
@@ -288,9 +290,10 @@ impl PaperbridgeService {
 
         // Persist complete citations, never display-truncated search projections.
         self.mirror_open_access_hits(&hits);
+        let prepared_query = crate::hit_enrich::PreparedQuery::new(&original_query);
         for hit in &mut hits {
             enrich_hit_identity(hit);
-            enrich_match(hit, &original_query);
+            crate::hit_enrich::enrich_match_prepared(hit, &prepared_query);
             apply_detail(hit, detail, abstract_max_chars);
         }
 
@@ -339,17 +342,33 @@ impl PaperbridgeService {
                 .collect()
         };
 
-        if wants
-            .iter()
-            .any(|w| !matches!(w.as_str(), "metadata" | "fulltext" | "structure" | "chunks"))
-        {
+        if wants.iter().any(|w| {
+            !matches!(
+                w.as_str(),
+                "metadata" | "fulltext" | "structure" | "chunks" | "toc" | "chapter"
+            )
+        }) {
             return Err(ZoteroMcpError::InvalidInput(
-                "want accepts only metadata, fulltext, structure, chunks. Try open_paper { hit_id, want: [\"metadata\"] }.".into(),
+                "want accepts only metadata, fulltext, structure, chunks, toc, chapter. Try open_paper { hit_id, want: [\"metadata\"] }.".into(),
             ));
         }
         if req.selector.is_some() && !wants.iter().any(|w| w == "structure") {
             return Err(ZoteroMcpError::InvalidInput(
                 "selector requires want: [\"structure\"].".into(),
+            ));
+        }
+        if wants.iter().any(|w| w == "chapter") && resolved.chapter.is_none() {
+            return Err(ZoteroMcpError::InvalidInput(
+                "want: [\"chapter\"] requires specifying which chapter to read (e.g. chapter: 1). Use want: [\"toc\"] to view available chapters.".into(),
+            ));
+        }
+        if resolved.chapter.is_some()
+            && !wants
+                .iter()
+                .any(|w| w == "chapter" || w == "fulltext" || w == "chunks")
+        {
+            return Err(ZoteroMcpError::InvalidInput(
+                "chapter was specified, but want did not include \"chapter\", \"fulltext\", or \"chunks\".".into(),
             ));
         }
         if let Some(pid) = resolved.paper_id.as_deref() {
@@ -390,6 +409,15 @@ impl PaperbridgeService {
                 } else {
                     return Err(missing_cached_paper(pid));
                 }
+            } else if let Some(isbn) = resolved.isbn.as_deref() {
+                out.insert(
+                    "metadata".into(),
+                    serde_json::json!({
+                        "isbn": isbn,
+                        "url": format!("https://openlibrary.org/isbn/{isbn}"),
+                        "source": "openlibrary",
+                    }),
+                );
             } else if let Some(arxiv) = resolved.arxiv_id.as_deref() {
                 out.insert(
                     "metadata".into(),
@@ -411,6 +439,7 @@ impl PaperbridgeService {
 
         if out.contains_key("metadata") {
             let identifier_only = resolved.arxiv_id.is_some()
+                || resolved.isbn.is_some()
                 || resolved.url.is_some()
                 || resolved.research_hash.is_some();
             out.insert(
@@ -431,20 +460,135 @@ impl PaperbridgeService {
             out.insert("metadata_page".into(), page);
         }
 
+        if let Some(chapter) = resolved.chapter {
+            out.insert("chapter".into(), serde_json::json!(chapter));
+        }
+
         let mut opened_fulltext = None;
-        if wants.iter().any(|w| w == "fulltext" || w == "chunks") {
-            let fulltext = self.resolve_fulltext_for_open(&mut resolved).await?;
+        if wants.iter().any(|w| w == "toc") {
+            let mut toc = None;
+            let mut last_err = None;
+            if let Some(isbn) = resolved.isbn.as_deref() {
+                match self.paper_search.openlibrary().get_toc(isbn).await {
+                    Ok(Some(t)) => toc = Some(t),
+                    Ok(None) => {}
+                    Err(e) => last_err = Some(e),
+                }
+            }
+            if toc.is_none() {
+                match self.resolve_fulltext_for_open(&mut resolved).await {
+                    Ok(fulltext) => {
+                        let fallback_title = if let Some(title) = out
+                            .get("metadata")
+                            .and_then(|m| m.get("title"))
+                            .and_then(|t| t.as_str())
+                        {
+                            title.to_string()
+                        } else if let Some(pid) = resolved.paper_id.as_deref()
+                            && let Some(api) = &self.paperseed
+                            && let Ok(detail) = api.get_cached_paper(pid)
+                        {
+                            detail.title
+                        } else if let Some(key) = resolved.item_key.as_deref()
+                            && let Ok(item) = self.get_item(key).await
+                        {
+                            item.title
+                        } else if let Some(att_key) = resolved.attachment_key.as_deref()
+                            && let Ok(att_item) = self.get_item(att_key).await
+                        {
+                            if let Some(parent_key) = att_item.parent_item.as_deref()
+                                && let Ok(parent) = self.get_item(parent_key).await
+                            {
+                                parent.title
+                            } else {
+                                att_item.title
+                            }
+                        } else {
+                            resolved.isbn.as_deref().unwrap_or("Book").to_string()
+                        };
+                        toc = Some(crate::book::extract_toc_from_text(
+                            &fallback_title,
+                            resolved.isbn.as_deref(),
+                            &fulltext.content,
+                        ));
+                        opened_fulltext = Some(fulltext);
+                    }
+                    Err(e) => {
+                        // Actionable local fallback error takes precedence over remote OpenLibrary error
+                        last_err = Some(e);
+                    }
+                }
+            }
+            let has_chapters = toc.as_ref().is_some_and(|t| !t.chapters.is_empty());
+            if let Some(t) = toc
+                && has_chapters
+            {
+                out.insert("toc".into(), serde_json::to_value(&t)?);
+                out.insert("toc_status".into(), serde_json::json!("retrieved"));
+            } else {
+                out.insert("toc_status".into(), serde_json::json!("failed"));
+                let err = last_err.unwrap_or_else(|| {
+                    ZoteroMcpError::InvalidInput(
+                        "No chapter headings (e.g. 'Chapter 1: ...') could be detected in the document content. Use want: [\"structure\"] or [\"fulltext\"] instead."
+                            .into(),
+                    )
+                });
+                out.insert(
+                    "toc_error".into(),
+                    serde_json::to_value(crate::error::ErrorEnvelope::from_error(&err))?,
+                );
+            }
+        }
+
+        if wants
+            .iter()
+            .any(|w| w == "fulltext" || w == "chunks" || w == "chapter")
+        {
+            let mut fulltext = if let Some(ft) = opened_fulltext.take() {
+                ft
+            } else {
+                self.resolve_fulltext_for_open(&mut resolved).await?
+            };
+            if let Some(ch_num) = resolved.chapter {
+                if let Some((slice, ch_title)) =
+                    crate::book::extract_chapter_slice(&fulltext.content, ch_num)
+                {
+                    out.insert("chapter_title".into(), serde_json::json!(ch_title));
+                    let chars = u32::try_from(slice.chars().count()).ok();
+                    fulltext.content = slice.to_string();
+                    fulltext.indexed_chars = chars;
+                    fulltext.total_chars = chars;
+                } else {
+                    return Err(ZoteroMcpError::InvalidInput(format!(
+                        "Chapter {ch_num} was not found in the content body. Use want: [\"fulltext\"] or [\"structure\"] to read or search the document text directly."
+                    )));
+                }
+            }
             let page = paginate_fulltext(&fulltext, max_chars, offset)?;
-            if wants.iter().any(|w| w == "fulltext") {
+            if wants.iter().any(|w| w == "fulltext" || w == "chapter") {
                 out.insert("fulltext".into(), serde_json::to_value(&page)?);
             }
             if wants.iter().any(|w| w == "chunks") {
                 let chunk_size = req.max_chars_per_chunk.unwrap_or(DEFAULT_CHUNK_SIZE);
-                let vox = pdf::prepare_vox_payload(
-                    &format!("open:{}", page.fulltext.item_key),
-                    &page.fulltext.content,
-                    chunk_size,
-                );
+                let is_technical = resolved.chapter.is_some() || resolved.isbn.is_some();
+                let vox = if is_technical {
+                    let chunks = crate::chunking::split_technical_content(
+                        &page.fulltext.content,
+                        chunk_size,
+                        None,
+                    );
+                    crate::models::VoxTextPayload {
+                        source: format!("open:{}", page.fulltext.item_key),
+                        chunk_count: chunks.len(),
+                        chunks,
+                    }
+                } else {
+                    crate::pdf::prepare_vox_payload(
+                        &format!("open:{}", page.fulltext.item_key),
+                        &page.fulltext.content,
+                        chunk_size,
+                    )
+                };
                 out.insert("chunks".into(), serde_json::to_value(vox)?);
                 out.insert("chunks_page".into(), fulltext_page_info(&page));
             }
@@ -748,6 +892,17 @@ impl PaperbridgeService {
         }
         if let Some(arxiv) = resolved.arxiv_id.as_deref() {
             return Some(format!("https://arxiv.org/pdf/{arxiv}"));
+        }
+        if let Some(isbn) = resolved.isbn.as_deref()
+            && let Ok(hits) = self
+                .paper_search
+                .openlibrary()
+                .search(&format!("isbn:{isbn}"), 1)
+                .await
+            && let Some(hit) = hits.into_iter().next()
+            && let Some(oa_pdf) = hit.oa_pdf_url
+        {
+            return Some(oa_pdf);
         }
         let doi = resolved.doi.as_deref()?;
         if let Ok(work) = self.resolve_doi(doi).await
@@ -1571,6 +1726,7 @@ impl PaperbridgeService {
             resolved.doi.as_deref(),
             resolved.arxiv_id.as_deref(),
             resolved.url.as_deref(),
+            resolved.isbn.as_deref(),
         ) else {
             return Ok(None);
         };
@@ -1633,6 +1789,7 @@ impl PaperbridgeService {
             resolved.doi.as_deref(),
             resolved.arxiv_id.as_deref(),
             resolved.url.as_deref(),
+            resolved.isbn.as_deref(),
         ) else {
             return Ok(None);
         };
@@ -1711,6 +1868,8 @@ fn effective_cache_mode(
 struct OpenResolved {
     doi: Option<String>,
     arxiv_id: Option<String>,
+    isbn: Option<String>,
+    chapter: Option<u32>,
     item_key: Option<String>,
     paper_id: Option<String>,
     attachment_key: Option<String>,
@@ -1724,6 +1883,7 @@ fn resolve_open_targets(req: &OpenPaperRequest) -> Result<OpenResolved> {
         req.hit_id.as_ref(),
         req.doi.as_ref(),
         req.arxiv_id.as_ref(),
+        req.isbn.as_ref(),
         req.item_key.as_ref(),
         req.paper_id.as_ref(),
         req.attachment_key.as_ref(),
@@ -1743,6 +1903,11 @@ fn resolve_open_targets(req: &OpenPaperRequest) -> Result<OpenResolved> {
     let mut r = OpenResolved {
         doi: req.doi.as_ref().and_then(|d| normalize_doi(d)),
         arxiv_id: req.arxiv_id.as_ref().and_then(|a| normalize_arxiv_id(a)),
+        isbn: req
+            .isbn
+            .as_ref()
+            .and_then(|i| crate::book::normalize_isbn(i)),
+        chapter: req.chapter,
         item_key: req.item_key.clone(),
         paper_id: req.paper_id.clone(),
         attachment_key: req.attachment_key.clone(),
@@ -1756,6 +1921,13 @@ fn resolve_open_targets(req: &OpenPaperRequest) -> Result<OpenResolved> {
             r.arxiv_id = normalize_arxiv_id(rest);
         } else if let Some(rest) = hit_id.strip_prefix("doi:") {
             r.doi = normalize_doi(rest);
+        } else if let Some(rest) = hit_id.strip_prefix("isbn:") {
+            r.isbn = crate::book::normalize_isbn(rest);
+            if r.isbn.is_none() {
+                return Err(ZoteroMcpError::InvalidInput(format!(
+                    "Invalid ISBN in hit_id: '{rest}'. Expected a valid 10-digit or 13-digit ISBN with correct checksum."
+                )));
+            }
         } else if let Some(rest) = hit_id.strip_prefix("pmid:") {
             return Err(ZoteroMcpError::InvalidInput(format!(
                 "PMID opening is not supported yet. Try resolve_source_access {{ url: \"https://pubmed.ncbi.nlm.nih.gov/{rest}/\" }} or search_papers {{ query: \"{rest}\", sources: [\"pubmed\", \"europe_pmc\"], detail: \"full\" }}."
@@ -1776,8 +1948,17 @@ fn resolve_open_targets(req: &OpenPaperRequest) -> Result<OpenResolved> {
         }
     }
 
+    if let Some(raw_isbn) = req.isbn.as_deref()
+        && r.isbn.is_none()
+    {
+        return Err(ZoteroMcpError::InvalidInput(format!(
+            "Invalid ISBN: '{raw_isbn}'. Expected a valid 10-digit or 13-digit ISBN with correct checksum."
+        )));
+    }
+
     if r.doi.is_none()
         && r.arxiv_id.is_none()
+        && r.isbn.is_none()
         && r.item_key.is_none()
         && r.paper_id.is_none()
         && r.attachment_key.is_none()
@@ -1785,7 +1966,7 @@ fn resolve_open_targets(req: &OpenPaperRequest) -> Result<OpenResolved> {
         && r.research_hash.is_none()
     {
         return Err(ZoteroMcpError::InvalidInput(
-            "open_paper requires hit_id, doi, arxiv_id, item_key, paper_id, attachment_key, or url."
+            "open_paper requires hit_id, doi, arxiv_id, isbn, item_key, paper_id, attachment_key, or url."
                 .into(),
         ));
     }
@@ -1812,6 +1993,10 @@ fn resolved_open_output(req: &OpenPaperRequest, resolved: &OpenResolved) -> serd
     insert_optional_json_string(&mut output, "hit_id", req.hit_id.as_deref());
     insert_optional_json_string(&mut output, "doi", resolved.doi.as_deref());
     insert_optional_json_string(&mut output, "arxiv_id", resolved.arxiv_id.as_deref());
+    insert_optional_json_string(&mut output, "isbn", resolved.isbn.as_deref());
+    if let Some(ch) = resolved.chapter {
+        output.insert("chapter".into(), serde_json::json!(ch));
+    }
     insert_optional_json_string(&mut output, "item_key", resolved.item_key.as_deref());
     insert_optional_json_string(&mut output, "paper_id", resolved.paper_id.as_deref());
     insert_optional_json_string(
@@ -1844,6 +2029,7 @@ fn insert_optional_json_string(
 fn paper_hit_from_resolved(resolved: &OpenResolved) -> PaperHit {
     let arxiv = resolved.arxiv_id.clone();
     let doi = resolved.doi.clone();
+    let isbn = resolved.isbn.clone();
     let (url, pdf_url, oa_pdf_url) = if let Some(ref a) = arxiv {
         (
             Some(format!("https://arxiv.org/abs/{a}")),
@@ -1852,6 +2038,12 @@ fn paper_hit_from_resolved(resolved: &OpenResolved) -> PaperHit {
         )
     } else if let Some(ref d) = doi {
         (Some(format!("https://doi.org/{d}")), None, None)
+    } else if let Some(ref i) = isbn {
+        (
+            Some(format!("https://openlibrary.org/isbn/{i}")),
+            None,
+            None,
+        )
     } else if let Some(url) = resolved.url.clone() {
         (Some(url.clone()), Some(url.clone()), Some(url))
     } else {
@@ -1860,14 +2052,18 @@ fn paper_hit_from_resolved(resolved: &OpenResolved) -> PaperHit {
     let title = arxiv
         .clone()
         .or_else(|| doi.clone())
+        .or_else(|| isbn.clone())
         .or_else(|| resolved.url.clone())
         .unwrap_or_else(|| "open_paper".into());
+    let source = if arxiv.is_some() {
+        PaperSource::Arxiv
+    } else if isbn.is_some() {
+        PaperSource::OpenLibrary
+    } else {
+        PaperSource::Crossref
+    };
     let mut hit = PaperHit::new(
-        if arxiv.is_some() {
-            PaperSource::Arxiv
-        } else {
-            PaperSource::Crossref
-        },
+        source,
         title,
         Vec::new(),
         None,
@@ -1881,6 +2077,10 @@ fn paper_hit_from_resolved(resolved: &OpenResolved) -> PaperHit {
         None,
         None,
     );
+    if isbn.is_some() {
+        hit.work_type = Some(crate::models::WorkType::Book);
+        hit.isbn = isbn;
+    }
     if let Some(pid) = resolved.paper_id.clone() {
         hit.cache = Some(CachedPaperSummary {
             paper_id: pid,
@@ -2590,6 +2790,7 @@ fn source_rank_bias(source: crate::models::PaperSource) -> u8 {
         crate::models::PaperSource::HuggingFace => 2,
         crate::models::PaperSource::Ads => 1,
         crate::models::PaperSource::Paperseed => 1,
+        crate::models::PaperSource::OpenLibrary => 5,
         crate::models::PaperSource::ScholarApi => 0,
     }
 }
@@ -2671,6 +2872,8 @@ async fn mirror_open_access_hit(api: &PaperseedApi, hit: &PaperHit) -> Result<()
             title: Some(hit.title.clone()),
             doi: hit.doi.clone(),
             arxiv_id: hit.arxiv_id.clone(),
+            isbn: hit.isbn.clone(),
+            work_type: hit.work_type.map(|w| w.as_str().to_string()),
             authors: hit.authors.clone(),
             year: hit.year.as_deref().and_then(parse_year),
             venue: hit.venue.clone(),
@@ -2845,6 +3048,8 @@ mod tests {
             ids: None,
             match_info: None,
             access: None,
+            work_type: None,
+            isbn: None,
             next: Vec::new(),
         };
 
@@ -2983,6 +3188,8 @@ mod tests {
                     title: Some("Graph Learning at Scale".to_string()),
                     doi: Some("10.5555/graph".to_string()),
                     arxiv_id: None,
+                    isbn: None,
+                    work_type: None,
                     authors: vec!["Grace Hopper".to_string()],
                     year: Some(2024),
                     venue: Some("Systems Journal".to_string()),
@@ -3032,6 +3239,8 @@ mod tests {
                     title: Some("Structured Cached Paper".to_string()),
                     doi: Some("10.5555/structure".to_string()),
                     arxiv_id: None,
+                    isbn: None,
+                    work_type: None,
                     authors: vec!["Grace Hopper".to_string()],
                     year: Some(2024),
                     venue: Some("Systems Journal".to_string()),
@@ -3091,6 +3300,8 @@ mod tests {
                     title: Some("Queryable Cached Paper".to_string()),
                     doi: Some("10.5555/query".to_string()),
                     arxiv_id: None,
+                    isbn: None,
+                    work_type: None,
                     authors: vec!["Grace Hopper".to_string()],
                     year: Some(2024),
                     venue: Some("Systems Journal".to_string()),
@@ -3135,6 +3346,8 @@ mod tests {
                     title: Some("Planar Induced Subgraphs of Sparse Graphs".to_string()),
                     doi: Some("10.48550/arXiv.1408.5939".to_string()),
                     arxiv_id: Some("1408.5939".to_string()),
+                    isbn: None,
+                    work_type: None,
                     authors: vec![
                         "Glencora Borradaile".to_string(),
                         "David Eppstein".to_string(),
@@ -3227,6 +3440,8 @@ mod tests {
                     title: Some("Matched External Paper".to_string()),
                     doi: None,
                     arxiv_id: None,
+                    isbn: None,
+                    work_type: None,
                     authors: vec!["Grace Hopper".to_string()],
                     year: Some(2024),
                     venue: Some("Systems Journal".to_string()),
@@ -3247,6 +3462,8 @@ mod tests {
                     title: Some("Local Only Paper".to_string()),
                     doi: Some("10.5555/local".to_string()),
                     arxiv_id: None,
+                    isbn: None,
+                    work_type: None,
                     authors: vec!["Ada Lovelace".to_string()],
                     year: Some(2023),
                     venue: Some("Local Venue".to_string()),
@@ -3334,6 +3551,8 @@ mod tests {
                 title: Some("Graph Neural Networks for Program Analysis".to_string()),
                 doi: Some("10.5555/graph".to_string()),
                 arxiv_id: None,
+                isbn: None,
+                work_type: None,
                 authors: vec!["Ada Lovelace".to_string()],
                 year: Some(2024),
                 venue: Some("Local Venue".to_string()),
@@ -3685,6 +3904,8 @@ mod tests {
             ids: None,
             match_info: None,
             access: None,
+            work_type: None,
+            isbn: None,
             next: Vec::new(),
         }
     }
@@ -4421,68 +4642,35 @@ mod tests {
     fn resolve_open_targets_parses_hit_ids() {
         let r = resolve_open_targets(&OpenPaperRequest {
             hit_id: Some("arxiv:1706.03762v7".into()),
-            doi: None,
-            arxiv_id: None,
-            item_key: None,
-            paper_id: None,
-            attachment_key: None,
-            url: None,
-            want: vec![],
-            max_chars: None,
-            offset: None,
-            selector: None,
-            max_chars_per_chunk: None,
+            ..Default::default()
         })
         .unwrap();
         assert_eq!(r.arxiv_id.as_deref(), Some("1706.03762"));
 
         let r = resolve_open_targets(&OpenPaperRequest {
             hit_id: Some("doi:10.5555/3295222.3295349".into()),
-            doi: None,
-            arxiv_id: None,
-            item_key: None,
-            paper_id: None,
-            attachment_key: None,
-            url: None,
-            want: vec![],
-            max_chars: None,
-            offset: None,
-            selector: None,
-            max_chars_per_chunk: None,
+            ..Default::default()
         })
         .unwrap();
         assert_eq!(r.doi.as_deref(), Some("10.5555/3295222.3295349"));
 
         let r = resolve_open_targets(&OpenPaperRequest {
             hit_id: Some("paperseed:abc123".into()),
-            doi: None,
-            arxiv_id: None,
-            item_key: None,
-            paper_id: None,
-            attachment_key: None,
-            url: None,
-            want: vec![],
-            max_chars: None,
-            offset: None,
-            selector: None,
-            max_chars_per_chunk: None,
+            ..Default::default()
         })
         .unwrap();
         assert_eq!(r.paper_id.as_deref(), Some("abc123"));
 
         let r = resolve_open_targets(&OpenPaperRequest {
+            hit_id: Some("isbn:978-1-4919-0307-0".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(r.isbn.as_deref(), Some("9781491903070"));
+
+        let r = resolve_open_targets(&OpenPaperRequest {
             hit_id: Some("url:https://openreview.net/pdf?id=abc123".into()),
-            doi: None,
-            arxiv_id: None,
-            item_key: None,
-            paper_id: None,
-            attachment_key: None,
-            url: None,
-            want: vec![],
-            max_chars: None,
-            offset: None,
-            selector: None,
-            max_chars_per_chunk: None,
+            ..Default::default()
         })
         .unwrap();
         assert_eq!(
@@ -4542,17 +4730,8 @@ mod tests {
         let value = service
             .open_paper(OpenPaperRequest {
                 hit_id: Some("arxiv:1706.03762".into()),
-                doi: None,
-                arxiv_id: None,
-                item_key: None,
-                paper_id: None,
-                attachment_key: None,
-                url: None,
                 want: vec!["metadata".into()],
-                max_chars: None,
-                offset: None,
-                selector: None,
-                max_chars_per_chunk: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -4585,6 +4764,8 @@ mod tests {
                     title: Some("Open Paper Cache".into()),
                     doi: Some("10.1/open-paper".into()),
                     arxiv_id: None,
+                    isbn: None,
+                    work_type: None,
                     authors: vec!["Test".into()],
                     year: Some(2024),
                     venue: None,
@@ -4607,18 +4788,10 @@ mod tests {
 
         let value = service
             .open_paper(OpenPaperRequest {
-                hit_id: None,
-                doi: None,
-                arxiv_id: None,
-                item_key: None,
                 paper_id: Some(paper.metadata.id.clone()),
-                attachment_key: None,
-                url: None,
                 want: vec!["fulltext".into()],
                 max_chars: Some(12),
-                offset: None,
-                selector: None,
-                max_chars_per_chunk: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -4628,6 +4801,193 @@ mod tests {
         assert_eq!(value["fulltext"]["indexed_chars"], 12);
         assert!(value["fulltext"]["total_chars"].as_u64().unwrap() > 12);
         assert_eq!(value["fulltext"]["next_offset"], 12);
+    }
+
+    #[tokio::test]
+    async fn open_book_with_toc_and_chapter_slicing() {
+        let dir = tempfile::tempdir().unwrap();
+        let api = PaperseedApi::with_yams(
+            dir.path().join("corpus"),
+            None,
+            paperseed::yams::YamsConfig::disabled(),
+        );
+        let src = dir.path().join("book.txt");
+        let book_content = "\
+Front Matter
+
+Chapter 1: Principles of Reliability
+Reliability means tolerating faults and recovering quickly.
+
+Chapter 2: Data Models and Schemas
+Relational models and document stores.
+";
+        std::fs::write(&src, book_content).unwrap();
+        let paper = api
+            .ingest_with_metadata(
+                &src,
+                paperseed::sources::PaperbridgeMetadata {
+                    title: Some("Designing Data Systems".into()),
+                    doi: None,
+                    arxiv_id: None,
+                    isbn: None,
+                    work_type: Some("book".into()),
+                    authors: vec!["Martin Kleppmann".into()],
+                    year: Some(2017),
+                    venue: Some("O'Reilly".into()),
+                    abstract_note: None,
+                    license: Some("cc-by".into()),
+                    source_url: None,
+                },
+                Some("cc-by".into()),
+            )
+            .unwrap();
+
+        let service = PaperbridgeService::new(Arc::new(StubLocalReadOnlyBackend)).with_paperseed(
+            PaperseedMirrorConfig {
+                corpus_root: Some(dir.path().join("corpus").display().to_string()),
+                unpaywall_email: None,
+                auto_download: false,
+                yams_enabled: false,
+            },
+        );
+
+        // 1. Test want: ["toc"]
+        let toc_val = service
+            .open_paper(OpenPaperRequest {
+                paper_id: Some(paper.metadata.id.clone()),
+                want: vec!["toc".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(toc_val.get("toc").is_some());
+        assert_eq!(toc_val["toc_status"], "retrieved");
+        assert_eq!(toc_val["toc"]["title"], "Designing Data Systems");
+        assert_eq!(toc_val["toc"]["total_chapters"], 2);
+        assert_eq!(
+            toc_val["toc"]["chapters"][0]["title"],
+            "Principles of Reliability"
+        );
+
+        // 2. Test chapter slicing: chapter 1
+        let ch1_val = service
+            .open_paper(OpenPaperRequest {
+                paper_id: Some(paper.metadata.id.clone()),
+                chapter: Some(1),
+                want: vec!["fulltext".into(), "chunks".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(ch1_val["chapter"], 1);
+        assert_eq!(ch1_val["chapter_title"], "Principles of Reliability");
+        let ch1_text = ch1_val["fulltext"]["content"].as_str().unwrap();
+        assert!(ch1_text.contains("Reliability means tolerating faults"));
+        assert!(!ch1_text.contains("Relational models and document stores"));
+        assert!(
+            ch1_val["chunks"]["chunks"][0]
+                .as_str()
+                .unwrap()
+                .contains("Reliability means tolerating faults")
+        );
+
+        // 3. Test non-existent chapter 99 returns InvalidInput error
+        let err = service
+            .open_paper(OpenPaperRequest {
+                paper_id: Some(paper.metadata.id.clone()),
+                chapter: Some(99),
+                want: vec!["fulltext".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Chapter 99 was not found"));
+
+        // 4. Test want: ["chapter"] without chapter specified returns InvalidInput
+        let err_no_ch = service
+            .open_paper(OpenPaperRequest {
+                paper_id: Some(paper.metadata.id.clone()),
+                chapter: None,
+                want: vec!["chapter".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            err_no_ch
+                .to_string()
+                .contains("requires specifying which chapter to read")
+        );
+
+        // 5. Test chapter specified without chapter/fulltext/chunks in want returns InvalidInput
+        let err_bad_want = service
+            .open_paper(OpenPaperRequest {
+                paper_id: Some(paper.metadata.id.clone()),
+                chapter: Some(1),
+                want: vec!["metadata".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            err_bad_want
+                .to_string()
+                .contains("chapter was specified, but want did not include")
+        );
+
+        // 6. Test want: ["toc"] failure when no chapter headings exist in the document content
+        let article_src = dir.path().join("article.txt");
+        std::fs::write(
+            &article_src,
+            "This is a regular paper without any chapter headings.",
+        )
+        .unwrap();
+        let article = api
+            .ingest_with_metadata(
+                &article_src,
+                paperseed::sources::PaperbridgeMetadata {
+                    title: Some("Standard Paper".into()),
+                    doi: None,
+                    arxiv_id: None,
+                    isbn: None,
+                    work_type: Some("paper".into()),
+                    authors: vec!["Author One".into()],
+                    year: Some(2023),
+                    venue: None,
+                    abstract_note: None,
+                    license: Some("cc-by".into()),
+                    source_url: None,
+                },
+                Some("cc-by".into()),
+            )
+            .unwrap();
+        let fail_val = service
+            .open_paper(OpenPaperRequest {
+                paper_id: Some(article.metadata.id.clone()),
+                want: vec!["toc".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(fail_val["toc_status"], "failed");
+        assert_eq!(fail_val["toc_error"]["error"], "invalid_input");
+        assert!(
+            fail_val["toc_error"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("No chapter headings")
+        );
+
+        // 7. Test invalid ISBN returns descriptive error
+        let bad_isbn_err = service
+            .open_paper(OpenPaperRequest {
+                isbn: Some("978-invalid".into()),
+                want: vec!["metadata".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert!(bad_isbn_err.to_string().contains("Invalid ISBN"));
     }
 
     #[tokio::test]
@@ -4651,17 +5011,9 @@ mod tests {
         let value = service()
             .open_paper(OpenPaperRequest {
                 hit_id: Some(format!("url:{}/paper.pdf", server.uri())),
-                doi: None,
-                arxiv_id: None,
-                item_key: None,
-                paper_id: None,
-                attachment_key: None,
-                url: None,
                 want: vec!["structure".into(), "fulltext".into()],
                 max_chars: Some(2_000),
-                offset: None,
-                selector: None,
-                max_chars_per_chunk: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -4706,17 +5058,8 @@ mod tests {
         let error = service()
             .open_paper(OpenPaperRequest {
                 hit_id: Some(format!("url:{}/paper.pdf", server.uri())),
-                doi: None,
-                arxiv_id: None,
-                item_key: None,
-                paper_id: None,
-                attachment_key: None,
-                url: None,
                 want: vec!["fulltext".into()],
-                max_chars: None,
-                offset: None,
-                selector: None,
-                max_chars_per_chunk: None,
+                ..Default::default()
             })
             .await
             .expect_err("HTML must not be presented as an empty PDF");
@@ -4758,6 +5101,8 @@ mod tests {
                     title: Some("Paper PDF Download".into()),
                     doi: Some("10.6028/NIST.AI.100-2e2023".into()),
                     arxiv_id: None,
+                    isbn: None,
+                    work_type: None,
                     authors: vec!["NIST".into()],
                     year: Some(2024),
                     venue: None,
@@ -4780,17 +5125,9 @@ mod tests {
         let value = service
             .open_paper(OpenPaperRequest {
                 hit_id: Some(format!("url:{}/paper.pdf", server.uri())),
-                doi: None,
-                arxiv_id: None,
-                item_key: None,
-                paper_id: None,
-                attachment_key: None,
-                url: None,
                 want: vec!["fulltext".into()],
                 max_chars: Some(2_000),
-                offset: None,
-                selector: None,
-                max_chars_per_chunk: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -4808,17 +5145,9 @@ mod tests {
     fn read_request(hit_id: &str, wants: &[&str]) -> OpenPaperRequest {
         OpenPaperRequest {
             hit_id: Some(hit_id.into()),
-            doi: None,
-            arxiv_id: None,
-            item_key: None,
-            paper_id: None,
-            attachment_key: None,
-            url: None,
             want: wants.iter().map(|s| (*s).into()).collect(),
             max_chars: Some(100),
-            offset: None,
-            selector: None,
-            max_chars_per_chunk: None,
+            ..Default::default()
         }
     }
 
@@ -4835,6 +5164,8 @@ mod tests {
                     title: Some("UNRELATEDKEY Cached Fixture".into()),
                     doi: None,
                     arxiv_id: None,
+                    isbn: None,
+                    work_type: None,
                     authors: vec![],
                     year: None,
                     venue: None,
@@ -5086,18 +5417,8 @@ mod tests {
     async fn open_paper_errors_without_identifiers() {
         let err = service()
             .open_paper(OpenPaperRequest {
-                hit_id: None,
-                doi: None,
-                arxiv_id: None,
-                item_key: None,
-                paper_id: None,
-                attachment_key: None,
-                url: None,
                 want: vec!["metadata".into()],
-                max_chars: None,
-                offset: None,
-                selector: None,
-                max_chars_per_chunk: None,
+                ..Default::default()
             })
             .await
             .unwrap_err();

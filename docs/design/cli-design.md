@@ -245,7 +245,7 @@ papers search → papers resolve-doi → item validate → item create
 | Local Zotero reads | `paperbridge library {query,collections,read,read-search}` | `query`, `collections`, `read`, `read-search` |
 | Item writes | `paperbridge item {create,update,delete,validate}` | `create-item`, `update-item`, `delete-item`, `validate-item` |
 | Collection writes | `paperbridge collection {create,update,delete}` | `create-collection`, `update-collection`, `delete-collection` |
-| Paper discovery, access, and inspection | `paperbridge papers {search,resolve-doi,access,structure,query}` | `search-papers`, `resolve-doi`, `paper {structure,query}` |
+| Paper and book discovery, access, and inspection | `paperbridge papers {search,resolve-doi,access,structure,query,open}` | `search-papers`, `resolve-doi`, `paper {structure,query}` |
 
 ## Current-state Audit
 

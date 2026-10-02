@@ -155,6 +155,8 @@ fn convert_info(info: RawDblpInfo) -> PaperHit {
         ids: None,
         match_info: None,
         access: None,
+        work_type: None,
+        isbn: None,
         next: Vec::new(),
     }
 }

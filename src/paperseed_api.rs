@@ -76,6 +76,17 @@ impl PaperseedApi {
         doi: Option<&str>,
         source_url: Option<&str>,
     ) -> Option<YamsDownloadResult> {
+        self.download_with_yams_queue_with_type(url, title, doi, source_url, None)
+    }
+
+    pub(crate) fn download_with_yams_queue_with_type(
+        &self,
+        url: &str,
+        title: Option<&str>,
+        doi: Option<&str>,
+        source_url: Option<&str>,
+        work_type: Option<&str>,
+    ) -> Option<YamsDownloadResult> {
         let runner = CommandYamsRunner::with_timeout(&self.yams.binary, Duration::from_secs(30));
         paperseed::yams::download_with_runner(
             &self.yams,
@@ -85,6 +96,7 @@ impl PaperseedApi {
                 title,
                 doi,
                 source_url,
+                work_type,
             },
         )
     }
@@ -284,6 +296,13 @@ impl PaperseedApi {
                 ids: None,
                 match_info: None,
                 access: None,
+                work_type: entry
+                    .paper
+                    .metadata
+                    .work_type
+                    .as_deref()
+                    .and_then(crate::models::WorkType::parse),
+                isbn: entry.paper.metadata.isbn.clone(),
                 next: Vec::new(),
             })
             .collect())
@@ -293,7 +312,7 @@ impl PaperseedApi {
         let db = self.corpus_status().ok()?;
         db.papers.into_iter().find(|entry| {
             let metadata = &entry.paper.metadata;
-            let cached = PaperHit::new(
+            let mut cached = PaperHit::new(
                 PaperSource::Paperseed,
                 metadata.title.clone(),
                 metadata.authors.clone(),
@@ -311,6 +330,11 @@ impl PaperseedApi {
                 None,
                 None,
             );
+            cached.isbn = metadata.isbn.clone();
+            cached.work_type = metadata
+                .work_type
+                .as_deref()
+                .and_then(crate::models::WorkType::parse);
             crate::external::compatible_identity(&cached, hit)
         })
     }
@@ -323,12 +347,14 @@ impl PaperseedApi {
         doi: Option<&str>,
         arxiv_id: Option<&str>,
         url: Option<&str>,
+        isbn: Option<&str>,
     ) -> Option<IndexedPaper> {
         let db = self.corpus_status().ok()?;
         db.papers.into_iter().find(|entry| {
             doi.is_some_and(|doi| entry_doi_matches(entry, doi))
                 || arxiv_id.is_some_and(|id| entry_arxiv_matches(entry, id))
                 || url.is_some_and(|url| entry_url_matches(entry, url))
+                || isbn.is_some_and(|target_isbn| entry_isbn_matches(entry, target_isbn))
         })
     }
 
@@ -368,11 +394,41 @@ fn cached_paper_detail(entry: IndexedPaper) -> CachedPaperDetail {
         venue: entry.paper.metadata.venue,
         abstract_note: entry.paper.metadata.abstract_note,
         source_url: entry.paper.metadata.source_url,
+        isbn: entry.paper.metadata.isbn,
+        work_type: entry.paper.metadata.work_type,
         stored_path: entry.paper.file.path.display().to_string(),
         mime: entry.paper.file.mime,
         yams_hash: entry.yams_hash,
         has_full_text,
     }
+}
+
+fn entry_isbn_matches(entry: &IndexedPaper, target_isbn: &str) -> bool {
+    let Some(target_norm) = crate::book::normalize_isbn(target_isbn) else {
+        return false;
+    };
+    let metadata = &entry.paper.metadata;
+    if let Some(ref entry_isbn) = metadata.isbn {
+        for token in entry_isbn.split(|c: char| c.is_whitespace() || c == ',' || c == ';') {
+            if let Some(norm) = crate::book::normalize_isbn(token)
+                && norm == target_norm
+            {
+                return true;
+            }
+        }
+        if let Some(norm) = crate::book::normalize_isbn(entry_isbn)
+            && norm == target_norm
+        {
+            return true;
+        }
+    }
+    if let Some(id_isbn) = metadata.id.strip_prefix("isbn:")
+        && let Some(norm) = crate::book::normalize_isbn(id_isbn)
+        && norm == target_norm
+    {
+        return true;
+    }
+    false
 }
 
 fn entry_doi_matches(entry: &IndexedPaper, expected: &str) -> bool {
@@ -799,6 +855,8 @@ mod tests {
                 title: Some(name.to_string()),
                 doi: Some(doi.to_string()),
                 arxiv_id: None,
+                isbn: None,
+                work_type: None,
                 authors: vec!["Test Author".into()],
                 year: Some(2024),
                 venue: None,
@@ -849,7 +907,7 @@ mod tests {
         );
 
         assert!(
-            api.find_cached_identity(Some("10.14722/ndss.2023.23080"), None, None)
+            api.find_cached_identity(Some("10.14722/ndss.2023.23080"), None, None, None)
                 .is_none()
         );
     }
@@ -871,9 +929,40 @@ mod tests {
                 None,
                 None,
                 Some("https://www.ndss-symposium.org/paper.pdf#page=2"),
+                None,
             )
             .unwrap();
         assert_eq!(found.paper.metadata.id, paper.metadata.id);
+    }
+
+    #[test]
+    fn cached_identity_finds_book_by_isbn() {
+        let dir = tempfile::tempdir().unwrap();
+        let api = PaperseedApi::with_yams(dir.path().join("corpus"), None, YamsConfig::disabled());
+        let path = dir.path().join("ddia.txt");
+        std::fs::write(&path, "Designing Data-Intensive Applications content").unwrap();
+        let book = api
+            .ingest_with_metadata(
+                &path,
+                PaperbridgeMetadata {
+                    title: Some("Designing Data-Intensive Applications".into()),
+                    isbn: Some("978-1-4919-0307-0".into()),
+                    work_type: Some("book".into()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+
+        let found = api
+            .find_cached_identity(None, None, None, Some("9781491903070"))
+            .expect("book found by canonical isbn");
+        assert_eq!(found.paper.metadata.id, book.metadata.id);
+
+        let found_hyphens = api
+            .find_cached_identity(None, None, None, Some("ISBN: 978-1-4919-0307-0"))
+            .expect("book found by prefixed isbn");
+        assert_eq!(found_hyphens.paper.metadata.id, book.metadata.id);
     }
 
     #[test]

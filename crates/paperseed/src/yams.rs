@@ -56,6 +56,7 @@ pub struct YamsDownloadRequest<'a> {
     pub title: Option<&'a str>,
     pub doi: Option<&'a str>,
     pub source_url: Option<&'a str>,
+    pub work_type: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,6 +244,14 @@ pub fn index_paper_with_runner(
     // `--name=...` (one token) instead of `--name <title>` (two tokens) so a
     // title starting with `-` can't be parsed as a YAMS flag. Same shape used
     // for every other arg-with-value below for consistency.
+    let is_book = request.paper.metadata.work_type.as_deref() == Some("book")
+        || request.paper.metadata.work_type.as_deref() == Some("chapter")
+        || request.paper.metadata.id.starts_with("isbn:")
+        || request.paper.metadata.id.starts_with("book:")
+        || (request.paper.metadata.work_type.is_none()
+            && request.paper.metadata.isbn.is_some()
+            && request.paper.metadata.doi.is_none());
+
     let mut args = vec![
         // `--json` is a YAMS global option for `add`; placing it after the
         // subcommand currently leaves human output even though parsing
@@ -251,8 +260,16 @@ pub fn index_paper_with_runner(
         "add".to_string(),
         request.paper.file.path.display().to_string(),
         format!("--name={}", request.paper.metadata.title),
-        "--tags=paperseed,paperbridge,paper".to_string(),
-        "--collection=paperbridge".to_string(),
+        if is_book {
+            "--tags=paperseed,paperbridge,book".to_string()
+        } else {
+            "--tags=paperseed,paperbridge,paper".to_string()
+        },
+        if is_book {
+            "--collection=paperbridge-books".to_string()
+        } else {
+            "--collection=paperbridge".to_string()
+        },
         format!("--metadata=paperseed_id={}", request.paper.metadata.id),
         format!(
             "--metadata=doi={}",
@@ -262,6 +279,14 @@ pub fn index_paper_with_runner(
         // `text.len()` over-reports for non-ASCII titles/authors/full text.
         format!("--metadata=paperseed_text_chars={}", text.chars().count()),
     ];
+    if let Some(work_type) = request.paper.metadata.work_type.as_deref() {
+        args.push(format!("--metadata=work_type={work_type}"));
+    } else if is_book {
+        args.push("--metadata=work_type=book".to_string());
+    }
+    if let Some(isbn) = request.paper.metadata.isbn.as_deref() {
+        args.push(format!("--metadata=isbn={isbn}"));
+    }
     if !request.paper.metadata.authors.is_empty() {
         args.push(format!(
             "--metadata=authors={}",
@@ -314,6 +339,11 @@ pub fn download_with_runner(
         return None;
     }
 
+    let tag = if request.work_type == Some("book") || request.work_type == Some("chapter") {
+        "book"
+    } else {
+        "paper"
+    };
     let mut args = vec![
         "download".to_string(),
         request.url.to_string(),
@@ -322,7 +352,7 @@ pub fn download_with_runner(
         "--tag".to_string(),
         "paperbridge".to_string(),
         "--tag".to_string(),
-        "paper".to_string(),
+        tag.to_string(),
     ];
     if let Some(title) = request.title {
         args.extend(["--meta".to_string(), format!("paperseed_title={title}")]);
@@ -332,6 +362,9 @@ pub fn download_with_runner(
     }
     if let Some(source_url) = request.source_url {
         args.extend(["--meta".to_string(), format!("source_url={source_url}")]);
+    }
+    if let Some(work_type) = request.work_type {
+        args.extend(["--meta".to_string(), format!("work_type={work_type}")]);
     }
     args.extend(["--json".to_string(), "--quiet".to_string()]);
 

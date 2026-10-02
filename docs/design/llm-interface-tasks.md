@@ -231,6 +231,18 @@ per-provider recovery remains a follow-up; suggested actions never execute.
 
 ---
 
+## Phase F — Technical Book Extension
+
+- [x] **T-F1** Book domain models and ISBN validation/normalization (`src/book/mod.rs`, `src/book/isbn.rs`)
+- [x] **T-F2** Open Library client for search and ISBN lookup (`src/external/openlibrary.rs`)
+- [x] **T-F3** `PaperSource::OpenLibrary` integration with exact ISBN ranking and hit_id minting (`isbn:...`)
+- [x] **T-F4** Discover→read book workflow: `open_paper` supporting `--want toc`, `--isbn`, `--chapter` slicing
+- [x] **T-F5** Chapter-aware chunking preserving code blocks and breadcrumbs (`src/chunking.rs`)
+- [x] **T-F6** YAMS book archiving and tag/collection categorization (`collection=books`, `tags=book`)
+- [x] **T-F7** Skill documentation update (`docs/skill.md`) and MCP prompt synchronization
+
+---
+
 ## Suggested implementation PR slices
 
 | PR | GitHub | Tasks | Risk |

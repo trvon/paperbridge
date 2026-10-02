@@ -393,6 +393,59 @@ pub enum PaperSource {
         alias = "scolarapi"
     )]
     ScholarApi,
+    #[value(name = "openlibrary", alias = "open_library", alias = "ol")]
+    #[serde(rename = "openlibrary", alias = "open_library", alias = "ol")]
+    OpenLibrary,
+}
+
+/// The high-level category of an academic or technical work.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Serialize,
+    Deserialize,
+    Eq,
+    PartialEq,
+    Hash,
+    schemars::JsonSchema,
+    clap::ValueEnum,
+    Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkType {
+    #[default]
+    Paper,
+    Book,
+    Chapter,
+}
+
+impl WorkType {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Paper => "paper",
+            Self::Book => "book",
+            Self::Chapter => "chapter",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "book" | "monograph" => Some(Self::Book),
+            "chapter" | "booksection" | "book_section" => Some(Self::Chapter),
+            "paper" | "journalarticle" | "conferencepaper" | "preprint" | "report" | "article" => {
+                Some(Self::Paper)
+            }
+            _ => None,
+        }
+    }
+}
+
+impl std::str::FromStr for WorkType {
+    type Err = ();
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Self::parse(s).ok_or(())
+    }
 }
 
 /// How much detail to return for paper search hits.
@@ -450,6 +503,10 @@ pub struct PaperIds {
     pub paper_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub research_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isbn: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openlibrary_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
@@ -722,6 +779,10 @@ pub struct PaperHit {
     pub match_info: Option<MatchInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access: Option<AccessInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_type: Option<WorkType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isbn: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next: Vec<String>,
 }
@@ -765,6 +826,8 @@ impl PaperHit {
             ids: None,
             match_info: None,
             access: None,
+            work_type: None,
+            isbn: None,
             next: Vec::new(),
         }
     }
@@ -841,6 +904,10 @@ pub struct CachedPaperDetail {
     pub venue: Option<String>,
     pub abstract_note: Option<String>,
     pub source_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isbn: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_type: Option<String>,
     pub stored_path: String,
     pub mime: String,
     pub yams_hash: Option<String>,

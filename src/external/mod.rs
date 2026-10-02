@@ -5,6 +5,7 @@ pub mod dblp;
 pub mod europe_pmc;
 pub mod huggingface;
 pub mod openalex;
+pub mod openlibrary;
 pub mod openreview;
 pub mod pubmed;
 pub mod scholarapi;
@@ -18,6 +19,7 @@ pub use dblp::DblpClient;
 pub use europe_pmc::EuropePmcClient;
 pub use huggingface::HuggingFaceClient;
 pub use openalex::OpenAlexClient;
+pub use openlibrary::OpenLibraryClient;
 pub use openreview::OpenReviewClient;
 pub use pubmed::PubmedClient;
 pub use scholarapi::ScholarApiClient;
@@ -144,6 +146,7 @@ pub struct PaperSearch {
     ads: Option<AdsClient>,
     pubmed: PubmedClient,
     scholarapi: Option<ScholarApiClient>,
+    openlibrary: OpenLibraryClient,
 }
 
 #[derive(Default, Clone)]
@@ -186,6 +189,7 @@ impl PaperSearch {
             ads: keys.ads_api_token.map(|k| AdsClient::new(None, k)),
             pubmed: PubmedClient::new(None, keys.ncbi_api_key),
             scholarapi: keys.scholarapi_key.map(|k| ScholarApiClient::new(None, k)),
+            openlibrary: OpenLibraryClient::new(None),
         }
     }
 
@@ -208,7 +212,12 @@ impl PaperSearch {
             ads: None,
             pubmed: PubmedClient::new(None, None),
             scholarapi: None,
+            openlibrary: OpenLibraryClient::new(None),
         }
+    }
+
+    pub(crate) fn openlibrary(&self) -> &OpenLibraryClient {
+        &self.openlibrary
     }
 
     pub async fn search(&self, opts: SearchOptions) -> Result<PaperSearchOutcome> {
@@ -375,6 +384,25 @@ impl PaperSearch {
             )
             .boxed(),
         );
+        futs.push(
+            run_source(
+                PaperSource::OpenLibrary,
+                opts.enabled(PaperSource::OpenLibrary),
+                timeout_duration,
+                async {
+                    if let Some(isbn) = crate::book::normalize_isbn(&query) {
+                        self.openlibrary
+                            .get_by_isbn(&isbn)
+                            .await
+                            .map(|opt| opt.into_iter().collect())
+                    } else {
+                        self.openlibrary.search(&query, limit).await
+                    }
+                },
+                false,
+            )
+            .boxed(),
+        );
 
         let results = futures::future::join_all(futs).await;
         let mut diagnostics = SearchDiagnostics::default();
@@ -527,19 +555,27 @@ fn dedupe(hits: Vec<PaperHit>) -> Vec<PaperHit> {
 
 /// Strong-ID contradictions veto even a matching title or another shared ID.
 /// Without a shared ID, require both title and a nonempty author to corroborate.
+/// Note: ISBN differences do not veto, allowing different editions of the same
+/// book to merge when title and author match.
 pub(crate) fn compatible_identity(left: &PaperHit, right: &PaperHit) -> bool {
-    let pairs = [
+    let strong_veto_pairs = [
         (doi_key(left), doi_key(right)),
         (arxiv_key(left), arxiv_key(right)),
         (pmid_key(left), pmid_key(right)),
     ];
-    if pairs
+    if strong_veto_pairs
         .iter()
         .any(|(a, b)| matches!((a, b), (Some(a), Some(b)) if a != b))
     {
         return false;
     }
-    pairs.iter().any(|(a, b)| a.is_some() && a == b)
+    let shared_id_pairs = [
+        (doi_key(left), doi_key(right)),
+        (arxiv_key(left), arxiv_key(right)),
+        (pmid_key(left), pmid_key(right)),
+        (isbn_key(left), isbn_key(right)),
+    ];
+    shared_id_pairs.iter().any(|(a, b)| a.is_some() && a == b)
         || title_author_key(left).is_some_and(|key| Some(key) == title_author_key(right))
 }
 
@@ -560,6 +596,10 @@ pub(crate) fn merge_hit_metadata(kept: &mut PaperHit, other: PaperHit) {
         .take()
         .filter(|s| !s.trim().is_empty())
         .or(other.pmid);
+    let kept_norm = kept.isbn.as_deref().and_then(crate::book::normalize_isbn);
+    let other_norm = other.isbn.as_deref().and_then(crate::book::normalize_isbn);
+    kept.isbn = kept_norm.or(other_norm).or(kept.isbn.take()).or(other.isbn);
+    kept.work_type = kept.work_type.or(other.work_type);
     kept.year = kept.year.take().or(other.year);
     kept.abstract_note = kept.abstract_note.take().or(other.abstract_note);
     kept.url = kept.url.take().or(other.url);
@@ -620,6 +660,10 @@ pub(crate) fn pmid_key(hit: &PaperHit) -> Option<String> {
         .as_deref()
         .map(|p| p.trim().to_string())
         .filter(|k| !k.is_empty())
+}
+
+pub(crate) fn isbn_key(hit: &PaperHit) -> Option<String> {
+    hit.isbn.as_deref().and_then(crate::book::normalize_isbn)
 }
 
 pub(crate) fn title_author_key(hit: &PaperHit) -> Option<String> {
@@ -829,6 +873,8 @@ mod tests {
             ids: None,
             match_info: None,
             access: None,
+            work_type: None,
+            isbn: None,
             next: Vec::new(),
         }
     }
@@ -1355,5 +1401,61 @@ mod tests {
         assert!(sources.contains(&PaperSource::Crossref));
         assert!(sources.contains(&PaperSource::HuggingFace));
         assert!(!sources.contains(&PaperSource::SemanticScholar));
+    }
+
+    #[test]
+    fn compatible_identity_matches_and_conflicts_on_isbn() {
+        let mut hit1 = PaperHit::new(
+            PaperSource::OpenLibrary,
+            "Designing Data-Intensive Applications".into(),
+            vec!["Martin Kleppmann".into()],
+            Some("2017".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        hit1.isbn = Some("9781491903070".into());
+        hit1.work_type = Some(crate::models::WorkType::Book);
+
+        let mut hit2 = PaperHit::new(
+            PaperSource::Research,
+            "Designing Data-Intensive Applications (Local Copy)".into(),
+            vec!["Martin Kleppmann".into()],
+            Some("2017".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        hit2.isbn = Some("978-1-4919-0307-0".into()); // formatted differently, same canonical
+
+        assert!(compatible_identity(&hit1, &hit2));
+
+        // Different ISBNs with different titles are not compatible
+        let mut hit3 = hit2.clone();
+        hit3.isbn = Some("9780306406157".into());
+        assert!(!compatible_identity(&hit1, &hit3));
+
+        // Different editions (different ISBNs) of the same book (matching title + author) ARE compatible
+        let mut hit4 = hit1.clone();
+        hit4.isbn = Some("9780306406157".into());
+        assert!(compatible_identity(&hit1, &hit4));
+
+        // Merging preserves normalized ISBN and work_type
+        let mut merged = hit2.clone();
+        merge_hit_metadata(&mut merged, hit1);
+        assert_eq!(merged.isbn, Some("9781491903070".into()));
+        assert_eq!(merged.work_type, Some(crate::models::WorkType::Book));
     }
 }

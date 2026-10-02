@@ -163,6 +163,8 @@ mod tests {
                     year: None,
                     doi: None,
                     arxiv_id: None,
+                    isbn: None,
+                    work_type: None,
                     license: License::UserOwnedPrivate,
                     venue: None,
                     abstract_note: None,

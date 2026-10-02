@@ -438,6 +438,12 @@ pub enum PapersAction {
         /// arXiv id
         #[arg(long)]
         arxiv_id: Option<String>,
+        /// ISBN of book to open
+        #[arg(long)]
+        isbn: Option<String>,
+        /// Chapter number to open (requires want to include chapter, fulltext, or chunks)
+        #[arg(long)]
+        chapter: Option<u32>,
         /// Zotero item key
         #[arg(long)]
         item_key: Option<String>,
@@ -450,8 +456,8 @@ pub enum PapersAction {
         /// Direct HTTP(S) paper or PDF URL
         #[arg(long)]
         url: Option<String>,
-        /// Comma-separated: metadata,fulltext,structure,chunks (default metadata)
-        #[arg(long, value_delimiter = ',', value_parser = ["metadata", "fulltext", "structure", "chunks"])]
+        /// Comma-separated: metadata,fulltext,structure,chunks,toc,chapter (default metadata)
+        #[arg(long, value_delimiter = ',', value_parser = ["metadata", "fulltext", "structure", "chunks", "toc", "chapter"])]
         want: Option<Vec<String>>,
         /// Content character budget per requested view (default 8000, max 32000)
         #[arg(long)]
