@@ -35,6 +35,8 @@ fn indexed_paper(id: &str, hash: &str) -> IndexedPaper {
                 title: format!("Paper {id}"),
                 doi: None,
                 arxiv_id: None,
+                isbn: None,
+                work_type: None,
                 authors: Vec::new(),
                 year: None,
                 venue: None,

@@ -219,6 +219,8 @@ async fn golden_outputs_match_expected_json() {
                 title: Some("Cached Golden Paper".to_string()),
                 doi: Some("10.5555/golden".to_string()),
                 arxiv_id: None,
+                isbn: None,
+                work_type: None,
                 authors: vec!["Grace Hopper".to_string()],
                 year: Some(2024),
                 venue: Some("Systems Journal".to_string()),

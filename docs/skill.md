@@ -18,8 +18,9 @@ for downstream agents.
 
 - Search a Zotero library or browse collections, tags, attachments.
 - Resolve a DOI to structured metadata (title, authors, year, journal, abstract).
-- Search the local YAMS research workspace and external paper indexes: arXiv, Crossref, OpenAlex, Europe PMC, DBLP,
-  OpenReview, PubMed, HuggingFace Papers, Semantic Scholar, CORE, NASA ADS, ScholarAPI.
+- Search the local YAMS research workspace and external indexes: arXiv, Crossref, OpenAlex, Europe PMC, DBLP,
+  OpenReview, PubMed, HuggingFace Papers, Semantic Scholar, CORE, NASA ADS, ScholarAPI, and OpenLibrary (books).
+- Look up technical books by title or ISBN (`978-...`), retrieve table of contents (`--want toc`), and slice chapters (`--chapter <n>`).
 - Retrieve full-text or structured content from a Zotero attachment or a cached paper.
 - Validate, create, update, or delete Zotero items and collections.
 - Import or query the local Paperseed corpus (`paperseed_enabled = true`).
@@ -53,20 +54,24 @@ Backend modes: `cloud` (api.zotero.org, needs `api_key` + `user_id`),
 # Zotero library (paginated envelope)
 paperbridge library query --query "diffusion models" --limit 10
 
-# External papers (compact by default; --limit is PAGE size)
+# External papers & technical books (compact by default; --limit is PAGE size)
 paperbridge papers search --query "intrusion detection" --per-source 3 --limit 10
 paperbridge papers search --query "attention is all you need" --sources arxiv,openalex
 paperbridge papers search --query "attention is all you need" --sources paperseed  # cache only
 paperbridge papers search --query "What drives detection in GNN" --sources research
+paperbridge papers search --query "Designing Data-Intensive Applications" --sources openlibrary
+paperbridge papers search --query "978-1-4919-0307-0"
 paperbridge papers search --query "transformers" --limit 5 --offset 10 --detail full
 
 # Open a hit after search (await-friendly path)
 paperbridge papers open --hit-id "arxiv:1706.03762" --want metadata,structure
 paperbridge papers open --doi "10.1038/nature12373" --want metadata
+paperbridge papers open --isbn "9781491903070" --want toc
+paperbridge papers open --isbn "9781491903070" --chapter 1 --want fulltext,chunks
 paperbridge papers open --url "https://example.org/paper.pdf" --want fulltext
 ```
 
-Compatible results are merged by DOI, arXiv ID, PMID, or corroborated
+Compatible results are merged by DOI, arXiv ID, ISBN, PMID, or corroborated
 title+first-author. Conflicting identifiers remain separate. Each hit includes `hit_id`, `ids`, `match`, `access`, and
 `next` suggested tools. Default `detail=compact` omits full abstracts.
 `diagnostics` lists sources that ran, were skipped (missing key), or failed.
@@ -75,14 +80,14 @@ MCP tools:
 
 - `search_papers { query|q, limit?, limit_per_source?, sources?, cache?, offset?, detail?, abstract_max_chars? }`
   → `{ query, total_count, offset, limit, has_more, next_offset, detail, hits, diagnostics }`
-- `open_paper { hit_id?|doi?|arxiv_id?|item_key?|paper_id?|attachment_key?|url?, want?, max_chars? }`
+- `open_paper { hit_id?|doi?|arxiv_id?|isbn?|item_key?|paper_id?|attachment_key?|url?, chapter?, want?, max_chars? }`
 - `search_items` / `list_collections` → paginated envelopes (`hits`, not bare arrays)
 
 Canonical source wire names: `research`, `arxiv`, `paperseed`, `crossref`, `openalex`,
 `europe_pmc`, `dblp`, `openreview`, `pubmed`, `hugging_face`,
-`semantic_scholar`, `core`, `ads`, `scholarapi` (aliases still accepted).
+`semantic_scholar`, `core`, `ads`, `scholarapi`, `openlibrary` (aliases still accepted).
 
-Always-on (no key): arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed.
+Always-on (no key): arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed, OpenLibrary.
 Key-gated (appear in `diagnostics.sources_skipped` when unset): HuggingFace,
 Semantic Scholar, CORE, NASA ADS, ScholarAPI.
 
@@ -132,6 +137,11 @@ paperbridge papers open --hit-id "research:<yams-hash>" --want structure --max-c
 paperbridge papers open --item-key ABCD1234 --want structure
 paperbridge papers structure --key ABCD1234
 
+# Books: inspect TOC or slice specific chapters (--chapter requires want to include chapter, fulltext, or chunks)
+paperbridge papers open --isbn 9781491903070 --want toc
+paperbridge papers open --isbn 9781491903070 --chapter 1 --want chapter
+paperbridge papers open --isbn 9781491903070 --chapter 1 --want fulltext --max-chars 8000
+
 # Vox read-aloud only (not plain fulltext)
 paperbridge library read --item-key ABCD1234
 paperbridge library read-search -q "sparse attention" --result-index 0 --search-limit 5
@@ -142,7 +152,7 @@ paperbridge library read-search -q "sparse attention" --result-index 0 --search-
 
 MCP tools:
 
-- `open_paper { hit_id|doi|arxiv_id|item_key|paper_id|attachment_key|url, want, max_chars?, offset? }` — preferred; use `next_offset` to continue fulltext
+- `open_paper { hit_id|doi|arxiv_id|isbn|item_key|paper_id|attachment_key|url, want, chapter?, max_chars?, offset? }` — preferred; use `want: ["toc"]` to inspect book TOC, or `chapter: N` (requires `want` to include `chapter`, `fulltext`, or `chunks`); use `next_offset` to continue fulltext
 - `resolve_source_access { doi?, url? }` — institutional holdings and browser-safe route resolution
 - `get_pdf_text { attachment_key, max_chars?, offset? }` / `get_item_fulltext { attachment_key, max_chars?, offset? }` — low-level bounded attachment/cache paths
 - `prepare_vox_text` / `prepare_item_for_vox` / `prepare_search_result_for_vox` — Vox chunks only
@@ -311,6 +321,7 @@ paperbridge config snippet --target opencode
 - **PDF text extraction** happens automatically during local corpus import unless `--no-fulltext` is passed. Deferred extraction runs on first read; neither path performs OCR.
 - **PDF validation is strict when extracting** — HTML/error pages saved as `.pdf`, malformed or encrypted PDFs, and files over 100 MiB are rejected with recovery guidance. Use `--no-fulltext` only when you deliberately need to retain a PDF for later handling.
 - **Content is bounded** — `open_paper`, `get_pdf_text`, and `get_item_fulltext` default to 8,000 characters (maximum 32,000). Fulltext uses `next_offset`; chunks-only opens use `chunks_page.next_offset`; selected structure strings use `structure_page.next_offset`. Repeat the same call with that UTF-8 byte `offset`. Outlines/subtrees report omitted fields rather than a cursor. MCP rejects complete wire payloads over 64 KiB with a structured recovery error.
+- **Books support TOC and chapter slicing** — use `want: ["toc"]` to inspect chapters; `toc_status` reports `retrieved` or `failed` (with `toc_error`). Use `chapter: N` (requiring `want` to include `chapter`, `fulltext`, or `chunks`) to read a specific chapter; pagination (`max_chars`, `offset`, `total_chars`, `next_offset`) applies relative to the chapter slice.
 - **Metadata may be partial** — inspect `metadata_page.truncated` and `metadata_status` (`retrieved`, `identifier_only`, or `failed`). An identifier-only descriptor is not retrieved citation metadata. Missing cache IDs error; bare `pmid:` opens are explicitly unsupported. Use the returned supported URL hit ID when available.
 - **Trust the identifier, not a nearby match** — failed key-based reads never substitute a relevance-ranked cached paper. `match.score` is a heuristic weight, not a probability; compact `truncation` flags indicate capped display fields.
 - **MCP outputs are typed** — prefer `structuredContent`; compact JSON text remains for compatibility. Execution failures have `isError:true` and `{error,reason,try,retryable,recovery}`. Validation errors carry the same envelope in protocol error data. Recovery tools are suggestions, never automatically executed.

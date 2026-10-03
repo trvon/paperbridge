@@ -48,10 +48,10 @@ Prefer **skill/CLI forms** as the single wire form for MCP JSON + CLI:
 
 `research`, `arxiv`, `paperseed`, `hugging_face`, `semantic_scholar`, `crossref`,
 `openalex`, `europe_pmc`, `dblp`, `openreview`, `core`, `ads`, `pubmed`,
-`scholarapi`.
+`scholarapi`, `openlibrary`.
 
 Keep serde aliases for snake_case variants (`open_alex`, `open_review`,
-`scholar_api`, …) so older clients do not break. Schema examples and skill
+`scholar_api`, `open_library`, `ol`, …) so older clients do not break. Schema examples and skill
 docs must teach **only** the canonical set.
 
 ## List / search envelope
@@ -118,7 +118,7 @@ Rules:
 ```
 
 `detail=full` may add abstract (capped unless unlimited), venue, citation_count,
-urls, `oa_pdf_url`, `relevance_score`, `cache` object, etc.
+urls, `oa_pdf_url`, `relevance_score`, `cache` object, `work_type`, `isbn`, etc.
 
 ### `hit_id` rules
 
@@ -126,15 +126,16 @@ Stable, deterministic, preferred order of minting:
 
 1. `arxiv:{versionless_id}`
 2. `doi:{normalized_doi}`
-3. `zotero:{item_key}`
-4. `paperseed:{paper_id}`
-5. `research:{yams_hash}` for grouped YAMS research documents
-6. `url:{canonical_url}` last resort. This is intentionally reversible so a
+3. `isbn:{canonical_isbn13}`
+4. `zotero:{item_key}`
+5. `paperseed:{paper_id}`
+6. `research:{yams_hash}` for grouped YAMS research documents
+7. `url:{canonical_url}` last resort. This is intentionally reversible so a
    stateless `open_paper { hit_id }` call can retrieve URL-only hits.
 
 PMID-only records prefer a supported PDF/HTTP URL identity when available; retain `ids.pmid`. With no usable URL/DOI/cache identity, `pmid:` remains a discovery-only identifier with no advertised open action. Explicit PMID opens return actionable unsupported-resolution errors, not cache placeholders.
 
-Same logical paper from different sources should prefer the same id when an
+Same logical paper or book from different sources should prefer the same id when an
 identifier is shared (dedupe merge must promote best id set onto the kept hit).
 
 `access.content_state` is optional for remote results and required for local
@@ -150,6 +151,7 @@ Before multi-source fan-out, classify `query`:
 |-------|-----------|----------|
 | DOI | DOI shape / doi.org URL | Resolve-first; optional search backup |
 | arXiv | `1706.03762`, `arxiv:…`, abs URL | arXiv id path + annotate |
+| ISBN | 10 or 13-digit ISBN checksum | Open Library direct lookup (`get_by_isbn`) |
 | PMID | all-digits PMID heuristic when scoped | PubMed-first |
 | Title phrase | quoted string or Title-Case multi-word | Title-primary adapters |
 | Topic | free text | Broad multi-source |
@@ -160,12 +162,13 @@ Before multi-source fan-out, classify `query`:
   `all:{long phrase}` as the only strategy.
 - **Crossref**: prefer bibliographic/title-oriented params over bare `query=`
   when class is title.
+- **OpenLibrary**: prefer ISBN lookup `/isbn/{isbn}.json` when class is ISBN; free-text search on `/search.json?q=`.
 - **OpenAlex**: preserve relevance; attach verified ids; do not promote
   obviously non-canonical DOIs without flagging.
 
 ### Ranking order (descending)
 
-1. Exact DOI / arXiv / PMID match to query
+1. Exact DOI / arXiv / ISBN / PMID match to query
 2. Exact normalized title
 3. Title phrase containment (tighter titles beat looser)
 4. Token coverage
@@ -178,6 +181,7 @@ Expose `match.kind` so agents can refuse low-confidence top hits.
 ### ID hygiene
 
 - Normalize DOIs (strip resolver prefixes; lowercase).
+- Normalize ISBNs (strip prefixes, convert ISBN-10 to canonical ISBN-13 checksum).
 - Strip arXiv versions for identity.
 - Flag or demote hits with high citation_count but impossible year/DOI shape
   when better-identified candidates exist (`doi_status`, `year` sanity).
@@ -188,8 +192,9 @@ Expose `match.kind` so agents can refuse low-confidence top hits.
 
 ```text
 open_paper {
-  hit_id? | doi? | arxiv_id? | item_key? | paper_id? | attachment_key? | url?,
-  want: ["metadata" | "fulltext" | "structure" | "chunks"],
+  hit_id? | doi? | arxiv_id? | isbn? | item_key? | paper_id? | attachment_key? | url?,
+  chapter?: u32,
+  want: ["metadata" | "fulltext" | "structure" | "chunks" | "toc" | "chapter"],
   max_chars?,
   offset?,
   selector?,
@@ -209,7 +214,7 @@ Defaults:
   and returns `next_offset` when another page is available. `next_offset` is a
   UTF-8 byte position; call the same tool with that exact `offset` to continue.
 - `max_chars` is 1–32,000 per requested content view. Without a selector, structure returns a bounded outline with counts and `structure_page.omitted_fields`. Select against the complete tree first, then bound the selection; selected strings support UTF-8 byte offset paging. Object/array selections expose omissions and selector guidance, not a fabricated cursor.
-- Chunks-only requests preserve pagination in `chunks_page`. Metadata reports `metadata_status` (`retrieved`, `identifier_only`, `failed`) and `metadata_page` completeness. Missing cache identities fail explicitly.
+- Chunks-only requests preserve pagination in `chunks_page`. Metadata reports `metadata_status` (`retrieved`, `identifier_only`, `failed`) and `metadata_page` completeness. Table of contents requests (`want: ["toc"]`) return a `toc` object with `total_chapters` and `chapters` array (`id`, `number`, `title`, `start_page`), reporting `toc_status` (`retrieved` or `failed`) and `toc_error`. Chapter slicing (`chapter: N`, requires `want` to include `chapter`, `fulltext`, or `chunks`) returns `chapter`, `chapter_title`, and the chapter's bounded slice; pagination (`max_chars`, `offset`, `total_chars`, `next_offset`) is relative to the chapter. Note that when TOC metadata originates from OpenLibrary, `chapter: N` text slicing resolves against heading numbers found in the book's text body. Missing cache identities fail explicitly.
 - `content_provenance` and `structure_provenance` separate origin/retrieval from parser. Paperseed/YAMS/direct PDF text must not be labelled Zotero.
 - MCP `query_paper` wraps arbitrary selected JSON as `{value}` for an object-root schema. CLI keeps native selected JSON.
 - All MCP results expose `outputSchema` and `structuredContent` with compact text compatibility. A 64 KiB whole-result budget (both representations) returns a bounded recovery error on overflow. Key/citation metadata must not be silently replaced to meet that budget.

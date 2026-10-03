@@ -242,6 +242,8 @@ fn convert_message_to_hit(msg: RawCrossrefMessage) -> PaperHit {
         ids: None,
         match_info: None,
         access: None,
+        work_type: None,
+        isbn: None,
         next: Vec::new(),
     }
 }

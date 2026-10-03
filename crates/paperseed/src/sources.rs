@@ -30,12 +30,16 @@ pub struct FetchPlan {
     pub next_step: &'static str,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PaperbridgeMetadata {
     pub title: Option<String>,
     pub doi: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arxiv_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isbn: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_type: Option<String>,
     pub authors: Vec<String>,
     pub year: Option<u16>,
     pub venue: Option<String>,
@@ -130,6 +134,19 @@ pub fn metadata_from_paperbridge_json(raw: &str) -> serde_json::Result<Paperbrid
                 "metadata.arxiv_id",
             ],
         ),
+        isbn: first_string(
+            &value,
+            &["isbn", "ISBN", "data.ISBN", "data.isbn", "metadata.isbn"],
+        ),
+        work_type: normalize_work_type(first_string(
+            &value,
+            &[
+                "work_type",
+                "workType",
+                "data.itemType",
+                "metadata.work_type",
+            ],
+        )),
         authors: authors(&value),
         year: first_u16(&value, &["year", "metadata.year"]).or_else(|| year_from_date(&value)),
         venue: first_string(
@@ -170,6 +187,12 @@ pub fn apply_metadata(base: &mut PaperMetadata, metadata: PaperbridgeMetadata) {
     }
     if metadata.arxiv_id.is_some() {
         base.arxiv_id = metadata.arxiv_id;
+    }
+    if metadata.isbn.is_some() {
+        base.isbn = metadata.isbn;
+    }
+    if metadata.work_type.is_some() {
+        base.work_type = metadata.work_type;
     }
     if !metadata.authors.is_empty() {
         base.authors = metadata.authors;
@@ -263,4 +286,17 @@ fn zotero_creators(value: &serde_json::Value) -> Option<Vec<String>> {
 fn get_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
     path.split('.')
         .try_fold(value, |current, segment| current.get(segment))
+}
+
+fn normalize_work_type(raw: Option<String>) -> Option<String> {
+    let raw = raw?;
+    let lower = raw.trim().to_ascii_lowercase();
+    match lower.as_str() {
+        "book" | "monograph" => Some("book".to_string()),
+        "booksection" | "book_section" | "chapter" => Some("chapter".to_string()),
+        "journalarticle" | "conferencepaper" | "preprint" | "report" | "paper" | "article" => {
+            Some("paper".to_string())
+        }
+        _ => Some(lower),
+    }
 }

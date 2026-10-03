@@ -159,6 +159,8 @@ fn convert_paper(p: RawS2Paper) -> PaperHit {
         ids: None,
         match_info: None,
         access: None,
+        work_type: None,
+        isbn: None,
         next: Vec::new(),
     }
 }

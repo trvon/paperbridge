@@ -161,6 +161,8 @@ fn convert_note(n: RawOrNote, pdf_host: &str) -> PaperHit {
         ids: None,
         match_info: None,
         access: None,
+        work_type: None,
+        isbn: None,
         next: Vec::new(),
     }
 }

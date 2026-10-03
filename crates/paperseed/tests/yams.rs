@@ -217,6 +217,159 @@ fn yams_index_sends_title_path_and_text() {
 }
 
 #[test]
+fn index_paper_tags_books_cleanly() {
+    let runner = FakeRunner::new(YamsOutput {
+        status_success: true,
+        stdout: r#"{"hash":"book-hash-1"}"#.to_string(),
+        stderr: String::new(),
+    });
+    let config = YamsConfig {
+        enabled: true,
+        binary: PathBuf::from("yams"),
+    };
+    let mut paper = fake_paper();
+    paper.metadata.work_type = Some("book".to_string());
+    paper.metadata.isbn = Some("9780131103627".to_string());
+
+    assert_eq!(
+        index_paper_with_runner(
+            &config,
+            &runner,
+            YamsIndexRequest {
+                paper: &paper,
+                full_text: Some("chapter text")
+            }
+        ),
+        Some("book-hash-1".to_string())
+    );
+
+    let calls = runner.calls.borrow();
+    let args = &calls[0];
+    assert!(
+        args.iter()
+            .any(|arg| arg == "--tags=paperseed,paperbridge,book")
+    );
+    assert!(
+        args.iter()
+            .any(|arg| arg == "--collection=paperbridge-books")
+    );
+    assert!(args.iter().any(|arg| arg == "--metadata=work_type=book"));
+    assert!(
+        args.iter()
+            .any(|arg| arg == "--metadata=isbn=9780131103627")
+    );
+}
+
+#[test]
+fn index_paper_tags_chapters_and_isbn_cleanly() {
+    let runner = FakeRunner::new(YamsOutput {
+        status_success: true,
+        stdout: r#"{"hash":"chapter-hash-1"}"#.to_string(),
+        stderr: String::new(),
+    });
+    let config = YamsConfig {
+        enabled: true,
+        binary: PathBuf::from("yams"),
+    };
+    let mut paper = fake_paper();
+    paper.metadata.work_type = Some("chapter".to_string());
+    paper.metadata.isbn = Some("9780131103627".to_string());
+
+    assert_eq!(
+        index_paper_with_runner(
+            &config,
+            &runner,
+            YamsIndexRequest {
+                paper: &paper,
+                full_text: Some("section text")
+            }
+        ),
+        Some("chapter-hash-1".to_string())
+    );
+
+    let calls = runner.calls.borrow();
+    let args = &calls[0];
+    assert!(
+        args.iter()
+            .any(|arg| arg == "--tags=paperseed,paperbridge,book")
+    );
+    assert!(
+        args.iter()
+            .any(|arg| arg == "--collection=paperbridge-books")
+    );
+    assert!(args.iter().any(|arg| arg == "--metadata=work_type=chapter"));
+}
+
+#[test]
+fn explicit_paper_work_type_with_proceedings_isbn_is_not_tagged_book() {
+    let runner = FakeRunner::new(YamsOutput {
+        status_success: true,
+        stdout: r#"{"hash":"conf-paper-hash-1"}"#.to_string(),
+        stderr: String::new(),
+    });
+    let config = YamsConfig {
+        enabled: true,
+        binary: PathBuf::from("yams"),
+    };
+    let mut paper = fake_paper();
+    paper.metadata.work_type = Some("paper".to_string());
+    paper.metadata.isbn = Some("9780131103627".to_string()); // proceedings ISBN, but work_type is explicitly paper!
+
+    assert_eq!(
+        index_paper_with_runner(
+            &config,
+            &runner,
+            YamsIndexRequest {
+                paper: &paper,
+                full_text: Some("conference paper text")
+            }
+        ),
+        Some("conf-paper-hash-1".to_string())
+    );
+
+    let calls = runner.calls.borrow();
+    let args = &calls[0];
+    assert!(
+        args.iter()
+            .any(|arg| arg == "--tags=paperseed,paperbridge,paper")
+    );
+    assert!(args.iter().any(|arg| arg == "--collection=paperbridge"));
+    assert!(args.iter().any(|arg| arg == "--metadata=work_type=paper"));
+}
+
+#[test]
+fn download_tags_books_cleanly() {
+    let runner = FakeRunner::new(YamsOutput {
+        status_success: true,
+        stdout: r#"{"job_id":"job-book-1","status":"queued"}"#.to_string(),
+        stderr: String::new(),
+    });
+    let config = YamsConfig {
+        enabled: true,
+        binary: PathBuf::from("yams"),
+    };
+
+    let result = download_with_runner(
+        &config,
+        &runner,
+        YamsDownloadRequest {
+            url: "https://example.org/book.pdf",
+            title: Some("Designing Data-Intensive Applications"),
+            doi: None,
+            source_url: None,
+            work_type: Some("book"),
+        },
+    );
+    assert!(result.is_some());
+
+    let calls = runner.calls.borrow();
+    let args = &calls[0];
+    assert_eq!(args[0], "download");
+    assert!(args.iter().any(|arg| arg == "book"));
+    assert!(args.iter().any(|arg| arg == "work_type=book"));
+}
+
+#[test]
 fn ingest_indexes_authoritative_metadata_and_records_yams_hash() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("paper.txt");
@@ -240,6 +393,8 @@ fn ingest_indexes_authoritative_metadata_and_records_yams_hash() {
                 title: Some("Canonical Graph Detector".into()),
                 doi: Some("10.5555/graph-detector".into()),
                 arxiv_id: None,
+                isbn: None,
+                work_type: None,
                 authors: vec!["Ada Lovelace".into()],
                 year: Some(2026),
                 venue: Some("NDSS".into()),
@@ -392,6 +547,7 @@ fn yams_download_queue_indexes_ten_search_results() {
                 title: Some(&format!("Queued Paper {index}")),
                 doi: Some(&format!("10.5555/queued.{index}")),
                 source_url: Some("https://example.org/search"),
+                work_type: None,
             },
         );
         assert!(result.is_some());
@@ -466,6 +622,8 @@ fn fake_paper() -> LocalPaper {
             title: "YAMS Paper".to_string(),
             doi: Some("10.1/yams".to_string()),
             arxiv_id: None,
+            isbn: None,
+            work_type: None,
             authors: vec!["Ada Lovelace".to_string()],
             year: Some(2024),
             venue: Some("Journal".to_string()),

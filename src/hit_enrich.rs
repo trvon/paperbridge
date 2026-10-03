@@ -2,6 +2,7 @@
 
 use crate::models::{
     AccessInfo, ContentState, MatchInfo, MatchKind, PaperHit, PaperIds, PaperSource, SearchDetail,
+    WorkType,
 };
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -27,6 +28,7 @@ pub fn enrich_hit_identity(hit: &mut PaperHit) {
         .as_ref()
         .map(|c| c.paper_id.clone())
         .filter(|p| !p.trim().is_empty());
+    let isbn = hit.isbn.as_deref().and_then(crate::book::normalize_isbn);
     let open_url = [
         hit.oa_pdf_url.as_deref(),
         hit.pdf_url.as_deref(),
@@ -43,6 +45,8 @@ pub fn enrich_hit_identity(hit: &mut PaperHit) {
         zotero_key: None,
         paper_id: paper_id.clone(),
         research_hash: research_hash.clone(),
+        isbn: isbn.clone(),
+        openlibrary_id: None,
     });
 
     hit.hit_id = Some(if let Some(ref hash) = research_hash {
@@ -51,6 +55,10 @@ pub fn enrich_hit_identity(hit: &mut PaperHit) {
         format!("arxiv:{a}")
     } else if let Some(ref d) = doi {
         format!("doi:{d}")
+    } else if let Some(ref i) = isbn
+        && hit.work_type != Some(WorkType::Chapter)
+    {
+        format!("isbn:{i}")
     } else if let Some(ref p) = paper_id {
         format!("paperseed:{p}")
     } else if let Some(url) = open_url {
@@ -92,7 +100,7 @@ pub fn enrich_hit_identity(hit: &mut PaperHit) {
     if (cached || full_text) && (paper_id.is_some() || research_hash.is_some()) {
         next.push("open_paper".into());
         next.push("get_paper_structure".into());
-    } else if open_url.is_some() || doi.is_some() || arxiv.is_some() {
+    } else if open_url.is_some() || doi.is_some() || arxiv.is_some() || isbn.is_some() {
         next.push("open_paper".into());
         if doi.is_some() {
             next.push("resolve_doi".into());
@@ -101,9 +109,35 @@ pub fn enrich_hit_identity(hit: &mut PaperHit) {
     hit.next = next;
 }
 
+/// Precomputed query representations to avoid repeated normalization and regex parsing across hits.
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedQuery {
+    pub(crate) normalized: String,
+    pub(crate) doi: Option<String>,
+    pub(crate) arxiv: Option<String>,
+    pub(crate) isbn: Option<String>,
+}
+
+impl PreparedQuery {
+    pub(crate) fn new(query: &str) -> Self {
+        Self {
+            normalized: normalize(query),
+            doi: normalize_doi_str(query),
+            arxiv: normalize_arxiv_str(query),
+            isbn: crate::book::normalize_isbn(query),
+        }
+    }
+}
+
 /// Scores are ordinal ranking heuristics, not calibrated probabilities.
 pub fn enrich_match(hit: &mut PaperHit, query: &str) {
-    let kind = classify_match(query, hit);
+    let prepared = PreparedQuery::new(query);
+    enrich_match_prepared(hit, &prepared);
+}
+
+/// Scores are ordinal ranking heuristics, using a pre-parsed query across multiple hits.
+pub(crate) fn enrich_match_prepared(hit: &mut PaperHit, prep: &PreparedQuery) {
+    let kind = classify_match(prep, hit);
     let score = match kind {
         MatchKind::ExactId => Some(1.0),
         MatchKind::ExactTitle => Some(0.95),
@@ -174,19 +208,19 @@ pub(crate) fn usable_http_url(raw: &str) -> bool {
     })
 }
 
-fn classify_match(query: &str, hit: &PaperHit) -> MatchKind {
-    let q = normalize(query);
+fn classify_match(prep: &PreparedQuery, hit: &PaperHit) -> MatchKind {
+    let q = prep.normalized.as_str();
     if q.is_empty() {
         return MatchKind::Weak;
     }
 
     // ID shapes
-    if let Some(doi) = normalize_doi_str(query)
+    if let Some(ref doi) = prep.doi
         && hit.doi.as_deref().and_then(normalize_doi_str).as_deref() == Some(doi.as_str())
     {
         return MatchKind::ExactId;
     }
-    if let Some(arxiv) = normalize_arxiv_str(query) {
+    if let Some(ref arxiv) = prep.arxiv {
         let hit_a = hit
             .arxiv_id
             .as_deref()
@@ -196,12 +230,22 @@ fn classify_match(query: &str, hit: &PaperHit) -> MatchKind {
             return MatchKind::ExactId;
         }
     }
+    if let Some(ref isbn) = prep.isbn
+        && hit
+            .isbn
+            .as_deref()
+            .and_then(crate::book::normalize_isbn)
+            .as_deref()
+            == Some(isbn.as_str())
+    {
+        return MatchKind::ExactId;
+    }
 
     let title = normalize(&hit.title);
     if !title.is_empty() && title == q {
         return MatchKind::ExactTitle;
     }
-    if !title.is_empty() && title.contains(&q) && q.split_whitespace().count() >= 2 {
+    if !title.is_empty() && title.contains(q) && q.split_whitespace().count() >= 2 {
         return MatchKind::Phrase;
     }
 
@@ -552,5 +596,52 @@ mod tests {
             Some("url:https://openreview.net/pdf?id=abc")
         );
         assert_eq!(hit.next, vec!["open_paper"]);
+    }
+
+    #[test]
+    fn exact_isbn_match_kind() {
+        let mut hit = PaperHit::new(
+            PaperSource::OpenLibrary,
+            "Designing Data-Intensive Applications".into(),
+            vec!["Martin Kleppmann".into()],
+            Some("2017".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        hit.isbn = Some("9781491903070".into());
+        hit.work_type = Some(crate::models::WorkType::Book);
+        enrich_match(&mut hit, "ISBN 978-1-4919-0307-0");
+        assert_eq!(hit.match_info.unwrap().kind, MatchKind::ExactId);
+    }
+
+    #[test]
+    fn isbn_hit_id_and_access_metadata() {
+        let mut hit = PaperHit::new(
+            PaperSource::OpenLibrary,
+            "Designing Data-Intensive Applications".into(),
+            vec!["Martin Kleppmann".into()],
+            Some("2017".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("https://archive.org/download/ia123/ia123.pdf".into()),
+            None,
+            None,
+        );
+        hit.isbn = Some("9781491903070".into());
+        enrich_hit_identity(&mut hit);
+        assert_eq!(hit.hit_id.as_deref(), Some("isbn:9781491903070"));
+        assert!(hit.access.as_ref().unwrap().pdf);
+        assert!(hit.next.contains(&"open_paper".to_string()));
     }
 }
