@@ -381,9 +381,25 @@ pub(crate) fn parse_openlibrary_toc(
         }
     }
 
-    let mut chapters = Vec::new();
+    let mut chapters: Vec<crate::book::BookChapter> = Vec::new();
     for (i, (ch_title, page, explicit_num)) in filtered_items.into_iter().enumerate() {
         if ch_title.is_empty() {
+            continue;
+        }
+
+        if is_dotted_section_title(&ch_title) {
+            if let Some(parent) = chapters.last_mut() {
+                let sub_idx = parent.subsections.len() + 1;
+                let sub_id = format!("{}.{}", parent.id, sub_idx);
+                parent.subsections.push(crate::book::BookChapter {
+                    id: sub_id,
+                    number: None,
+                    title: ch_title,
+                    start_page: page,
+                    end_page: None,
+                    subsections: Vec::new(),
+                });
+            }
             continue;
         }
 
@@ -478,6 +494,44 @@ fn is_non_chapter_heading(title: &str) -> bool {
         || stripped.starts_with("afterword")
         || stripped.starts_with("epilogue")
         || stripped.starts_with("about the author")
+}
+
+fn is_dotted_section_title(title: &str) -> bool {
+    let trimmed = title.trim();
+    let digit_len = trimmed.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digit_len > 0 {
+        let after = &trimmed[digit_len..];
+        if after.starts_with('.')
+            && after[1..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit())
+        {
+            return true;
+        }
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    for prefix in &["section ", "sec. ", "sec "] {
+        if let Some(rest) = lower.strip_prefix(prefix) {
+            let rest_trimmed = rest.trim_start();
+            let d_len = rest_trimmed
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .count();
+            if d_len > 0 {
+                let after = &rest_trimmed[d_len..];
+                if after.starts_with('.')
+                    && after[1..]
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_digit())
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn extract_year_from_date(s: &str) -> Option<String> {
@@ -643,5 +697,35 @@ mod tests {
         assert_eq!(toc.chapters[0].number, Some(1));
         assert_eq!(toc.chapters[3].title, "Partitioning");
         assert_eq!(toc.chapters[3].number, Some(4));
+    }
+
+    #[test]
+    fn test_parse_openlibrary_toc_flat_with_dotted_sections() {
+        let val = serde_json::json!([
+            {"title": "Foundations of Data Systems"},
+            {"title": "1.1 Reliability and Fault Tolerance"},
+            {"title": "1.2 Scalability and Performance"},
+            {"title": "Data Storage and Retrieval"},
+            {"title": "2.1 Storage Engines"}
+        ]);
+        let toc = parse_openlibrary_toc(&val, "Book", None).unwrap();
+        // The dotted sections are nested under their respective chapters rather than becoming top-level chapters
+        assert_eq!(toc.chapters.len(), 2);
+        assert_eq!(toc.chapters[0].title, "Foundations of Data Systems");
+        assert_eq!(toc.chapters[0].number, Some(1));
+        assert_eq!(toc.chapters[0].subsections.len(), 2);
+        assert_eq!(
+            toc.chapters[0].subsections[0].title,
+            "1.1 Reliability and Fault Tolerance"
+        );
+        assert_eq!(
+            toc.chapters[0].subsections[1].title,
+            "1.2 Scalability and Performance"
+        );
+
+        assert_eq!(toc.chapters[1].title, "Data Storage and Retrieval");
+        assert_eq!(toc.chapters[1].number, Some(2));
+        assert_eq!(toc.chapters[1].subsections.len(), 1);
+        assert_eq!(toc.chapters[1].subsections[0].title, "2.1 Storage Engines");
     }
 }

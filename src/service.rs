@@ -549,10 +549,12 @@ impl PaperbridgeService {
             } else {
                 self.resolve_fulltext_for_open(&mut resolved).await?
             };
+            let mut chapter_crumb: Option<String> = None;
             if let Some(ch_num) = resolved.chapter {
                 if let Some((slice, ch_title)) =
                     crate::book::extract_chapter_slice(&fulltext.content, ch_num)
                 {
+                    chapter_crumb = Some(format!("Chapter {ch_num}: {ch_title}"));
                     out.insert("chapter_title".into(), serde_json::json!(ch_title));
                     let chars = u32::try_from(slice.chars().count()).ok();
                     fulltext.content = slice.to_string();
@@ -572,10 +574,11 @@ impl PaperbridgeService {
                 let chunk_size = req.max_chars_per_chunk.unwrap_or(DEFAULT_CHUNK_SIZE);
                 let is_technical = resolved.chapter.is_some() || resolved.isbn.is_some();
                 let vox = if is_technical {
+                    let breadcrumb = chapter_crumb.as_deref().or(resolved.isbn.as_deref());
                     let chunks = crate::chunking::split_technical_content(
                         &page.fulltext.content,
                         chunk_size,
-                        None,
+                        breadcrumb,
                     );
                     crate::models::VoxTextPayload {
                         source: format!("open:{}", page.fulltext.item_key),

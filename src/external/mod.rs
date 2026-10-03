@@ -30,6 +30,7 @@ use crate::crossref::CrossrefClient;
 use crate::error::{Result, ZoteroMcpError};
 use crate::models::{
     PaperHit, PaperSource, SearchCacheMode, SearchDetail, SearchDiagnostics, SourceDiagnostic,
+    WorkType,
 };
 use crate::request_router::{RoutedResponse, global_request_router};
 use futures::future::BoxFuture;
@@ -573,9 +574,15 @@ pub(crate) fn compatible_identity(left: &PaperHit, right: &PaperHit) -> bool {
         (doi_key(left), doi_key(right)),
         (arxiv_key(left), arxiv_key(right)),
         (pmid_key(left), pmid_key(right)),
-        (isbn_key(left), isbn_key(right)),
+        (paper_id_key(left), paper_id_key(right)),
     ];
-    shared_id_pairs.iter().any(|(a, b)| a.is_some() && a == b)
+    let neither_is_chapter =
+        left.work_type != Some(WorkType::Chapter) && right.work_type != Some(WorkType::Chapter);
+    let isbn_matches =
+        neither_is_chapter && isbn_key(left).is_some() && isbn_key(left) == isbn_key(right);
+
+    isbn_matches
+        || shared_id_pairs.iter().any(|(a, b)| a.is_some() && a == b)
         || title_author_key(left).is_some_and(|key| Some(key) == title_author_key(right))
 }
 
@@ -664,6 +671,20 @@ pub(crate) fn pmid_key(hit: &PaperHit) -> Option<String> {
 
 pub(crate) fn isbn_key(hit: &PaperHit) -> Option<String> {
     hit.isbn.as_deref().and_then(crate::book::normalize_isbn)
+}
+
+pub(crate) fn paper_id_key(hit: &PaperHit) -> Option<String> {
+    hit.cache
+        .as_ref()
+        .map(|c| c.paper_id.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .or_else(|| {
+            hit.ids
+                .as_ref()
+                .and_then(|ids| ids.paper_id.as_deref().map(str::trim))
+                .filter(|k| !k.is_empty())
+                .map(str::to_string)
+        })
 }
 
 pub(crate) fn title_author_key(hit: &PaperHit) -> Option<String> {

@@ -350,12 +350,24 @@ impl PaperseedApi {
         isbn: Option<&str>,
     ) -> Option<IndexedPaper> {
         let db = self.corpus_status().ok()?;
-        db.papers.into_iter().find(|entry| {
-            doi.is_some_and(|doi| entry_doi_matches(entry, doi))
-                || arxiv_id.is_some_and(|id| entry_arxiv_matches(entry, id))
-                || url.is_some_and(|url| entry_url_matches(entry, url))
-                || isbn.is_some_and(|target_isbn| entry_isbn_matches(entry, target_isbn))
-        })
+        let mut matches: Vec<IndexedPaper> = db
+            .papers
+            .into_iter()
+            .filter(|entry| {
+                doi.is_some_and(|doi| entry_doi_matches(entry, doi))
+                    || arxiv_id.is_some_and(|id| entry_arxiv_matches(entry, id))
+                    || url.is_some_and(|url| entry_url_matches(entry, url))
+                    || isbn.is_some_and(|target_isbn| entry_isbn_matches(entry, target_isbn))
+            })
+            .collect();
+        if isbn.is_some() {
+            matches.sort_by_key(|entry| match entry.paper.metadata.work_type.as_deref() {
+                Some(wt) if wt.eq_ignore_ascii_case("book") => 0,
+                None => 1,
+                _ => 2,
+            });
+        }
+        matches.into_iter().next()
     }
 
     pub fn get_cached_paper(&self, paper_id: &str) -> Result<CachedPaperDetail> {
@@ -404,10 +416,17 @@ fn cached_paper_detail(entry: IndexedPaper) -> CachedPaperDetail {
 }
 
 fn entry_isbn_matches(entry: &IndexedPaper, target_isbn: &str) -> bool {
+    let metadata = &entry.paper.metadata;
+    if metadata
+        .work_type
+        .as_deref()
+        .is_some_and(|wt| wt.eq_ignore_ascii_case("chapter"))
+    {
+        return false;
+    }
     let Some(target_norm) = crate::book::normalize_isbn(target_isbn) else {
         return false;
     };
-    let metadata = &entry.paper.metadata;
     if let Some(ref entry_isbn) = metadata.isbn {
         for token in entry_isbn.split(|c: char| c.is_whitespace() || c == ',' || c == ';') {
             if let Some(norm) = crate::book::normalize_isbn(token)

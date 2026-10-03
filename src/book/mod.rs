@@ -43,6 +43,8 @@ pub(crate) struct BookToc {
 #[derive(Debug, Clone)]
 pub(crate) struct CandidateHeading {
     pub(crate) number: u32,
+    pub(crate) id: String,
+    pub(crate) chapter_number: Option<u32>,
     pub(crate) byte_offset: usize,
     pub(crate) heading_line_len: usize,
     pub(crate) title: String,
@@ -63,11 +65,13 @@ pub(crate) fn collect_raw_candidate_headings(content: &str) -> Vec<CandidateHead
                 .to_ascii_lowercase()
                 .contains("contents")
             || detect_chapter_heading(lines[i - 1].trim()).is_some();
-        if preceded_cleanly && let Some((num, mut ch_title)) = detect_chapter_heading(trimmed) {
-            // If the heading line was only "Chapter N", check if the next line has the title
+        if preceded_cleanly && let Some(heading) = detect_chapter_heading(trimmed) {
+            let mut ch_title = heading.title;
+            // If the heading line was only "Chapter N" or "Appendix X", check if the next line has the title
             if (ch_title == trimmed
                 || ch_title.is_empty()
-                || ch_title.eq_ignore_ascii_case("chapter"))
+                || ch_title.eq_ignore_ascii_case("chapter")
+                || ch_title.eq_ignore_ascii_case("appendix"))
                 && let Some(next_line) = lines
                     .get(i + 1..)
                     .and_then(|sub| sub.iter().find(|l| !l.trim().is_empty()))
@@ -82,7 +86,9 @@ pub(crate) fn collect_raw_candidate_headings(content: &str) -> Vec<CandidateHead
                 }
             }
             raw_candidates.push(CandidateHeading {
-                number: num,
+                number: heading.sequence_num,
+                id: heading.id,
+                chapter_number: heading.chapter_number,
                 byte_offset,
                 heading_line_len: raw_line.len(),
                 title: ch_title,
@@ -209,8 +215,8 @@ pub(crate) fn extract_toc_from_text(title: &str, isbn: Option<&str>, content: &s
     for c in candidates {
         if seen_numbers.insert(c.number) {
             chapters.push(BookChapter {
-                id: format!("ch-{}", c.number),
-                number: Some(c.number),
+                id: c.id,
+                number: c.chapter_number,
                 title: c.title,
                 start_page: None,
                 end_page: None,
@@ -242,14 +248,16 @@ pub(crate) fn extract_chapter_slice(content: &str, chapter_num: u32) -> Option<(
     let mut best_slice: Option<(&str, String, usize)> = None;
 
     for (idx, c) in candidates.iter().enumerate() {
-        if c.number != chapter_num {
+        let matches = c.number == chapter_num
+            || (c.chapter_number == Some(chapter_num) && !c.id.starts_with("appendix"));
+        if !matches {
             continue;
         }
 
-        // The candidate chapter ends at the next candidate with a different chapter number, or EOF.
+        // The candidate chapter ends at the next candidate with a different sequence number, or EOF.
         let end_pos = candidates[idx + 1..]
             .iter()
-            .find(|next| next.number != chapter_num)
+            .find(|next| next.number != c.number)
             .map(|next| next.byte_offset)
             .unwrap_or(content.len());
 
@@ -344,7 +352,57 @@ fn parse_numeral_or_word(s: &str) -> Option<(u32, usize)> {
     None
 }
 
-fn detect_chapter_heading(line: &str) -> Option<(u32, String)> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DetectedHeading {
+    pub(crate) sequence_num: u32,
+    pub(crate) id: String,
+    pub(crate) chapter_number: Option<u32>,
+    pub(crate) title: String,
+}
+
+fn parse_separator_and_title(after_marker: &str) -> (bool, &str) {
+    let first_char = after_marker.chars().next();
+    if let Some(fc) = first_char
+        && (fc == ':' || fc == '-' || fc == '—' || (fc == '.' && !after_marker.starts_with("..")))
+    {
+        (true, after_marker[fc.len_utf8()..].trim())
+    } else {
+        (false, after_marker)
+    }
+}
+
+fn clean_and_validate_title(
+    title_part: &str,
+    has_separator: bool,
+    default_title: &str,
+) -> Option<String> {
+    if !has_separator
+        && title_part
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase())
+    {
+        return None;
+    }
+
+    let clean_title = if let Some(dot_idx) = title_part.rfind("..") {
+        title_part[..dot_idx].trim()
+    } else {
+        title_part
+    };
+
+    if clean_title.ends_with(['.', '!', '?']) {
+        return None;
+    }
+
+    if clean_title.is_empty() {
+        Some(default_title.to_string())
+    } else {
+        Some(clean_title.to_string())
+    }
+}
+
+fn detect_chapter_heading(line: &str) -> Option<DetectedHeading> {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.chars().count() > 120 {
         return None;
@@ -366,46 +424,70 @@ fn detect_chapter_heading(line: &str) -> Option<(u32, String)> {
             return None;
         }
 
-        let first_char = after_num.chars().next();
-        let (has_separator, title_part) = if let Some(fc) = first_char
-            && (fc == ':' || fc == '-' || fc == '—' || (fc == '.' && !after_num.starts_with("..")))
-        {
-            (true, after_num[fc.len_utf8()..].trim())
-        } else {
-            (false, after_num)
-        };
+        let (has_sep, title_part) = parse_separator_and_title(after_num);
+        let title = clean_and_validate_title(title_part, has_sep, trimmed)?;
 
-        // Reject wrapped body prose (e.g. "Chapter 5 covers the details in Section 2.1"):
-        // Real heading titles are either empty ("Chapter 5"), have a punctuation separator, or start with capital letter.
-        if !has_separator
-            && title_part
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_lowercase())
-        {
-            return None;
-        }
-
-        // Strip trailing dots/page numbers if any (e.g. "Reliability ... 15")
-        let clean_title = if let Some(dot_idx) = title_part.rfind("..") {
-            title_part[..dot_idx].trim()
-        } else {
-            title_part
-        };
-
-        // Reject sentences ending in punctuation (e.g. "Chapter 3. The next chapter builds on this."):
-        // A true chapter title is a heading, never an English sentence ending with punctuation.
-        if clean_title.ends_with(['.', '!', '?']) {
-            return None;
-        }
-
-        let final_title = if clean_title.is_empty() {
-            trimmed.to_string()
-        } else {
-            clean_title.to_string()
-        };
-        return Some((num, final_title));
+        return Some(DetectedHeading {
+            sequence_num: num,
+            id: format!("ch-{num}"),
+            chapter_number: Some(num),
+            title,
+        });
     }
+
+    if lower.starts_with("appendix ") || lower.starts_with("appendix\t") {
+        let rest_orig = trimmed["appendix".len()..].trim_start();
+        let first_char = rest_orig.chars().next()?;
+        if first_char.is_ascii_alphabetic() {
+            let after_first = &rest_orig[first_char.len_utf8()..];
+            if after_first.is_empty()
+                || after_first.starts_with(|c: char| {
+                    c.is_whitespace() || c == ':' || c == '-' || c == '—' || c == '.'
+                })
+            {
+                let letter = first_char.to_ascii_uppercase();
+                let letter_idx = (letter as u32) - ('A' as u32) + 1;
+                let after_letter = after_first.trim_start();
+                if after_letter.starts_with(',') {
+                    return None;
+                }
+                let (has_sep, title_part) = parse_separator_and_title(after_letter);
+                let default_title = format!("Appendix {letter}");
+                let title = clean_and_validate_title(title_part, has_sep, &default_title)?;
+                return Some(DetectedHeading {
+                    sequence_num: 1000 + letter_idx,
+                    id: format!("appendix-{}", first_char.to_ascii_lowercase()),
+                    chapter_number: None,
+                    title,
+                });
+            }
+        }
+        if let Some((num, match_len)) = parse_numeral_or_word(rest_orig) {
+            let after_num = rest_orig[match_len..].trim_start();
+            if after_num.starts_with(',') {
+                return None;
+            }
+            let (has_sep, title_part) = parse_separator_and_title(after_num);
+            let default_title = format!("Appendix {num}");
+            let title = clean_and_validate_title(title_part, has_sep, &default_title)?;
+            return Some(DetectedHeading {
+                sequence_num: 1000 + num,
+                id: format!("appendix-{num}"),
+                chapter_number: Some(num),
+                title,
+            });
+        }
+    }
+
+    if lower == "appendix" {
+        return Some(DetectedHeading {
+            sequence_num: 1001,
+            id: "appendix".to_string(),
+            chapter_number: None,
+            title: trimmed.to_string(),
+        });
+    }
+
     None
 }
 
@@ -539,20 +621,23 @@ This is the real chapter 2 body text.
             None
         );
         assert_eq!(
-            detect_chapter_heading("Chapter IV: Distributed Systems"),
+            detect_chapter_heading("Chapter IV: Distributed Systems")
+                .map(|h| (h.sequence_num, h.title)),
             Some((4, "Distributed Systems".to_string()))
         );
         assert_eq!(
-            detect_chapter_heading("Chapter Four: Distributed Systems"),
+            detect_chapter_heading("Chapter Four: Distributed Systems")
+                .map(|h| (h.sequence_num, h.title)),
             Some((4, "Distributed Systems".to_string()))
         );
         assert_eq!(
-            detect_chapter_heading("Chapter 5 Foundations"),
+            detect_chapter_heading("Chapter 5 Foundations").map(|h| (h.sequence_num, h.title)),
             Some((5, "Foundations".to_string()))
         );
         // Em dash heading separator
         assert_eq!(
-            detect_chapter_heading("Chapter 1 — Foundations of Reliability"),
+            detect_chapter_heading("Chapter 1 — Foundations of Reliability")
+                .map(|h| (h.sequence_num, h.title)),
             Some((1, "Foundations of Reliability".to_string()))
         );
         // Non-numbered textbook headings must be rejected
@@ -942,5 +1027,48 @@ Many systems use this model today.
         // Neither heading has body content
         assert!(extract_chapter_slice(sample, 1).is_none());
         assert!(extract_chapter_slice(sample, 2).is_none());
+    }
+
+    #[test]
+    fn test_appendix_headings_and_lettered_extraction() {
+        let sample = "\
+Chapter 1: Architecture
+This is chapter 1 body explaining the architecture.
+
+Chapter 2: Concurrency
+This is chapter 2 body explaining concurrency controls.
+
+Appendix A: Error Codes
+This is appendix A body listing all error codes in the system.
+
+Appendix B: Schema Definitions
+This is appendix B body describing the database schema.
+";
+
+        let toc = extract_toc_from_text("Systems Design", None, sample);
+        assert_eq!(toc.chapters.len(), 4);
+        assert_eq!(toc.chapters[0].id, "ch-1");
+        assert_eq!(toc.chapters[0].number, Some(1));
+        assert_eq!(toc.chapters[0].title, "Architecture");
+
+        assert_eq!(toc.chapters[1].id, "ch-2");
+        assert_eq!(toc.chapters[1].number, Some(2));
+        assert_eq!(toc.chapters[1].title, "Concurrency");
+
+        assert_eq!(toc.chapters[2].id, "appendix-a");
+        assert_eq!(toc.chapters[2].number, None);
+        assert_eq!(toc.chapters[2].title, "Error Codes");
+
+        assert_eq!(toc.chapters[3].id, "appendix-b");
+        assert_eq!(toc.chapters[3].number, None);
+        assert_eq!(toc.chapters[3].title, "Schema Definitions");
+
+        let (ch1, t1) = extract_chapter_slice(sample, 1).unwrap();
+        assert_eq!(t1, "Architecture");
+        assert!(ch1.contains("architecture"));
+
+        let (app_a, t_a) = extract_chapter_slice(sample, 1001).unwrap();
+        assert_eq!(t_a, "Error Codes");
+        assert!(app_a.contains("listing all error codes"));
     }
 }

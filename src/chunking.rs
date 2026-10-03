@@ -151,7 +151,13 @@ pub(crate) fn split_technical_content(
                 chunks.push(format!("{prefix}{}", current.trim()));
                 current.clear();
             }
-            for part in line_split_block(&block, target_max) {
+            let is_fenced = block.trim_start().starts_with("```");
+            let sub_parts = if is_fenced {
+                split_code_block(&block, target_max)
+            } else {
+                line_split_block(&block, target_max)
+            };
+            for part in sub_parts {
                 chunks.push(format!("{prefix}{}", part.trim()));
             }
             continue;
@@ -265,6 +271,68 @@ fn line_split_block(block: &str, max_chars: usize) -> Vec<String> {
     parts
 }
 
+fn split_code_block(block: &str, target_max: usize) -> Vec<String> {
+    let mut lines = block.lines();
+    let Some(first_line) = lines.next() else {
+        return vec![block.to_string()];
+    };
+    let fence_header = first_line.trim_end();
+    let fence_close = "```";
+    let body_lines: Vec<&str> = lines.collect();
+    let body_lines = if body_lines
+        .last()
+        .map(|l| l.trim())
+        .is_some_and(|l| l.starts_with("```"))
+    {
+        &body_lines[..body_lines.len() - 1]
+    } else {
+        &body_lines[..]
+    };
+
+    let overhead = fence_header.chars().count() + 1 + fence_close.chars().count() + 1;
+    let effective_max = target_max.saturating_sub(overhead).max(20);
+
+    let mut parts = Vec::new();
+    let mut current_body = String::new();
+
+    for &line in body_lines {
+        let needed = if current_body.is_empty() {
+            line.chars().count()
+        } else {
+            current_body.chars().count() + 1 + line.chars().count()
+        };
+
+        if needed <= effective_max {
+            if !current_body.is_empty() {
+                current_body.push('\n');
+            }
+            current_body.push_str(line);
+        } else {
+            if !current_body.is_empty() {
+                parts.push(format!("{fence_header}\n{current_body}\n{fence_close}"));
+                current_body.clear();
+            }
+            if line.chars().count() > effective_max {
+                for part in hard_split(line, effective_max) {
+                    parts.push(format!("{fence_header}\n{part}\n{fence_close}"));
+                }
+            } else {
+                current_body.push_str(line);
+            }
+        }
+    }
+
+    if !current_body.is_empty() {
+        parts.push(format!("{fence_header}\n{current_body}\n{fence_close}"));
+    }
+
+    if parts.is_empty() {
+        vec![block.to_string()]
+    } else {
+        parts
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,5 +379,23 @@ Summary of binary serialization.";
         // Check code block is intact in one of the chunks
         let has_code = chunks.iter().any(|c| c.contains("```rust\nstruct Record"));
         assert!(has_code);
+    }
+
+    #[test]
+    fn split_technical_content_splits_oversized_code_block_with_valid_fences() {
+        let input = "\
+```rust
+let a = 1;
+let b = 2;
+let c = 3;
+let d = 4;
+let e = 5;
+```";
+        let chunks = split_technical_content(input, 35, None);
+        assert!(chunks.len() >= 2);
+        for chunk in &chunks {
+            assert!(chunk.starts_with("```rust"));
+            assert!(chunk.ends_with("```"));
+        }
     }
 }

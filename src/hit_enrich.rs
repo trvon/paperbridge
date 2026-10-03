@@ -2,6 +2,7 @@
 
 use crate::models::{
     AccessInfo, ContentState, MatchInfo, MatchKind, PaperHit, PaperIds, PaperSource, SearchDetail,
+    WorkType,
 };
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -54,7 +55,9 @@ pub fn enrich_hit_identity(hit: &mut PaperHit) {
         format!("arxiv:{a}")
     } else if let Some(ref d) = doi {
         format!("doi:{d}")
-    } else if let Some(ref i) = isbn {
+    } else if let Some(ref i) = isbn
+        && hit.work_type != Some(WorkType::Chapter)
+    {
         format!("isbn:{i}")
     } else if let Some(ref p) = paper_id {
         format!("paperseed:{p}")
