@@ -47,6 +47,19 @@
 
 * Bump `quick-xml` to 0.41 (RUSTSEC-2026-0194 / 0195)
 
+## [2.1.0](https://github.com/trvon/paperbridge/compare/paperbridge-v2.0.0...paperbridge-v2.1.0) (2026-10-03)
+
+
+### Features
+
+* **books:** add technical book discovery, toc extraction, and chapter slicing ([c9e281f](https://github.com/trvon/paperbridge/commit/c9e281f7260d07d9242c6478c2dc17aa05a27992))
+* **books:** add technical book discovery, toc extraction, and chapter slicing ([#46](https://github.com/trvon/paperbridge/issues/46)) ([8a88d98](https://github.com/trvon/paperbridge/commit/8a88d983d5adf4655b7094302c3454b9190bc824))
+
+
+### Bug Fixes
+
+* **books:** address Copilot review feedback on chapter identities, TOC, and chunking ([077d023](https://github.com/trvon/paperbridge/commit/077d023f42bbc346cf3a7e728f5860f2d829fa9f))
+
 ## [2.0.0](https://github.com/trvon/paperbridge/compare/paperbridge-v1.0.1...paperbridge-v2.0.0) (2026-09-07)
 
 
