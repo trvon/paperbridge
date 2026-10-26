@@ -177,7 +177,8 @@ pub fn sanitize_message(message: &str, secrets: &[&str]) -> String {
             token[scheme + 3..]
                 .find('@')
                 .map(|at| (scheme + 3, scheme + 3 + at))
-        }) {
+        }) && at.1 > at.0
+        {
             result = result.replace(&token[at.0..at.1], "<redacted>");
         }
     }
@@ -208,6 +209,38 @@ mod tests {
         }
         assert!(safe.len() <= MAX_ERROR_BYTES);
         assert!(safe.ends_with("[truncated]"));
+    }
+
+    #[test]
+    fn regression_empty_url_userinfo_is_not_expanded() {
+        // An empty userinfo used to be replaced as the empty pattern,
+        // inserting "<redacted>" between every character.
+        let safe = sanitize_message("see https://@example.org/x now", &[]);
+        assert_eq!(safe, "see https://@example.org/x now");
+    }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn sanitized_messages_are_bounded_and_redacted(
+            prefix in "\\PC{0,200}",
+            suffix in "\\PC{0,200}",
+            secret in "[A-Z0-9]{8,24}",
+            repeat in 0usize..3000,
+        ) {
+            let message = format!("{prefix}{secret} {}{suffix}?token={secret}", "é".repeat(repeat));
+            let safe = sanitize_message(&message, &[&secret]);
+            prop_assert!(safe.len() <= MAX_ERROR_BYTES);
+            prop_assert!(!safe.contains(&secret));
+            prop_assert!(!safe.contains(urlencoding::encode(&secret).as_ref()));
+        }
+
+        #[test]
+        fn sanitize_never_panics(message in "\\PC{0,600}", secret in "\\PC{0,12}") {
+            let safe = sanitize_message(&message, &[&secret]);
+            prop_assert!(safe.len() <= MAX_ERROR_BYTES);
+        }
     }
 
     #[test]

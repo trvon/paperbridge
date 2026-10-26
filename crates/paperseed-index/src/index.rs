@@ -49,6 +49,11 @@ impl Index {
         &self.options
     }
 
+    /// External document ids in insertion order.
+    pub fn doc_ids(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.doc_ids.iter().map(String::as_str)
+    }
+
     pub fn contains_document(&self, doc_id: &str) -> bool {
         self.doc_ids.iter().any(|candidate| candidate == doc_id)
     }

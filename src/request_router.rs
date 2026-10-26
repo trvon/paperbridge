@@ -22,10 +22,41 @@ pub struct RequestRouterEvent {
     pub request_id: u64,
     pub component: String,
     pub origin: String,
+    /// 1-based count of requests actually sent for this call.
     pub attempt: u8,
+    /// HTTP status, or 0 when the request failed before a response.
     pub status: u16,
+    /// Time spent waiting for a rate-limit cooldown before this attempt.
+    pub cooldown_ms: u64,
+    /// Time spent waiting for origin/global concurrency permits.
     pub queue_ms: u64,
+    /// Time from send until response headers (or transport failure).
     pub ttfb_ms: u64,
+}
+
+/// Aggregate latency for one calling component (e.g. `crossref`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Eq, PartialEq, JsonSchema)]
+pub struct ComponentLatency {
+    pub component: String,
+    pub attempts: u64,
+    pub transport_failures: u64,
+    pub total_queue_ms: u64,
+    pub max_queue_ms: u64,
+    pub total_ttfb_ms: u64,
+    pub max_ttfb_ms: u64,
+}
+
+impl ComponentLatency {
+    fn record(&mut self, event: &RequestRouterEvent) {
+        self.attempts += 1;
+        if event.status == 0 {
+            self.transport_failures += 1;
+        }
+        self.total_queue_ms = self.total_queue_ms.saturating_add(event.queue_ms);
+        self.max_queue_ms = self.max_queue_ms.max(event.queue_ms);
+        self.total_ttfb_ms = self.total_ttfb_ms.saturating_add(event.ttfb_ms);
+        self.max_ttfb_ms = self.max_ttfb_ms.max(event.ttfb_ms);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, JsonSchema)]
@@ -37,6 +68,9 @@ pub struct RequestRouterSnapshot {
     pub transport_failures: u64,
     pub in_flight: u64,
     pub last_event: Option<RequestRouterEvent>,
+    /// Per-component totals since process start, sorted by component.
+    #[serde(default)]
+    pub components: Vec<ComponentLatency>,
 }
 
 #[derive(Debug, Default)]
@@ -69,6 +103,7 @@ pub struct RequestRouter {
     origins: Mutex<HashMap<String, Arc<OriginState>>>,
     metrics: Arc<RouterMetrics>,
     last_event: StdMutex<Option<RequestRouterEvent>>,
+    components: StdMutex<HashMap<&'static str, ComponentLatency>>,
     next_request_id: AtomicU64,
 }
 
@@ -86,6 +121,7 @@ impl RequestRouter {
             origins: Mutex::new(HashMap::new()),
             metrics: Arc::new(RouterMetrics::default()),
             last_event: StdMutex::new(None),
+            components: StdMutex::new(HashMap::new()),
             next_request_id: AtomicU64::new(1),
         }
     }
@@ -103,7 +139,43 @@ impl RequestRouter {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone(),
+            components: {
+                let components = self
+                    .components
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut rows = components.values().cloned().collect::<Vec<_>>();
+                rows.sort_by(|a, b| a.component.cmp(&b.component));
+                rows
+            },
         }
+    }
+
+    fn record_event(&self, component: &'static str, event: RequestRouterEvent) {
+        tracing::debug!(
+            request_id = event.request_id,
+            component,
+            origin = %event.origin,
+            attempt = event.attempt,
+            status = event.status,
+            cooldown_ms = event.cooldown_ms,
+            queue_ms = event.queue_ms,
+            ttfb_ms = event.ttfb_ms,
+            "http attempt"
+        );
+        self.components
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(component)
+            .or_insert_with(|| ComponentLatency {
+                component: component.to_string(),
+                ..ComponentLatency::default()
+            })
+            .record(&event);
+        *self
+            .last_event
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(event);
     }
 
     pub async fn send(
@@ -118,8 +190,9 @@ impl RequestRouter {
         let mut attempt = 0_u8;
 
         loop {
-            attempt += 1;
+            let cooldown_started = Instant::now();
             self.wait_for_cooldown(&origin_state).await;
+            let cooldown_ms = elapsed_ms(cooldown_started);
             let queued_at = Instant::now();
             let origin_permit = origin_state
                 .permits
@@ -134,11 +207,15 @@ impl RequestRouter {
                 .await
                 .map_err(|_| ZoteroMcpError::Http("request router closed".to_string()))?;
 
+            // Another caller hit a rate limit while we queued; wait again
+            // without counting this as a send attempt.
             if self.cooldown_remaining(&origin_state).await > Duration::ZERO {
                 drop(global_permit);
                 drop(origin_permit);
                 continue;
             }
+            let queue_ms = elapsed_ms(queued_at);
+            attempt = attempt.saturating_add(1);
 
             let outbound = request.try_clone().ok_or_else(|| {
                 ZoteroMcpError::Http("request not cloneable for retry".to_string())
@@ -146,7 +223,19 @@ impl RequestRouter {
             self.metrics.attempts.fetch_add(1, Ordering::Relaxed);
             self.metrics.in_flight.fetch_add(1, Ordering::Relaxed);
             let started_at = Instant::now();
-            let response = match outbound.send().await {
+            let sent = outbound.send().await;
+            let event = RequestRouterEvent {
+                request_id,
+                component: component.to_string(),
+                origin: origin.clone(),
+                attempt,
+                status: sent.as_ref().map_or(0, |r| r.status().as_u16()),
+                cooldown_ms,
+                queue_ms,
+                ttfb_ms: elapsed_ms(started_at),
+            };
+            self.record_event(component, event);
+            let response = match sent {
                 Ok(response) => response,
                 Err(error) => {
                     self.metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
@@ -157,19 +246,6 @@ impl RequestRouter {
                 }
             };
             let status = response.status();
-            *self
-                .last_event
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(RequestRouterEvent {
-                request_id,
-                component: component.to_string(),
-                origin: origin.clone(),
-                attempt,
-                status: status.as_u16(),
-                queue_ms: queued_at.elapsed().as_millis() as u64,
-                ttfb_ms: started_at.elapsed().as_millis() as u64,
-            });
-
             if matches!(
                 status,
                 StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
@@ -232,6 +308,10 @@ impl RequestRouter {
             *cooldown = Some(candidate);
         }
     }
+}
+
+fn elapsed_ms(since: Instant) -> u64 {
+    u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 #[derive(Debug)]
@@ -366,6 +446,10 @@ mod tests {
         assert_eq!(snapshot.rate_limited, 1);
         assert_eq!(snapshot.in_flight, 0);
         let event = snapshot.last_event.expect("last event");
+        assert_eq!(event.attempt, 2);
+        assert_eq!(event.status, 200);
+        assert_eq!(snapshot.components.len(), 1);
+        assert_eq!(snapshot.components[0].attempts, 2);
         assert_eq!(event.component, "test_source");
         assert!(event.origin.starts_with("http://"));
         assert!(!event.origin.contains("/paper"));
@@ -415,7 +499,57 @@ mod tests {
         assert_eq!(first_body, "ok");
         assert_eq!(second_body, "ok");
         assert!(started.elapsed() >= Duration::from_millis(120));
-        assert_eq!(router.snapshot().attempts, 2);
+        let snapshot = router.snapshot();
+        assert_eq!(snapshot.attempts, 2);
+        // Whichever caller queued behind the other waited for the permit,
+        // and that wait is reported as queue time, not time-to-first-byte.
+        let max_queue = snapshot.components.iter().map(|c| c.max_queue_ms).max();
+        assert!(max_queue.is_some_and(|ms| ms >= 50), "{snapshot:?}");
+        assert!(snapshot.components.iter().all(|c| c.max_ttfb_ms >= 50));
+    }
+
+    #[tokio::test]
+    async fn queue_time_excludes_time_to_first_byte() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(80))
+                    .set_body_string("ok"),
+            )
+            .mount(&server)
+            .await;
+        let router = RequestRouter::new(2, 2);
+        router
+            .send("solo", reqwest::Client::new().get(server.uri()))
+            .await
+            .unwrap();
+        let event = router.snapshot().last_event.expect("event");
+        assert_eq!(event.attempt, 1);
+        assert!(event.ttfb_ms >= 70, "{event:?}");
+        assert!(event.queue_ms < 40, "{event:?}");
+        assert!(event.cooldown_ms < 40, "{event:?}");
+    }
+
+    #[tokio::test]
+    async fn transport_failure_records_event_and_component_failure() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let router = RequestRouter::new(2, 2);
+        let result = router
+            .send(
+                "unreachable",
+                reqwest::Client::new().get(format!("http://{addr}/")),
+            )
+            .await;
+        assert!(result.is_err());
+        let snapshot = router.snapshot();
+        assert_eq!(snapshot.transport_failures, 1);
+        assert_eq!(snapshot.in_flight, 0);
+        let event = snapshot.last_event.expect("event");
+        assert_eq!(event.status, 0);
+        assert_eq!(snapshot.components[0].transport_failures, 1);
     }
 
     #[test]
@@ -424,6 +558,42 @@ mod tests {
         headers.insert(RETRY_AFTER, "1".parse().unwrap());
         headers.insert(BACKOFF, "9".parse().unwrap());
         assert_eq!(retry_delay(&headers), Duration::from_millis(2_000));
+    }
+
+    use proptest::prelude::*;
+
+    fn delay_headers(retry_after: Option<&str>, backoff: Option<&str>) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        if let Some(v) = retry_after.and_then(|v| v.parse().ok()) {
+            headers.insert(RETRY_AFTER, v);
+        }
+        if let Some(v) = backoff.and_then(|v| v.parse().ok()) {
+            headers.insert(BACKOFF, v);
+        }
+        headers
+    }
+
+    proptest! {
+        #[test]
+        fn retry_delay_is_bounded_and_monotone(
+            retry_after in proptest::option::of(any::<u64>()),
+            backoff in proptest::option::of(any::<u64>()),
+            bump in 0u64..10,
+            junk in "\\PC{0,12}",
+        ) {
+            let ra = retry_after.map(|v| v.to_string());
+            let bo = backoff.map(|v| v.to_string());
+            let delay = retry_delay(&delay_headers(ra.as_deref(), bo.as_deref()));
+            prop_assert!(delay <= Duration::from_millis(RETRY_DELAY_CAP_MS));
+            if let Some(v) = retry_after {
+                let bigger = v.saturating_add(bump).to_string();
+                let larger = retry_delay(&delay_headers(Some(&bigger), bo.as_deref()));
+                prop_assert!(larger >= delay);
+            }
+            // Malformed headers never panic and fall back within the cap.
+            let fallback = retry_delay(&delay_headers(Some(&junk), Some(&junk)));
+            prop_assert!(fallback <= Duration::from_millis(RETRY_DELAY_CAP_MS));
+        }
     }
 
     #[tokio::test]

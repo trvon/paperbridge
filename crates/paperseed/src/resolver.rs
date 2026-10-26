@@ -226,12 +226,16 @@ fn retryable_status(status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
 }
 
+/// Longest `Retry-After` honored; a larger server value is clamped so one
+/// resolver call cannot stall indefinitely.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
+
 fn retry_delay(headers: &reqwest::header::HeaderMap, attempt: usize) -> Duration {
     headers
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(Duration::from_secs)
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|secs| Duration::from_secs(secs).min(MAX_RETRY_AFTER))
         .unwrap_or_else(|| exponential_delay(attempt))
 }
 
@@ -353,6 +357,37 @@ fn crossref_to_search_result(work: CrossrefWork) -> SearchResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn retry_after(value: &str) -> reqwest::header::HeaderMap {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            reqwest::header::HeaderValue::from_str(value).unwrap(),
+        );
+        headers
+    }
+
+    #[test]
+    fn retry_after_is_honored_but_capped() {
+        assert_eq!(retry_delay(&retry_after("3"), 0), Duration::from_secs(3));
+        assert_eq!(
+            retry_delay(&retry_after("18446744073709551615"), 0),
+            MAX_RETRY_AFTER
+        );
+        assert_eq!(
+            retry_delay(&retry_after("not-a-number"), 2),
+            exponential_delay(2)
+        );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn retry_delay_is_bounded(secs in proptest::prelude::any::<u64>(), attempt in 0_usize..64) {
+            let delay = retry_delay(&retry_after(&secs.to_string()), attempt);
+            proptest::prop_assert!(delay <= MAX_RETRY_AFTER);
+            proptest::prop_assert!(exponential_delay(attempt) <= Duration::from_millis(3200));
+        }
+    }
 
     #[test]
     fn openalex_work_maps_pdf_and_strips_doi_prefix() {

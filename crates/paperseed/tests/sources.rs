@@ -103,3 +103,72 @@ fn ingest_applies_paperbridge_metadata_and_exports_bibtex() {
     assert!(bibtex.contains("Grace Hopper"));
     assert!(bibtex.contains("10.5555/graph"));
 }
+
+mod properties {
+    use super::metadata_from_paperbridge_json;
+    use proptest::prelude::*;
+    use serde_json::Value;
+
+    const KEYS: &[&str] = &[
+        "title",
+        "date",
+        "year",
+        "doi",
+        "DOI",
+        "isbn",
+        "authors",
+        "creators",
+        "firstName",
+        "lastName",
+        "name",
+        "data",
+        "metadata",
+        "itemType",
+        "work_type",
+        "workType",
+        "license",
+        "venue",
+        "url",
+        "abstract",
+        "arxiv_id",
+    ];
+
+    fn json_value() -> impl Strategy<Value = Value> {
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Bool),
+            any::<i64>().prop_map(Value::from),
+            any::<u64>().prop_map(Value::from),
+            any::<f64>()
+                .prop_filter("finite", |f| f.is_finite())
+                .prop_map(Value::from),
+            "\\PC{0,12}".prop_map(Value::String),
+            "[0-9]{0,6}-?[0-9]{0,3}".prop_map(Value::String),
+        ];
+        leaf.prop_recursive(4, 48, 6, |inner| {
+            prop_oneof![
+                prop::collection::vec(inner.clone(), 0..5).prop_map(Value::Array),
+                prop::collection::vec((prop::sample::select(KEYS), inner), 0..6).prop_map(
+                    |pairs| Value::Object(
+                        pairs
+                            .into_iter()
+                            .map(|(key, value)| (key.to_string(), value))
+                            .collect()
+                    )
+                ),
+            ]
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn metadata_parsing_never_panics(value in json_value()) {
+            let _ = metadata_from_paperbridge_json(&value.to_string());
+        }
+
+        #[test]
+        fn arbitrary_text_never_panics(raw in "\\PC{0,64}") {
+            let _ = metadata_from_paperbridge_json(&raw);
+        }
+    }
+}

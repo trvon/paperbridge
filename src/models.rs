@@ -918,6 +918,49 @@ pub struct CachedPaperDetail {
 mod tests {
     use super::*;
 
+    /// Every variant: serde and clap agree on the canonical name, the name
+    /// round-trips through both, and every clap alias is also a serde alias.
+    fn assert_wire_names_agree<T>()
+    where
+        T: clap::ValueEnum + Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    {
+        for variant in T::value_variants() {
+            let wire = serde_json::to_value(variant).unwrap();
+            let wire = wire.as_str().expect("unit variant serializes as string");
+            let possible = variant.to_possible_value().expect("variant not skipped");
+            assert_eq!(
+                possible.get_name(),
+                wire,
+                "clap/serde name mismatch for {variant:?}"
+            );
+            assert_eq!(&T::from_str(wire, false).unwrap(), variant);
+            for name in possible.get_name_and_aliases() {
+                let parsed: T = serde_json::from_value(serde_json::Value::from(name))
+                    .unwrap_or_else(|e| panic!("serde rejects clap name {name:?}: {e}"));
+                assert_eq!(&parsed, variant, "alias {name:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn wire_enums_agree_between_serde_and_clap() {
+        assert_wire_names_agree::<PaperSource>();
+        assert_wire_names_agree::<WorkType>();
+        assert_wire_names_agree::<SearchDetail>();
+        assert_wire_names_agree::<SearchCacheMode>();
+    }
+
+    #[test]
+    fn work_type_as_str_round_trips() {
+        for variant in <WorkType as clap::ValueEnum>::value_variants() {
+            assert_eq!(WorkType::parse(variant.as_str()), Some(*variant));
+            assert_eq!(
+                serde_json::to_value(variant).unwrap(),
+                serde_json::Value::from(variant.as_str())
+            );
+        }
+    }
+
     #[test]
     fn normalized_limit_clamps_to_valid_range() {
         assert_eq!(

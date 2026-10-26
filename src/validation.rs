@@ -56,7 +56,7 @@ pub fn validate_item_request(req: &ItemWriteRequest) -> ValidationReport {
     {
         issues.push(warning(
             "isbn",
-            "ISBN does not look like a valid 10 or 13 digit ISBN",
+            "ISBN is not a valid ISBN-10 or ISBN-13 (check digit or format)",
         ));
     }
 
@@ -139,7 +139,7 @@ pub fn validate_item_update_request(req: &ItemUpdateRequest) -> ValidationReport
     {
         issues.push(warning(
             "isbn",
-            "ISBN does not look like a valid 10 or 13 digit ISBN",
+            "ISBN is not a valid ISBN-10 or ISBN-13 (check digit or format)",
         ));
     }
 
@@ -210,18 +210,17 @@ fn validate_creator(creator: &CreatorInput, idx: usize, issues: &mut Vec<Validat
     }
 }
 
+/// Loose DOI shape check (`10.` prefix and a `/`) after removing `doi:` and
+/// resolver URL wrappers. Implied by `hit_enrich::normalize_doi_str`.
 pub(crate) fn looks_like_doi(value: &str) -> bool {
-    let trimmed = value.trim();
-    let lower = trimmed.to_ascii_lowercase();
-    lower.starts_with("10.") && lower.contains('/')
+    let stripped = crate::hit_enrich::strip_doi_prefix(value);
+    stripped.starts_with("10.") && stripped.contains('/')
 }
 
+/// Accepts exactly what `book::normalize_isbn` accepts (valid ISBN-10/13
+/// with checksum, any separators or `ISBN` label).
 fn looks_like_isbn(value: &str) -> bool {
-    let digits: String = value
-        .chars()
-        .filter(|c| c.is_ascii_digit() || *c == 'X' || *c == 'x')
-        .collect();
-    digits.len() == 10 || digits.len() == 13
+    crate::book::normalize_isbn(value).is_some()
 }
 
 fn error(field: &str, message: &str) -> ValidationIssue {
@@ -310,5 +309,35 @@ mod tests {
             version: None,
         });
         assert!(!report.valid);
+    }
+    #[test]
+    fn looks_like_isbn_agrees_with_normalize_isbn() {
+        // Previously counted digits only: labelled ISBN-13s (15 digits incl.
+        // "13") warned, while checksum-invalid 13-digit strings passed.
+        assert!(looks_like_isbn("ISBN-13: 978-1-4919-0307-0"));
+        assert!(looks_like_isbn("9781491903070; 1491903074"));
+        assert!(!looks_like_isbn("9781491903071"));
+        assert!(!looks_like_isbn("1234567890"));
+    }
+
+    #[test]
+    fn looks_like_doi_accepts_resolver_wrappers() {
+        assert!(looks_like_doi("https://dx.doi.org/10.1000/xyz"));
+        assert!(looks_like_doi("doi:10.1000/xyz"));
+        assert!(!looks_like_doi("https://example.com/xyz"));
+    }
+
+    mod props {
+        use super::super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn normalize_isbn_implies_looks_like_isbn(raw in "[0-9Xx \\-:ISBN,;]{0,40}") {
+                if crate::book::normalize_isbn(&raw).is_some() {
+                    prop_assert!(looks_like_isbn(&raw));
+                }
+            }
+        }
     }
 }

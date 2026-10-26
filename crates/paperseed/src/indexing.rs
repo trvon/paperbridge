@@ -7,6 +7,7 @@
 use crate::db::{CorpusDb, IndexedPaper, QueryHit};
 use crate::error::Result;
 use paperseed_index::{Index, IndexBuilder, paperseed_defaults};
+use std::collections::HashSet;
 use std::path::Path;
 
 pub fn build_index(db: &CorpusDb) -> Result<Index> {
@@ -31,26 +32,36 @@ pub fn persist_upsert(db: &CorpusDb, path: &Path, paper_id: &str) -> std::io::Re
         .find(|entry| entry.paper.metadata.id == paper_id)
         .ok_or_else(|| std::io::Error::other(format!("paper missing from corpus: {paper_id}")))?;
     let mut index = match Index::load(path) {
-        Ok(index) => {
-            let already_present = index.contains_document(paper_id);
-            let expected_count = if already_present {
-                db.papers.len()
-            } else {
-                db.papers.len().saturating_sub(1)
-            };
-            if index.doc_count() == expected_count {
-                index
-            } else {
-                build_index(db).map_err(|error| std::io::Error::other(error.to_string()))?
-            }
-        }
-        Err(_) => build_index(db).map_err(|error| std::io::Error::other(error.to_string()))?,
+        Ok(index) if index_matches_corpus(&index, db, Some(paper_id)) => index,
+        _ => build_index(db).map_err(|error| std::io::Error::other(error.to_string()))?,
     };
     upsert_index_entry(&mut index, entry)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     index
         .save(path)
         .map_err(|error| std::io::Error::other(error.to_string()))
+}
+
+/// True when the persisted index holds exactly the corpus ids, ignoring
+/// `pending_id`, which the caller is about to upsert. Comparing counts alone
+/// accepts an index where one paper was swapped for another.
+fn index_matches_corpus(index: &Index, db: &CorpusDb, pending_id: Option<&str>) -> bool {
+    let keep = |id: &&str| Some(*id) != pending_id;
+    let corpus: HashSet<&str> = db
+        .papers
+        .iter()
+        .map(|entry| entry.paper.metadata.id.as_str())
+        .filter(keep)
+        .collect();
+    let indexed: HashSet<&str> = index.doc_ids().filter(keep).collect();
+    corpus == indexed
+}
+
+/// Document count of the persisted index and whether it holds exactly the
+/// corpus ids. `None` when the index is missing or unreadable.
+pub fn persisted_index_status(db: &CorpusDb, path: &Path) -> Option<(usize, bool)> {
+    let index = Index::load(path).ok()?;
+    Some((index.doc_count(), index_matches_corpus(&index, db, None)))
 }
 
 pub fn persisted_doc_count(path: &Path) -> Option<usize> {
@@ -219,5 +230,130 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "a");
         assert!(missing.exists(), "fallback rebuild should be persisted");
+    }
+
+    fn indexed_ids(path: &Path) -> std::collections::BTreeSet<String> {
+        Index::load(path)
+            .unwrap()
+            .doc_ids()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn corpus_ids(db: &CorpusDb) -> std::collections::BTreeSet<String> {
+        db.papers
+            .iter()
+            .map(|entry| entry.paper.metadata.id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn upsert_rebuilds_when_a_paper_was_swapped_without_reindex() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("corpus.idx.bin");
+        let mut db = CorpusDb::default();
+        db.upsert(fixture("a", "alpha", None));
+        db.upsert(fixture("c", "gamma", None));
+        persist_index(&db, &path).unwrap();
+
+        // Same count, different membership: the old count check accepted this.
+        db.papers.retain(|entry| entry.paper.metadata.id != "a");
+        db.upsert(fixture("b", "beta", None));
+        persist_upsert(&db, &path, "c").unwrap();
+
+        assert_eq!(indexed_ids(&path), corpus_ids(&db));
+        assert!(search(&db, &path, "alpha", 5).unwrap().is_empty());
+        assert_eq!(search(&db, &path, "beta", 5).unwrap()[0].id, "b");
+    }
+
+    #[test]
+    fn index_status_detects_membership_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("corpus.idx.bin");
+        let mut db = CorpusDb::default();
+        db.upsert(fixture("a", "alpha", None));
+        persist_index(&db, &path).unwrap();
+        assert_eq!(persisted_index_status(&db, &path), Some((1, true)));
+
+        db.papers.clear();
+        db.upsert(fixture("b", "beta", None));
+        assert_eq!(persisted_index_status(&db, &path), Some((1, false)));
+    }
+
+    #[derive(Debug, Clone)]
+    enum Op {
+        /// Upsert paper `n`, persisting via `persist_upsert` when `persist`.
+        Upsert {
+            n: u8,
+            version: u8,
+            persist: bool,
+        },
+        /// Remove paper at position `n % len`, rebuilding when `persist`.
+        Remove {
+            n: u8,
+            persist: bool,
+        },
+        Reindex,
+    }
+
+    fn op() -> impl proptest::strategy::Strategy<Value = Op> {
+        use proptest::prelude::*;
+        prop_oneof![
+            (0_u8..6, 0_u8..3, any::<bool>()).prop_map(|(n, version, persist)| Op::Upsert {
+                n,
+                version,
+                persist
+            }),
+            (any::<u8>(), any::<bool>()).prop_map(|(n, persist)| Op::Remove { n, persist }),
+            Just(Op::Reindex),
+        ]
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+        /// Model test: after any persisting operation the index holds exactly
+        /// the corpus ids, even if earlier operations skipped index updates.
+        #[test]
+        fn persisted_index_tracks_corpus_membership(ops in proptest::collection::vec(op(), 1..16)) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("corpus.idx.bin");
+            let mut db = CorpusDb::default();
+            for op in ops {
+                let persisted = match op {
+                    Op::Upsert { n, version, persist } => {
+                        let id = format!("p{n}");
+                        db.upsert(fixture(&id, &format!("topic{n} rev{version}"), None));
+                        if persist {
+                            persist_upsert(&db, &path, &id).unwrap();
+                        }
+                        persist
+                    }
+                    Op::Remove { n, persist } => {
+                        if !db.papers.is_empty() {
+                            let index = usize::from(n) % db.papers.len();
+                            db.papers.remove(index);
+                        }
+                        if persist {
+                            persist_index(&db, &path).unwrap();
+                        }
+                        persist
+                    }
+                    Op::Reindex => {
+                        persist_index(&db, &path).unwrap();
+                        true
+                    }
+                };
+                if persisted {
+                    proptest::prop_assert_eq!(indexed_ids(&path), corpus_ids(&db));
+                    proptest::prop_assert_eq!(persisted_index_status(&db, &path).map(|s| s.1), Some(true));
+                }
+                if path.exists() {
+                    for hit in search(&db, &path, "topic0 topic1 topic2 topic3 topic4 topic5", 10).unwrap() {
+                        proptest::prop_assert!(corpus_ids(&db).contains(&hit.id));
+                    }
+                }
+            }
+        }
     }
 }

@@ -505,37 +505,16 @@ fn entry_url_matches(entry: &IndexedPaper, expected: &str) -> bool {
 }
 
 fn normalize_doi(raw: &str) -> Option<String> {
-    let lower = raw.trim().to_ascii_lowercase();
-    let value = lower
-        .strip_prefix("https://doi.org/")
-        .or_else(|| lower.strip_prefix("http://doi.org/"))
-        .or_else(|| lower.strip_prefix("doi:"))
-        .unwrap_or(&lower)
-        .trim();
-    value.starts_with("10.").then(|| value.to_string())
+    crate::hit_enrich::normalize_doi_str(raw)
 }
 
+/// Canonical arXiv id when valid; otherwise the wrapper/version-stripped
+/// lowercase form, so cached entries with unusual ids still compare.
 fn normalize_arxiv_id(raw: &str) -> String {
-    let lower = raw.trim().to_ascii_lowercase();
-    let value = lower
-        .strip_prefix("https://arxiv.org/abs/")
-        .or_else(|| lower.strip_prefix("http://arxiv.org/abs/"))
-        .or_else(|| lower.strip_prefix("https://arxiv.org/pdf/"))
-        .or_else(|| lower.strip_prefix("http://arxiv.org/pdf/"))
-        .or_else(|| lower.strip_prefix("arxiv:"))
-        .unwrap_or(&lower)
-        .trim_end_matches(".pdf");
-    strip_arxiv_version(value).to_string()
-}
-
-fn strip_arxiv_version(id: &str) -> &str {
-    id.rfind('v')
-        .and_then(|index| {
-            let suffix = &id[index + 1..];
-            (!suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
-                .then_some(&id[..index])
-        })
-        .unwrap_or(id)
+    crate::hit_enrich::normalize_arxiv_str(raw).unwrap_or_else(|| {
+        let stripped = crate::hit_enrich::strip_arxiv_prefix(raw);
+        crate::hit_enrich::strip_arxiv_version(&stripped).to_string()
+    })
 }
 
 fn arxiv_id_from_url(raw: &str) -> Option<String> {

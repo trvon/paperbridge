@@ -235,7 +235,8 @@ impl ParseState {
                         sec.heading_buf.clear();
                     }
                     if let Some(n) = attr_value(e, "n") {
-                        let level = (n.matches('.').count() as u8).saturating_add(1);
+                        let dots = u8::try_from(n.matches('.').count()).unwrap_or(u8::MAX);
+                        let level = dots.saturating_add(1);
                         sec.level = level.max(1);
                     }
                 }
@@ -262,13 +263,13 @@ impl ParseState {
         match name {
             "title" => {
                 if self.title_capturing {
-                    self.title = Some(self.title_buf.trim().to_string());
+                    self.title = Some(collapse_ws(&self.title_buf));
                     self.title_capturing = false;
                 }
                 if let Some(pref) = self.current_ref.as_mut()
                     && pref.title_capturing
                 {
-                    pref.title = Some(pref.title_buf.trim().to_string());
+                    pref.title = Some(collapse_ws(&pref.title_buf));
                     pref.title_capturing = false;
                 }
             }
@@ -311,12 +312,8 @@ impl ParseState {
             "persName" => {
                 if self.in_persname {
                     let forename = self.persname_forenames.join(" ");
-                    let full = match (&forename.trim().is_empty(), &self.persname_surname) {
-                        (false, Some(last)) => format!("{} {}", forename.trim(), last.trim()),
-                        (true, Some(last)) => last.trim().to_string(),
-                        (false, None) => forename.trim().to_string(),
-                        (true, None) => String::new(),
-                    };
+                    let surname = self.persname_surname.as_deref().unwrap_or_default();
+                    let full = collapse_ws(&format!("{forename} {surname}"));
                     if !full.is_empty() {
                         if let Some(pref) = self.current_ref.as_mut() {
                             pref.authors.push(full);
@@ -369,11 +366,11 @@ impl ParseState {
                 self.in_body = false;
             }
             "label" if self.figure_label_capturing => {
-                self.pending_figure_label = Some(self.figure_label_buf.trim().to_string());
+                self.pending_figure_label = Some(collapse_ws(&self.figure_label_buf));
                 self.figure_label_capturing = false;
             }
             "figDesc" if self.figure_caption_capturing => {
-                self.pending_figure_caption = Some(self.figure_caption_buf.trim().to_string());
+                self.pending_figure_caption = Some(collapse_ws(&self.figure_caption_buf));
                 self.figure_caption_capturing = false;
             }
             "figure" => {
@@ -665,5 +662,81 @@ mod tests {
     fn source_is_grobid() {
         let s = parse_tei("X", "Y", SAMPLE_TEI).expect("parse");
         assert!(matches!(s.source, PaperStructureSource::Grobid));
+    }
+
+    #[test]
+    fn regression_deep_head_numbering_saturates_level() {
+        let n = ".".repeat(300);
+        let xml = format!(
+            r#"<TEI><text><body><div><head n="{n}">Deep</head><p>x</p></div></body></text></TEI>"#
+        );
+        let s = parse_tei("X", "Y", &xml).expect("parse");
+        assert_eq!(s.sections[0].level, u8::MAX);
+    }
+
+    use proptest::prelude::*;
+
+    fn xml_escape(text: &str) -> String {
+        text.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    }
+
+    fn field() -> impl Strategy<Value = String> {
+        "[A-Za-z0-9éü&<>'\" ]{0,24}[A-Za-z0-9éü]"
+    }
+
+    proptest! {
+        #[test]
+        fn parse_tei_never_panics_on_arbitrary_text(xml in "\\PC{0,400}") {
+            let _ = parse_tei("X", "Y", &xml);
+        }
+
+        #[test]
+        fn parse_tei_never_panics_on_truncated_sample(cut in 0usize..SAMPLE_TEI.len(), len in 0usize..200) {
+            let mut xml = SAMPLE_TEI.to_string();
+            let start = (0..=cut).rev().find(|i| xml.is_char_boundary(*i)).unwrap_or(0);
+            let end = (start + len).min(xml.len());
+            let end = (end..=xml.len()).find(|i| xml.is_char_boundary(*i)).unwrap_or(xml.len());
+            xml.replace_range(start..end, "");
+            let _ = parse_tei("X", "Y", &xml);
+        }
+
+        #[test]
+        fn generated_tei_round_trips_metadata(
+            title in field(),
+            authors in prop::collection::vec((field(), field()), 0..4),
+            headings in prop::collection::vec(field(), 0..5),
+        ) {
+            let author_xml: String = authors
+                .iter()
+                .map(|(f, s)| format!(
+                    "<author><persName><forename>{}</forename><surname>{}</surname></persName></author>",
+                    xml_escape(f), xml_escape(s)
+                ))
+                .collect();
+            let body: String = headings
+                .iter()
+                .map(|h| format!("<div><head>{}</head><p>body text</p></div>", xml_escape(h)))
+                .collect();
+            let xml = format!(
+                r#"<TEI xmlns="http://www.tei-c.org/ns/1.0"><teiHeader><fileDesc><titleStmt><title level="a" type="main">{}</title></titleStmt><sourceDesc><biblStruct><analytic>{author_xml}</analytic></biblStruct></sourceDesc></fileDesc></teiHeader><text><body>{body}</body></text></TEI>"#,
+                xml_escape(&title)
+            );
+            let s = parse_tei("X", "Y", &xml).expect("generated TEI parses");
+            prop_assert_eq!(s.metadata.title, Some(collapse_ws(&title)));
+            let expected_authors: Vec<String> = authors
+                .iter()
+                .map(|(f, s)| collapse_ws(&format!("{} {}", f.trim(), s.trim())))
+                .collect();
+            prop_assert_eq!(&s.metadata.authors, &expected_authors);
+            let got: Vec<&str> = s.sections.iter().map(|sec| sec.heading.as_str()).collect();
+            let want: Vec<String> = headings.iter().map(|h| collapse_ws(h)).collect();
+            prop_assert_eq!(got, want);
+            for (i, sec) in s.sections.iter().enumerate() {
+                prop_assert_eq!(&sec.id, &format!("s{i}"));
+            }
+        }
     }
 }

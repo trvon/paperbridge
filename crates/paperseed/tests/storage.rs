@@ -20,8 +20,62 @@ fn hash_and_describe_file_are_stable() {
 
 #[test]
 fn content_addressed_paths_use_hash_prefix() {
-    let path = content_addressed_path("/corpus", "abcdef", Some("pdf"));
+    let path = content_addressed_path("/corpus", "abcdef", Some("pdf")).unwrap();
     assert_eq!(path.to_string_lossy(), "/corpus/ab/abcdef.pdf");
+}
+
+#[test]
+fn content_addressed_path_rejects_unsafe_hashes() {
+    for hash in ["", "a", "../etc", "a\u{e9}b", "ab/cd", "..", "xyz123"] {
+        assert!(
+            content_addressed_path("/corpus", hash, None).is_err(),
+            "{hash:?} must be rejected"
+        );
+    }
+    let path = content_addressed_path("/corpus", "abcd", Some("../../x")).unwrap();
+    assert_eq!(path.to_string_lossy(), "/corpus/ab/abcd");
+}
+
+#[test]
+fn copy_is_idempotent_for_identical_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("paper.pdf");
+    std::fs::write(&source, b"same bytes").unwrap();
+    let files = dir.path().join("files");
+    let first = copy_and_describe_file(&source, &files, "application/pdf").unwrap();
+    let second = copy_and_describe_file(&source, &files, "application/pdf").unwrap();
+    assert_eq!(first, second);
+    let leftovers = std::fs::read_dir(&files)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+        .count();
+    assert_eq!(leftovers, 0);
+}
+
+mod properties {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn hex_hashes_map_under_root(hash in "[0-9a-f]{2,64}", ext in proptest::option::of("[a-z0-9]{0,5}")) {
+            let path = content_addressed_path("/corpus", &hash, ext.as_deref()).unwrap();
+            prop_assert!(path.starts_with("/corpus"));
+            let parent = path.parent().unwrap();
+            prop_assert_eq!(parent.file_name().unwrap().to_str().unwrap(), &hash[..2]);
+            prop_assert_eq!(parent.parent().unwrap(), std::path::Path::new("/corpus"));
+            prop_assert!(path.file_name().unwrap().to_str().unwrap().starts_with(&hash));
+        }
+
+        #[test]
+        fn arbitrary_hashes_never_panic_or_escape(hash in "\\PC{0,12}", ext in proptest::option::of("\\PC{0,6}")) {
+            if let Ok(path) = content_addressed_path("/corpus", &hash, ext.as_deref()) {
+                prop_assert!(path.starts_with("/corpus"));
+                prop_assert_eq!(path.components().count(), 4);
+            }
+        }
+    }
 }
 
 #[test]

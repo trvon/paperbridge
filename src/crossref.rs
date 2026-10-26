@@ -1,7 +1,7 @@
 use crate::error::{Result, ZoteroMcpError};
 use crate::external::send_with_retry;
+use crate::hit_enrich::normalize_doi_str;
 use crate::models::{CrossrefWork, PaperHit, PaperSource};
-use crate::validation::looks_like_doi;
 use reqwest::Client;
 use serde::Deserialize;
 use std::ops::Not;
@@ -34,12 +34,13 @@ impl CrossrefClient {
     }
 
     pub async fn resolve_doi(&self, doi: &str) -> Result<CrossrefWork> {
-        let trimmed = doi.trim();
-        if looks_like_doi(trimmed).not() {
+        let Some(canonical) = normalize_doi_str(doi) else {
             return Err(ZoteroMcpError::InvalidInput(format!(
-                "'{trimmed}' does not look like a valid DOI"
+                "'{}' does not look like a valid DOI",
+                doi.trim()
             )));
-        }
+        };
+        let trimmed = canonical.as_str();
 
         let encoded = urlencoding::encode(trimmed);
         let url = format!("{}/works/{encoded}", self.base_url);
@@ -578,5 +579,40 @@ mod tests {
         let hits = client.search("q", 5).await.unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].doi.as_deref(), Some("10.1/after-retry"));
+    }
+    #[tokio::test]
+    async fn resolve_doi_accepts_prefixed_and_resolver_forms() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/works/10\.1234(/|%2F)abc$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "message": {"title": ["Fixture"]}
+            })))
+            .mount(&server)
+            .await;
+
+        let client = CrossrefClient::new(Some(&server.uri()));
+        for raw in [
+            "10.1234/ABC",
+            "doi:10.1234/abc",
+            "https://doi.org/10.1234/abc",
+            "http://dx.doi.org/10.1234/ABC",
+        ] {
+            let work = client.resolve_doi(raw).await.unwrap_or_else(|e| {
+                panic!("{raw}: {e:?}");
+            });
+            assert_eq!(work.doi, "10.1234/abc", "{raw}");
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_doi_rejects_non_doi_without_request() {
+        let client = CrossrefClient::new(Some("http://127.0.0.1:9"));
+        let err = client.resolve_doi("https://example.com/10.1/x").await;
+        assert!(matches!(err, Err(ZoteroMcpError::InvalidInput(_))));
     }
 }

@@ -633,4 +633,46 @@ Encerramento.
                 && section.text.contains("Planarization")
         }));
     }
+
+    use proptest::prelude::*;
+
+    fn paper_line() -> impl Strategy<Value = String> {
+        prop_oneof![
+            1 => prop::sample::select(vec![
+                "Abstract", "Introduction", "1. Introduction", "2 Related Work",
+                "Methods", "Results", "Discussion", "Conclusion", "References",
+                "Acknowledgements", "Appendix", "3.1 Threat Model", "IV. EVALUATION",
+                "\\begin{abstract} short", "\\end{abstract}", "\\section{Design}",
+            ]).prop_map(str::to_string),
+            1 => Just(String::new()),
+            4 => "[A-Za-z0-9 ,;é]{0,60}",
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn build_sections_never_panics(abstract_note in proptest::option::of("\\PC{0,40}"), content in "\\PC{0,400}") {
+            let _ = build_sections(abstract_note.as_deref(), &content);
+        }
+
+        #[test]
+        fn build_sections_ids_are_unique(
+            abstract_note in proptest::option::of("[A-Za-z ]{1,40}"),
+            lines in prop::collection::vec(paper_line(), 0..40),
+        ) {
+            let content = lines.join("\n");
+            let sections = build_sections(abstract_note.as_deref(), &content);
+            let mut ids = std::collections::HashSet::new();
+            for section in &sections {
+                prop_assert!(ids.insert(section.id.clone()), "duplicate id {} in {:?}", section.id, sections.iter().map(|s| &s.id).collect::<Vec<_>>());
+            }
+            if abstract_note.as_deref().is_some_and(|a| !a.trim().is_empty()) {
+                let abstracts = sections.iter().filter(|s| s.kind == Some(PaperSectionKind::Abstract)).count();
+                prop_assert_eq!(abstracts, 1);
+            }
+            if !content.trim().is_empty() {
+                prop_assert!(!sections.is_empty());
+            }
+        }
+    }
 }

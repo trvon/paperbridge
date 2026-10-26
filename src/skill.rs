@@ -262,19 +262,24 @@ fn first_sentences(text: &str, max_sentences: usize, max_chars: usize) -> String
     out.trim().to_string()
 }
 
-/// Truncate `text` to at most `max_chars`, preferring the last whitespace
-/// boundary before the limit, and appending an ellipsis marker when cut.
-fn truncate_on_boundary(text: &str, max_chars: usize) -> String {
-    if text.len() <= max_chars {
+/// Truncate `text` to at most `max_bytes` bytes (ellipsis marker included),
+/// preferring the last whitespace boundary before the limit.
+fn truncate_on_boundary(text: &str, max_bytes: usize) -> String {
+    const MARKER: &str = " …";
+    if text.len() <= max_bytes {
         return text.to_string();
     }
-    let mut end = max_chars;
+    let mut end = max_bytes.saturating_sub(MARKER.len());
     while end > 0 && !text.is_char_boundary(end) {
         end -= 1;
     }
     let slice = &text[..end];
     let cut = slice.rfind(char::is_whitespace).unwrap_or(end);
-    format!("{} …", slice[..cut].trim_end())
+    let kept = slice[..cut].trim_end();
+    if kept.is_empty() && max_bytes < MARKER.len() {
+        return String::new();
+    }
+    format!("{kept}{MARKER}")
 }
 
 fn non_empty(value: Option<&str>) -> Option<String> {
@@ -414,5 +419,39 @@ mod tests {
         structure.metadata.title = None;
         let payload = build_skill_scaffold(&structure);
         assert_eq!(payload.name, "abcd1234");
+    }
+
+    #[test]
+    fn regression_truncation_marker_fits_within_limit() {
+        let text = "word ".repeat(400);
+        let out = truncate_on_boundary(&text, MAX_SECTION_CHARS);
+        assert!(out.len() <= MAX_SECTION_CHARS, "{}", out.len());
+        assert!(out.ends_with(" …"));
+    }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn slugify_output_is_clean(input in "\\PC{0,200}") {
+            let slug = slugify(&input);
+            prop_assert!(!slug.is_empty());
+            prop_assert!(slug.len() <= MAX_SLUG_LEN);
+            prop_assert!(slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'));
+            prop_assert!(!slug.starts_with('-') && !slug.ends_with('-'));
+            prop_assert!(!slug.contains("--"));
+        }
+
+        #[test]
+        fn truncate_on_boundary_respects_limit(text in "\\PC{0,300}", max in 0usize..320) {
+            let out = truncate_on_boundary(&text, max);
+            prop_assert!(out.len() <= max.max(text.len().min(max)));
+            if text.len() <= max {
+                prop_assert_eq!(out, text);
+            } else {
+                let kept = out.strip_suffix(" …").unwrap_or(&out);
+                prop_assert!(text.starts_with(kept));
+            }
+        }
     }
 }

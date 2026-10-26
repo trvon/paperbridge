@@ -328,3 +328,89 @@ fn no_fulltext_import_defers_extraction_until_first_read() {
     let text = get_full_text(&paths, &paper.metadata.id, &YamsConfig::disabled()).unwrap();
     assert!(text.contains("deferred extraction content"));
 }
+
+mod properties {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn paper() -> impl Strategy<Value = IndexedPaper> {
+        (
+            "[a-z0-9-]{1,8}",
+            "[0-9a-f]{4,12}",
+            "\\PC{0,24}",
+            proptest::option::of("\\PC{0,16}"),
+            proptest::option::of(0_u16..3000),
+            prop::collection::vec("\\PC{0,10}", 0..3),
+        )
+            .prop_map(|(id, hash, title, doi, year, authors)| {
+                let mut entry = indexed_paper(&id, &hash);
+                entry.paper.metadata.title = title;
+                entry.paper.metadata.doi = doi;
+                entry.paper.metadata.year = year;
+                entry.paper.metadata.authors = authors;
+                entry
+            })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn save_then_load_round_trips(entries in prop::collection::vec(paper(), 0..6)) {
+            let mut db = CorpusDb::default();
+            for entry in entries {
+                db.upsert(entry);
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("corpus.json");
+            db.save(&path).unwrap();
+            prop_assert_eq!(CorpusDb::load(&path).unwrap(), db);
+        }
+
+        #[test]
+        fn upsert_is_idempotent_and_hashes_stay_unique(entries in prop::collection::vec(paper(), 0..8)) {
+            let mut once = CorpusDb::default();
+            for entry in &entries {
+                once.upsert(entry.clone());
+            }
+            let mut twice = once.clone();
+            for entry in &entries {
+                twice.upsert(entry.clone());
+            }
+            prop_assert_eq!(&once, &twice);
+            let hashes: std::collections::HashSet<_> =
+                once.papers.iter().map(|entry| &entry.paper.file.hash).collect();
+            prop_assert_eq!(hashes.len(), once.papers.len());
+        }
+
+        /// `get`: unique exact id, then exact hash, then unique hash prefix;
+        /// ambiguity is an error, never an arbitrary pick.
+        #[test]
+        fn get_follows_documented_precedence(
+            entries in prop::collection::vec(paper(), 1..6),
+            query in "[a-z0-9-]{0,6}",
+        ) {
+            let mut db = CorpusDb::default();
+            for entry in entries {
+                db.upsert(entry);
+            }
+            let ids = db.papers.iter().filter(|e| e.paper.metadata.id == query).count();
+            let exact_hash = db.papers.iter().any(|e| e.paper.file.hash == query);
+            let prefixes = db
+                .papers
+                .iter()
+                .filter(|e| e.paper.file.hash.starts_with(&query))
+                .count();
+            match db.get(&query) {
+                Err(_) => prop_assert!(
+                    query.is_empty() || ids > 1 || (ids == 0 && !exact_hash && prefixes > 1)
+                ),
+                Ok(None) => prop_assert!(ids == 0 && prefixes == 0),
+                Ok(Some(entry)) => prop_assert!(
+                    (ids == 1 && entry.paper.metadata.id == query)
+                        || (ids == 0 && entry.paper.file.hash.starts_with(&query))
+                ),
+            }
+        }
+    }
+}
