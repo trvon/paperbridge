@@ -1,6 +1,7 @@
 //! Deterministic UTF-8 tokenizer used by both index build and query.
 //!
-//! Applies Unicode decomposition and diacritic folding, lowercases, splits on
+//! Applies Unicode compatibility decomposition (NFKD, so PDF ligatures such
+//! as `ﬁ` match `fi`) and diacritic folding, lowercases, splits on
 //! non-alphanumeric characters, and applies a small deterministic English
 //! suffix stemmer. Stopwords remain because BM25F's IDF down-weights them.
 
@@ -9,7 +10,7 @@ use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 pub fn tokenize(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
-    for ch in text.nfd().filter(|ch| !is_combining_mark(*ch)) {
+    for ch in text.nfkd().filter(|ch| !is_combining_mark(*ch)) {
         if ch.is_alphanumeric() {
             current.extend(ch.to_lowercase());
         } else if !current.is_empty() {

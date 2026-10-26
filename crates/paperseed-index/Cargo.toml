@@ -7,7 +7,7 @@ license.workspace = true
 description = "BM25F index for the paperseed local paper corpus"
 
 [dependencies]
-bincode = "1"
+postcard = { version = "1", default-features = false, features = ["use-std"] }
 serde.workspace = true
 thiserror.workspace = true
 unicode-normalization = "0.1"

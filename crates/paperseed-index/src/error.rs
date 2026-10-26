@@ -5,9 +5,11 @@ pub enum IndexError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("index codec error: {0}")]
-    Codec(#[from] bincode::Error),
+    Codec(#[from] postcard::Error),
     #[error("index schema mismatch: expected {expected}, found {actual}")]
     SchemaMismatch { expected: u32, actual: u32 },
+    #[error("index file is corrupt: {0}")]
+    Corrupt(String),
 }
 
 pub type Result<T> = std::result::Result<T, IndexError>;
