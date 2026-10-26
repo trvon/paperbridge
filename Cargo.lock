@@ -1845,6 +1845,7 @@ version = "2.1.0"
 dependencies = [
  "blake3",
  "clap",
+ "criterion",
  "paperseed-index",
  "pdf-extract",
  "proptest",

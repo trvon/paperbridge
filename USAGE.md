@@ -82,7 +82,7 @@ Optional:
 - `PAPERBRIDGE_API_BASE=https://api.zotero.org`
 - `PAPERBRIDGE_TIMEOUT_SECS=20`
 - `PAPERBRIDGE_LOG_LEVEL=info`
-- `PAPERBRIDGE_TRACE_SPANS=off|close|json` (per-stage span timings on stderr; see Profiling)
+- `PAPERBRIDGE_TRACE_SPANS=off|close|json` (per-stage span timings on stderr; see `docs/dev/profiling.md`)
 - `PAPERBRIDGE_INSTITUTION_ACCESS_MODE=off|fallback|prefer`
 - `PAPERBRIDGE_INSTITUTION_RESOLVER_URL=https://resolver.example.edu/openurl`
 - `PAPERBRIDGE_INSTITUTION_GATEWAY_URL=https://proxy.example.edu/login?url=`

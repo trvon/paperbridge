@@ -43,6 +43,7 @@ workspace = true
 
 [workspace]
 members = [".", "crates/paperseed", "crates/paperseed-index"]
+exclude = ["fuzz"]
 resolver = "3"
 
 [workspace.package]
