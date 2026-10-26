@@ -47,6 +47,25 @@
 
 * Bump `quick-xml` to 0.41 (RUSTSEC-2026-0194 / 0195)
 
+## [2.2.0](https://github.com/trvon/paperbridge/compare/paperbridge-v2.1.0...paperbridge-v2.2.0) (2026-10-26)
+
+
+### Features
+
+* dependency refresh, invariant tests, and profiling ([42c2cb2](https://github.com/trvon/paperbridge/commit/42c2cb2972c6cef8d3b43f196828a425334cbdbe))
+* **index:** replace bincode with postcard behind a versioned header ([ab108c1](https://github.com/trvon/paperbridge/commit/ab108c1293d9eca7d1fe580ec9e9c8e66864ac99))
+* **mcp:** upgrade rmcp 1.8 -&gt; 3.7 ([06ce3db](https://github.com/trvon/paperbridge/commit/06ce3db4f84aa8b462667422a0d5c0d9a26ac9b7))
+
+
+### Bug Fixes
+
+* invariant test suite and the bugs it found ([0588447](https://github.com/trvon/paperbridge/commit/0588447d49740cf61523ca9ec0132fc8b8fdefa1))
+
+
+### Performance Improvements
+
+* span timings, benchmarks, faster index search, dedupe and cache ([8ce536d](https://github.com/trvon/paperbridge/commit/8ce536d3e3511e916a9020f5285c744903ff1ff4))
+
 ## [2.1.0](https://github.com/trvon/paperbridge/compare/paperbridge-v2.0.0...paperbridge-v2.1.0) (2026-10-03)
 
 
