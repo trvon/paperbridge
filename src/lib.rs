@@ -9,6 +9,8 @@ pub mod crossref;
 pub mod error;
 pub mod external;
 pub mod hit_enrich;
+#[doc(hidden)]
+pub mod internals;
 pub mod models;
 pub mod paper;
 pub mod paperseed_api;
@@ -18,6 +20,7 @@ pub mod security;
 pub mod server;
 pub mod service;
 pub mod skill;
+pub mod telemetry;
 pub mod update;
 pub mod validation;
 pub mod zotero_api;

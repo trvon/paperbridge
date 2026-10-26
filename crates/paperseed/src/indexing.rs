@@ -7,8 +7,58 @@
 use crate::db::{CorpusDb, IndexedPaper, QueryHit};
 use crate::error::Result;
 use paperseed_index::{Index, IndexBuilder, paperseed_defaults};
-use std::collections::HashSet;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::SystemTime;
+
+/// Identity of an index file on disk; a change in any field invalidates the
+/// in-process cache.
+#[derive(Clone, PartialEq, Eq)]
+struct IndexFileStamp {
+    path: PathBuf,
+    modified: SystemTime,
+    len: u64,
+}
+
+impl IndexFileStamp {
+    fn of(path: &Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some(Self {
+            path: path.to_path_buf(),
+            modified: meta.modified().ok()?,
+            len: meta.len(),
+        })
+    }
+}
+
+type CachedIndex = (IndexFileStamp, Arc<Index>);
+
+fn index_cache() -> &'static Mutex<Option<CachedIndex>> {
+    static CACHE: OnceLock<Mutex<Option<CachedIndex>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// Load the persisted index, reusing the last decoded copy while the file is
+/// unchanged. Long-running hosts (the MCP server) otherwise decode the whole
+/// index on every query.
+fn load_index_cached(path: &Path) -> paperseed_index::Result<Arc<Index>> {
+    let stamp = IndexFileStamp::of(path);
+    if let Some(stamp) = &stamp
+        && let Ok(cache) = index_cache().lock()
+        && let Some((cached_stamp, index)) = cache.as_ref()
+        && cached_stamp == stamp
+    {
+        return Ok(Arc::clone(index));
+    }
+    let index = Arc::new(Index::load(path)?);
+    if let Some(stamp) = stamp
+        && let Ok(mut cache) = index_cache().lock()
+    {
+        *cache = Some((stamp, Arc::clone(&index)));
+    }
+    Ok(index)
+}
 
 pub fn build_index(db: &CorpusDb) -> Result<Index> {
     let mut builder = IndexBuilder::new(paperseed_defaults());
@@ -90,24 +140,28 @@ pub fn search_scored(
     query: &str,
     top_k: usize,
 ) -> Result<Vec<(QueryHit, f32)>> {
-    let index = match Index::load(index_path) {
+    let index = match load_index_cached(index_path) {
         Ok(index) => index,
         Err(_) => {
             let index = build_index(db)?;
             index
                 .save(index_path)
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
-            index
+            Arc::new(index)
         }
     };
+    // First entry wins for a repeated id, matching `CorpusDb` lookup order.
+    let mut by_id: HashMap<&str, &IndexedPaper> = HashMap::with_capacity(db.papers.len());
+    for entry in &db.papers {
+        by_id
+            .entry(entry.paper.metadata.id.as_str())
+            .or_insert(entry);
+    }
     Ok(index
         .search(query, top_k)
         .into_iter()
         .filter_map(|hit| {
-            let entry = db
-                .papers
-                .iter()
-                .find(|entry| entry.paper.metadata.id == hit.doc_id)?;
+            let entry = by_id.get(hit.doc_id.as_str())?;
             Some((query_hit_from(entry, hit.score), hit.score))
         })
         .collect())

@@ -176,6 +176,7 @@ impl PaperbridgeService {
         self
     }
 
+    #[tracing::instrument(level = "info", skip_all, fields(detail = ?opts.detail))]
     pub async fn search_papers(&self, opts: SearchOptions) -> Result<SearchPapersResult> {
         // Preserve the original query for ranking (its exact form still drives
         // the DOI/arXiv exact-match short-circuit in rank_search_hits). When
@@ -232,7 +233,10 @@ impl PaperbridgeService {
             && let Some(api) = &self.paperseed
         {
             let cache_start = hits.len();
-            match api.search_cached_papers(&opts.query, opts.source_fetch_limit() as usize) {
+            let cached = tracing::debug_span!("paperseed_cache_search").in_scope(|| {
+                api.search_cached_papers(&opts.query, opts.source_fetch_limit() as usize)
+            });
+            match cached {
                 Ok(mut cached_hits) => {
                     if cache_mode == SearchCacheMode::Auto {
                         cached_hits.retain(|hit| should_surface_cached_hit(&original_query, hit));
@@ -257,19 +261,23 @@ impl PaperbridgeService {
             .is_none_or(|sources| sources.contains(&PaperSource::Research));
         if research_requested {
             match self.paperseed.as_ref() {
-                Some(api) if api.research_enabled() => match api.search_research_papers(
-                    &expand_agent_search_query(&original_query),
-                    opts.source_fetch_limit() as usize,
-                ) {
-                    Ok(research_hits) => {
-                        diagnostics.sources_ok.push("research".into());
-                        hits.extend(research_hits.into_iter().map(research_paper_to_hit));
+                Some(api) if api.research_enabled() => {
+                    match tracing::debug_span!("research_search").in_scope(|| {
+                        api.search_research_papers(
+                            &expand_agent_search_query(&original_query),
+                            opts.source_fetch_limit() as usize,
+                        )
+                    }) {
+                        Ok(research_hits) => {
+                            diagnostics.sources_ok.push("research".into());
+                            hits.extend(research_hits.into_iter().map(research_paper_to_hit));
+                        }
+                        Err(error) => diagnostics.sources_failed.push(SourceDiagnostic {
+                            source: "research".into(),
+                            reason: error.to_string(),
+                        }),
                     }
-                    Err(error) => diagnostics.sources_failed.push(SourceDiagnostic {
-                        source: "research".into(),
-                        reason: error.to_string(),
-                    }),
-                },
+                }
                 _ => diagnostics.sources_skipped.push(SourceDiagnostic {
                     source: "research".into(),
                     reason: "yams_not_ready".into(),
@@ -277,7 +285,8 @@ impl PaperbridgeService {
             }
         }
         if cache_mode != SearchCacheMode::Off {
-            self.annotate_cached_hits(&mut hits);
+            tracing::debug_span!("annotate_cached_hits", hits = hits.len())
+                .in_scope(|| self.annotate_cached_hits(&mut hits));
         }
         rank_search_hits(&original_query, &mut hits);
         for diagnostic in diagnostics
@@ -327,6 +336,7 @@ impl PaperbridgeService {
     }
 
     /// Resolve a paper by id and return requested slices (metadata/fulltext/structure/chunks).
+    #[tracing::instrument(level = "info", skip_all, fields(want = ?req.want))]
     pub async fn open_paper(&self, req: OpenPaperRequest) -> Result<serde_json::Value> {
         let max_chars = validated_fulltext_limit(req.max_chars)?;
         let offset = req.offset.unwrap_or(0);
@@ -818,6 +828,7 @@ impl PaperbridgeService {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn download_open_fulltext(
         &self,
         resolved: &OpenResolved,
@@ -860,7 +871,15 @@ impl PaperbridgeService {
             }
             bytes.extend_from_slice(&chunk);
         }
-        let content = paperseed::app::extract_pdf_text_from_bytes(&bytes)
+        let content = run_blocking("pdf_extract", move || {
+            paperseed::app::extract_pdf_text_from_bytes(&bytes)
+        })
+        .await
+        .map_err(|_| {
+            ZoteroMcpError::InvalidInput(format!(
+                "Downloaded paper from {url}, but the PDF parser failed on it. Try a real, decrypted PDF, an OCR copy, or a Zotero attachment."
+            ))
+        })?
             .map_err(|error| {
                 ZoteroMcpError::InvalidInput(format!(
                     "Downloaded paper from {url}, but its PDF text could not be read: {error}. Try a real, decrypted PDF, an OCR copy, or a Zotero attachment."
@@ -963,8 +982,9 @@ impl PaperbridgeService {
         let Some(api) = &self.paperseed else {
             return;
         };
-        for hit in hits {
-            if let Some(entry) = api.find_cached_hit(hit) {
+        let matches = api.find_cached_hits(hits);
+        for (hit, entry) in hits.iter_mut().zip(matches) {
+            if let Some(entry) = entry {
                 let has_full_text = entry.has_full_text();
                 let yams_indexed = entry.yams_hash.is_some();
                 hit.cache = Some(CachedPaperSummary {
@@ -1180,6 +1200,7 @@ impl PaperbridgeService {
         paginate_fulltext(&fulltext, max_chars, offset.unwrap_or(0))
     }
 
+    #[tracing::instrument(level = "debug", skip(self))]
     pub async fn get_paper_structure(
         &self,
         item_key: &str,
@@ -1243,6 +1264,7 @@ impl PaperbridgeService {
         Ok(structure)
     }
 
+    #[tracing::instrument(level = "debug", skip(self, cfg))]
     async fn try_grobid_structure(
         &self,
         item_key: &str,
@@ -1271,7 +1293,12 @@ impl PaperbridgeService {
 
         let bytes = self.backend.get_attachment_bytes(attachment_key).await?;
         let tei_xml = client.process_fulltext(bytes).await?;
-        tei::parse_tei(item_key, attachment_key, &tei_xml)
+        let (item_key, attachment_key) = (item_key.to_string(), attachment_key.to_string());
+        run_blocking("tei_parse", move || {
+            tei::parse_tei(&item_key, &attachment_key, &tei_xml)
+        })
+        .await
+        .map_err(|_| ZoteroMcpError::Serde("GROBID TEI parsing failed unexpectedly".to_string()))?
     }
 
     pub async fn query_paper(
@@ -2779,6 +2806,22 @@ fn source_rank_bias(source: crate::models::PaperSource) -> u8 {
         crate::models::PaperSource::OpenLibrary => 5,
         crate::models::PaperSource::ScholarApi => 0,
     }
+}
+
+/// Run CPU-bound or blocking work on tokio's blocking pool inside a
+/// `blocking` span. A panic in `work` (e.g. a malformed PDF tripping the
+/// parser) is returned as `Err` instead of unwinding into the caller.
+async fn run_blocking<T, F>(stage: &'static str, work: F) -> std::result::Result<T, ()>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let span = tracing::debug_span!("blocking", stage);
+    tokio::task::spawn_blocking(move || span.in_scope(work))
+        .await
+        .map_err(|error| {
+            tracing::warn!(stage, %error, "blocking task failed");
+        })
 }
 
 fn research_paper_to_hit(hit: crate::paperseed_api::ResearchPaperHit) -> PaperHit {

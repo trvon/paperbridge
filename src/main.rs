@@ -113,13 +113,7 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
 
     let config = Config::load()?;
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| config.log_level.clone().into()),
-        )
-        .with_writer(std::io::stderr)
-        .init();
+    paperbridge::telemetry::init(&config.log_level);
 
     match cli.command {
         Some(Command::Config {

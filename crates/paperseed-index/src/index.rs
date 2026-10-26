@@ -2,7 +2,7 @@ use crate::error::{IndexError, Result};
 use crate::params::BuildOptions;
 use crate::tokenizer::tokenize;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -135,12 +135,15 @@ impl Index {
         }
 
         let n = self.doc_ids.len() as f32;
-        let mut accum: HashMap<u32, f32> = HashMap::new();
+        // Dense accumulator indexed by internal doc id; `touched` records which
+        // slots are non-zero so ranking does not scan the whole corpus.
+        let mut accum = vec![0.0_f32; self.doc_ids.len()];
+        let mut touched: Vec<u32> = Vec::new();
 
-        let mut seen_terms: HashMap<&str, ()> = HashMap::new();
+        let mut seen_terms: HashSet<&str> = HashSet::with_capacity(terms.len());
         for term in &terms {
             // De-duplicate query terms — IDF is per-term, not per-occurrence.
-            if seen_terms.insert(term.as_str(), ()).is_some() {
+            if !seen_terms.insert(term.as_str()) {
                 continue;
             }
             let Some(plist) = self.postings.get(term) else {
@@ -156,26 +159,38 @@ impl Index {
                     continue;
                 }
                 let contribution = idf * (tf_d / (self.options.k1 + tf_d));
-                *accum.entry(posting.doc).or_insert(0.0) += contribution;
+                let Some(slot) = accum.get_mut(posting.doc as usize) else {
+                    continue;
+                };
+                if *slot == 0.0 {
+                    touched.push(posting.doc);
+                }
+                *slot += contribution;
             }
         }
 
-        let mut hits: Vec<ScoredHit> = accum
+        let mut ranked: Vec<(u32, f32)> = touched
             .into_iter()
+            .map(|doc| (doc, accum[doc as usize]))
             .filter(|(_, score)| *score > 0.0)
+            .collect();
+        let order = |a: &(u32, f32), b: &(u32, f32)| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| self.doc_ids[a.0 as usize].cmp(&self.doc_ids[b.0 as usize]))
+        };
+        if ranked.len() > top_k {
+            ranked.select_nth_unstable_by(top_k - 1, order);
+            ranked.truncate(top_k);
+        }
+        ranked.sort_by(order);
+        ranked
+            .into_iter()
             .map(|(doc, score)| ScoredHit {
                 doc_id: self.doc_ids[doc as usize].clone(),
                 score,
             })
-            .collect();
-        hits.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.doc_id.cmp(&b.doc_id))
-        });
-        hits.truncate(top_k);
-        hits
+            .collect()
     }
 
     fn weighted_tf(&self, posting: &Posting) -> f32 {

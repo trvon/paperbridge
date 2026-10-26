@@ -309,34 +309,27 @@ impl PaperseedApi {
     }
 
     pub fn find_cached_hit(&self, hit: &PaperHit) -> Option<IndexedPaper> {
-        let db = self.corpus_status().ok()?;
-        db.papers.into_iter().find(|entry| {
-            let metadata = &entry.paper.metadata;
-            let mut cached = PaperHit::new(
-                PaperSource::Paperseed,
-                metadata.title.clone(),
-                metadata.authors.clone(),
-                metadata.year.map(|year| year.to_string()),
-                metadata.doi.clone(),
-                metadata
-                    .arxiv_id
-                    .clone()
-                    .or_else(|| metadata.source_url.as_deref().and_then(arxiv_id_from_url)),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            );
-            cached.isbn = metadata.isbn.clone();
-            cached.work_type = metadata
-                .work_type
-                .as_deref()
-                .and_then(crate::models::WorkType::parse);
-            crate::external::compatible_identity(&cached, hit)
-        })
+        self.find_cached_hits(std::slice::from_ref(hit))
+            .into_iter()
+            .next()
+            .flatten()
+    }
+
+    /// Match each hit against the corpus, loading `corpus.json` once for the
+    /// whole batch. Returns one slot per input hit, in order.
+    pub fn find_cached_hits(&self, hits: &[PaperHit]) -> Vec<Option<IndexedPaper>> {
+        let Ok(db) = self.corpus_status() else {
+            return vec![None; hits.len()];
+        };
+        let identities: Vec<PaperHit> = db.papers.iter().map(cached_identity_hit).collect();
+        hits.iter()
+            .map(|hit| {
+                identities
+                    .iter()
+                    .position(|cached| crate::external::compatible_identity(cached, hit))
+                    .map(|index| db.papers[index].clone())
+            })
+            .collect()
     }
 
     /// Resolve an agent-supplied identifier against the corpus without using
@@ -816,6 +809,35 @@ pub fn map_error(error: paperseed::PaperseedError) -> ZoteroMcpError {
             ))
         }
     }
+}
+
+/// Identity-only hit for a corpus entry, used to match external hits.
+fn cached_identity_hit(entry: &IndexedPaper) -> PaperHit {
+    let metadata = &entry.paper.metadata;
+    let mut cached = PaperHit::new(
+        PaperSource::Paperseed,
+        metadata.title.clone(),
+        metadata.authors.clone(),
+        metadata.year.map(|year| year.to_string()),
+        metadata.doi.clone(),
+        metadata
+            .arxiv_id
+            .clone()
+            .or_else(|| metadata.source_url.as_deref().and_then(arxiv_id_from_url)),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    cached.isbn = metadata.isbn.clone();
+    cached.work_type = metadata
+        .work_type
+        .as_deref()
+        .and_then(crate::models::WorkType::parse);
+    cached
 }
 
 #[cfg(test)]

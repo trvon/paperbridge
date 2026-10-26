@@ -23,15 +23,20 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["process", "sync"] }
 toml = "1.1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2"
 urlencoding.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 jsonschema = { version = "0.60", default-features = false }
 proptest.workspace = true
 tempfile.workspace = true
 wiremock = "0.6"
+
+[[bench]]
+name = "paperbridge"
+harness = false
 
 [lints]
 workspace = true
@@ -47,6 +52,7 @@ license = "MIT"
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 paperseed = { path = "crates/paperseed" }
 paperseed-index = { path = "crates/paperseed-index" }
 proptest = "1"
