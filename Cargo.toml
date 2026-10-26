@@ -1,35 +1,81 @@
 [package]
 name = "paperbridge"
 version = "2.1.0"
-edition = "2024"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 description = "MCP and CLI bridge for paper discovery and PDF/full-text retrieval"
-license = "MIT"
 
 [dependencies]
 async-trait = "0.1"
-clap = { version = "4", features = ["derive"] }
-futures = "0.3"
+clap.workspace = true
 clap_complete = "4"
-dirs = "6"
-reqwest = { version = "0.12", features = ["json", "multipart"] }
-rmcp = { version = "1.4", features = ["server", "transport-io", "macros"] }
+dirs = "7"
+futures = "0.3"
+paperseed.workspace = true
+quick-xml = { version = "0.42", features = ["serialize"] }
+reqwest = { workspace = true, features = ["multipart", "query"] }
+rmcp = { version = "1.8", features = ["server", "transport-io", "macros"] }
 schemars = { version = "1", features = ["derive"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "process", "sync"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["process", "sync"] }
 toml = "1.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
-urlencoding = "2"
-quick-xml = { version = "0.42", features = ["serialize"] }
-paperseed = { path = "crates/paperseed" }
+urlencoding.workspace = true
 
 [dev-dependencies]
-jsonschema = { version = "0.49", default-features = false }
-tempfile = "3"
+jsonschema = { version = "0.60", default-features = false }
+tempfile.workspace = true
 wiremock = "0.6"
+
+[lints]
+workspace = true
 
 [workspace]
 members = [".", "crates/paperseed", "crates/paperseed-index"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+
+[workspace.dependencies]
+clap = { version = "4", features = ["derive"] }
+paperseed = { path = "crates/paperseed" }
+paperseed-index = { path = "crates/paperseed-index" }
+reqwest = { version = "0.13", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+urlencoding = "2"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"
+
+# Release codegen with symbols, for perf/samply/Instruments:
+#   cargo build --profile profiling
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = "none"
+
+[profile.bench]
+debug = "line-tables-only"

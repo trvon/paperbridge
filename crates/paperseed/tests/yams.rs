@@ -1,3 +1,6 @@
+// Env mutation in edition 2024 requires `unsafe`; serialized by ENV_LOCK.
+#![allow(unsafe_code)]
+
 use paperseed::app::{
     CorpusPaths, ImportRequest, IngestRequest, import_with_yams, import_with_yams_runner,
     ingest_with_yams_runner, query_entries_with_yams_runner, query_with_yams,
