@@ -721,7 +721,13 @@ paperseed_corpus_root = {}",
         K: AsRef<str>,
         V: AsRef<str>,
     {
-        for (key, value) in pairs {
+        // Several variables may set the same field. Apply them lowest
+        // precedence first so the result is independent of input order:
+        // legacy/bare names (ZOTERO_MCP_*, HF_TOKEN, ...) < PAPERBRIDGE_*
+        // < PAPERBRIDGE_CLOUD_API_BASE (the most specific API base name).
+        let mut pairs: Vec<(K, V)> = pairs.into_iter().collect();
+        pairs.sort_by_key(|(key, _)| env_precedence(key.as_ref()));
+        for (key, value) in &pairs {
             let key = key.as_ref();
             let value = value.as_ref();
             match key {
@@ -1012,6 +1018,14 @@ fn validate_docker_image_ref(key: &str, image: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+fn env_precedence(key: &str) -> u8 {
+    match key {
+        "PAPERBRIDGE_CLOUD_API_BASE" => 2,
+        key if key.starts_with("PAPERBRIDGE_") => 1,
+        _ => 0,
+    }
 }
 
 fn parse_u64_env(key: &str, raw: &str) -> Result<u64> {
@@ -1402,5 +1416,166 @@ mod tests {
         assert!(cfg.institution_access_url.is_none());
         assert!(cfg.institution_resolver_url.is_none());
         assert!(cfg.institution_gateway_url.is_none());
+    }
+
+    #[test]
+    fn regression_canonical_env_beats_legacy_alias_in_any_order() {
+        for pairs in [
+            [
+                ("ZOTERO_MCP_API_KEY", "legacy"),
+                ("PAPERBRIDGE_API_KEY", "canonical"),
+            ],
+            [
+                ("PAPERBRIDGE_API_KEY", "canonical"),
+                ("ZOTERO_MCP_API_KEY", "legacy"),
+            ],
+        ] {
+            let mut cfg = Config::default();
+            cfg.apply_env_overrides(pairs).unwrap();
+            assert_eq!(cfg.api_key.as_deref(), Some("canonical"));
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides([
+            ("PAPERBRIDGE_CLOUD_API_BASE", "https://cloud.example"),
+            ("PAPERBRIDGE_API_BASE", "https://api.example"),
+            ("HF_TOKEN", "short"),
+            ("PAPERBRIDGE_HF_TOKEN", "long"),
+        ])
+        .unwrap();
+        assert_eq!(cfg.cloud_api_base, "https://cloud.example");
+        assert_eq!(cfg.hf_token.as_deref(), Some("long"));
+    }
+
+    const ENV_STRING_KEYS: &[&str] = &[
+        "PAPERBRIDGE_API_BASE",
+        "ZOTERO_MCP_API_BASE",
+        "PAPERBRIDGE_CLOUD_API_BASE",
+        "PAPERBRIDGE_API_KEY",
+        "ZOTERO_MCP_API_KEY",
+        "PAPERBRIDGE_LOG_LEVEL",
+        "ZOTERO_MCP_LOG_LEVEL",
+        "PAPERBRIDGE_HF_TOKEN",
+        "HF_TOKEN",
+        "PAPERBRIDGE_CORE_API_KEY",
+        "CORE_API_KEY",
+        "PAPERBRIDGE_GROBID_URL",
+        "GROBID_URL",
+    ];
+    const ENV_U64_KEYS: &[&str] = &[
+        "PAPERBRIDGE_USER_ID",
+        "ZOTERO_MCP_USER_ID",
+        "PAPERBRIDGE_TIMEOUT_SECS",
+        "ZOTERO_MCP_TIMEOUT_SECS",
+    ];
+
+    fn env_pairs() -> impl Strategy<Value = Vec<(String, String)>> {
+        let string_pair = (prop::sample::select(ENV_STRING_KEYS), "[a-z0-9:/.]{1,16}")
+            .prop_map(|(k, v)| (k.to_string(), v));
+        let u64_pair = (prop::sample::select(ENV_U64_KEYS), any::<u64>())
+            .prop_map(|(k, v)| (k.to_string(), v.to_string()));
+        prop::collection::vec(prop_oneof![string_pair, u64_pair], 0..12).prop_map(|pairs| {
+            // Real environments hold each name once.
+            let mut seen = std::collections::HashSet::new();
+            pairs
+                .into_iter()
+                .filter(|(k, _)| seen.insert(k.clone()))
+                .collect()
+        })
+    }
+
+    const OPTIONAL_STRING_KEYS: &[&str] = &[
+        "api_key",
+        "hf_token",
+        "semantic_scholar_api_key",
+        "core_api_key",
+        "ads_api_token",
+        "ncbi_api_key",
+        "scholarapi_key",
+        "unpaywall_email",
+        "grobid_url",
+        "paperseed_corpus_root",
+    ];
+    const REQUIRED_STRING_KEYS: &[&str] = &["cloud_api_base", "local_api_base", "log_level"];
+    const U64_KEYS: &[&str] = &["user_id", "group_id", "timeout_secs", "grobid_timeout_secs"];
+    const BOOL_KEYS: &[&str] = &[
+        "grobid_auto_spawn",
+        "update_check_enabled",
+        "paperseed_enabled",
+        "paperseed_auto_download",
+        "paperseed_yams_enabled",
+    ];
+
+    /// (key, value) assignments that `set_value` must accept.
+    fn settable_pair() -> impl Strategy<Value = (String, String)> {
+        let token = "[A-Za-z0-9_./:-]{1,24}".prop_filter("reserved unset words", |v| {
+            !matches!(v.to_ascii_lowercase().as_str(), "unset" | "none" | "null")
+        });
+        prop_oneof![
+            (prop::sample::select(OPTIONAL_STRING_KEYS), token.clone())
+                .prop_map(|(k, v)| (k.to_string(), v)),
+            (prop::sample::select(REQUIRED_STRING_KEYS), token)
+                .prop_map(|(k, v)| (k.to_string(), v)),
+            (prop::sample::select(U64_KEYS), any::<u64>())
+                .prop_map(|(k, v)| (k.to_string(), v.to_string())),
+            (prop::sample::select(BOOL_KEYS), any::<bool>())
+                .prop_map(|(k, v)| (k.to_string(), v.to_string())),
+            prop::sample::select(BackendModeConfig::value_variants())
+                .prop_map(|v| ("backend_mode".to_string(), v.as_str().to_string())),
+            prop::sample::select(LibraryType::value_variants())
+                .prop_map(|v| ("library_type".to_string(), v.as_str().to_string())),
+            prop::sample::select(InstitutionAccessMode::value_variants()).prop_map(|v| (
+                "institution_access_mode".to_string(),
+                v.as_str().to_string()
+            )),
+        ]
+    }
+
+    use clap::ValueEnum;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn env_overrides_are_order_independent(
+            (pairs, shuffled) in env_pairs().prop_flat_map(|p| (Just(p.clone()), Just(p).prop_shuffle()))
+        ) {
+            let mut a = Config::default();
+            a.apply_env_overrides(pairs).unwrap();
+            let mut b = Config::default();
+            b.apply_env_overrides(shuffled).unwrap();
+            prop_assert_eq!(a, b);
+        }
+
+        #[test]
+        fn set_value_round_trips_through_get_value((key, value) in settable_pair()) {
+            let mut cfg = Config::default();
+            cfg.set_value(&key, &value).unwrap();
+            prop_assert_eq!(cfg.get_value(&key), Some(value));
+        }
+
+        #[test]
+        fn config_round_trips_through_toml(assignments in prop::collection::vec(settable_pair(), 0..12)) {
+            let mut cfg = Config::default();
+            for (key, value) in &assignments {
+                cfg.set_value(key, value).unwrap();
+            }
+            let text = toml::to_string_pretty(&cfg).unwrap();
+            let partial: PartialConfig = toml::from_str(&text).unwrap();
+            let mut reloaded = Config::default();
+            reloaded.apply_partial(partial);
+            prop_assert_eq!(reloaded, cfg);
+        }
+    }
+
+    #[test]
+    fn config_enums_round_trip_through_strings() {
+        for v in BackendModeConfig::value_variants() {
+            assert_eq!(v.as_str().parse::<BackendModeConfig>().unwrap(), *v);
+        }
+        for v in LibraryType::value_variants() {
+            assert_eq!(v.as_str().parse::<LibraryType>().unwrap(), *v);
+        }
+        for v in InstitutionAccessMode::value_variants() {
+            assert_eq!(v.as_str().parse::<InstitutionAccessMode>().unwrap(), *v);
+        }
     }
 }

@@ -282,10 +282,18 @@ pub(crate) fn extract_chapter_slice(content: &str, chapter_num: u32) -> Option<(
     best_slice.map(|(slice, title, _)| (slice, title))
 }
 
+/// Largest chapter/appendix number accepted. Keeps chapter sequence numbers
+/// below the appendix range (`1000 + n`) and rejects years or page numbers
+/// that happen to follow the word "chapter".
+const MAX_HEADING_NUMBER: u32 = 999;
+
 fn parse_numeral_or_word(s: &str) -> Option<(u32, usize)> {
     let digit_len = s.chars().take_while(|c| c.is_ascii_digit()).count();
     if digit_len > 0 {
-        let n = s[..digit_len].parse::<u32>().ok()?;
+        let n = s[..digit_len]
+            .parse::<u32>()
+            .ok()
+            .filter(|n| *n <= MAX_HEADING_NUMBER)?;
         return Some((n, digit_len));
     }
     let raw_token = s.split_whitespace().next()?;
@@ -494,6 +502,7 @@ fn detect_chapter_heading(line: &str) -> Option<DetectedHeading> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn test_extract_toc_and_chapter_slice() {
@@ -1070,5 +1079,118 @@ This is appendix B body describing the database schema.
         let (app_a, t_a) = extract_chapter_slice(sample, 1001).unwrap();
         assert_eq!(t_a, "Error Codes");
         assert!(app_a.contains("listing all error codes"));
+    }
+
+    #[test]
+    fn regression_huge_appendix_number_does_not_overflow() {
+        let text = "Appendix 4294967295\n\nBody text here.\n\nChapter 4000000000: Big\n\nMore.\n";
+        assert!(detect_chapter_heading("Appendix 4294967295").is_none());
+        assert!(detect_chapter_heading("Chapter 2024").is_none());
+        let toc = extract_toc_from_text("t", None, text);
+        assert!(toc.chapters.is_empty());
+        assert!(extract_chapter_slice(text, u32::MAX).is_none());
+        assert_eq!(
+            detect_chapter_heading("Appendix 999").map(|h| h.sequence_num),
+            Some(1999)
+        );
+    }
+
+    fn candidate(number: u32, idx: usize) -> CandidateHeading {
+        CandidateHeading {
+            number,
+            id: format!("c-{idx}"),
+            chapter_number: Some(number),
+            byte_offset: idx,
+            heading_line_len: 1,
+            title: String::new(),
+        }
+    }
+
+    fn brute_force_lnds_len(numbers: &[u32]) -> usize {
+        let n = numbers.len();
+        (0u32..(1 << n))
+            .filter_map(|mask| {
+                let picked: Vec<u32> = (0..n)
+                    .filter(|i| mask & (1 << i) != 0)
+                    .map(|i| numbers[i])
+                    .collect();
+                picked
+                    .windows(2)
+                    .all(|w| w[0] <= w[1])
+                    .then_some(picked.len())
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn book_line() -> impl Strategy<Value = String> {
+        prop_oneof![
+            3 => (0u32..25, "[A-Z][a-z]{0,10}").prop_map(|(n, t)| format!("Chapter {n}: {t}")),
+            1 => (0u32..25).prop_map(|n| format!("CHAPTER {n}")),
+            1 => prop::sample::select(vec!["I", "IV", "Two", "TWELVE", "xx"])
+                .prop_map(|r| format!("Chapter {r}")),
+            1 => "[a-zA-Z]".prop_map(|l| format!("Appendix {l}: Notes")),
+            1 => any::<u32>().prop_map(|n| format!("Appendix {n}")),
+            1 => any::<u32>().prop_map(|n| format!("Chapter {n}")),
+            1 => Just("Contents".to_string()),
+            1 => Just("Appendix".to_string()),
+            3 => Just(String::new()),
+            4 => "[a-zA-Z ,é]{0,50}",
+        ]
+    }
+
+    fn book_text() -> impl Strategy<Value = String> {
+        prop::collection::vec(book_line(), 0..40).prop_map(|lines| lines.join("\n"))
+    }
+
+    proptest! {
+        #[test]
+        fn heading_detection_never_panics(line in "\\PC{0,140}") {
+            let _ = detect_chapter_heading(&line);
+        }
+
+        #[test]
+        fn toc_is_consistent(text in book_text()) {
+            let toc = extract_toc_from_text("t", None, &text);
+            prop_assert_eq!(toc.total_chapters, Some(toc.chapters.len()));
+            let mut ids = std::collections::HashSet::new();
+            for chapter in &toc.chapters {
+                prop_assert!(ids.insert(chapter.id.clone()), "duplicate id {}", chapter.id);
+            }
+            prop_assert_eq!(&toc, &extract_toc_from_text("t", None, &text));
+
+            let crlf = text.replace('\n', "\r\n");
+            let crlf_toc = extract_toc_from_text("t", None, &crlf);
+            let numbers = |t: &BookToc| t.chapters.iter().map(|c| (c.id.clone(), c.number)).collect::<Vec<_>>();
+            prop_assert_eq!(numbers(&toc), numbers(&crlf_toc));
+        }
+
+        #[test]
+        fn chapter_slices_are_disjoint_line_aligned_subslices(text in book_text()) {
+            let base = text.as_ptr() as usize;
+            let mut ranges = Vec::new();
+            for num in (0u32..26).chain(1001..1030) {
+                if let Some((slice, _title)) = extract_chapter_slice(&text, num) {
+                    let start = slice.as_ptr() as usize - base;
+                    let end = start + slice.len();
+                    prop_assert!(end <= text.len());
+                    prop_assert!(start == 0 || text.as_bytes()[start - 1] == b'\n');
+                    prop_assert!(detect_chapter_heading(slice.lines().next().unwrap_or("")).is_some());
+                    ranges.push((start, end));
+                }
+            }
+            ranges.sort_unstable();
+            for pair in ranges.windows(2) {
+                prop_assert!(pair[0].1 <= pair[1].0, "overlapping slices {pair:?}");
+            }
+        }
+
+        #[test]
+        fn monotonic_filter_matches_brute_force(numbers in prop::collection::vec(0u32..6, 0..12)) {
+            let candidates: Vec<_> = numbers.iter().enumerate().map(|(i, n)| candidate(*n, i)).collect();
+            let filtered = filter_monotonic_candidates(&candidates);
+            prop_assert_eq!(filtered.len(), brute_force_lnds_len(&numbers));
+            prop_assert!(filtered.windows(2).all(|w| w[0].number <= w[1].number && w[0].byte_offset < w[1].byte_offset));
+        }
     }
 }

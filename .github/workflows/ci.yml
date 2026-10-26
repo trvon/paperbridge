@@ -6,6 +6,9 @@ permissions:
 on:
   push:
     branches: [main]
+  # Weekly run so newly published advisories fail CI without a code change.
+  schedule:
+    - cron: "17 6 * * 1"
   # Validate intermediate PR bases in dependency stacks as well as main.
   pull_request:
 
@@ -50,6 +53,9 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --all-targets --locked
+
+      - name: Check benchmarks compile
+        run: cargo bench --workspace --locked --no-run
 
       - uses: taiki-e/install-action@562f912bf8a1174eb1007c4afe216a9187a8d722 # cargo-llvm-cov
         with:

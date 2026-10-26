@@ -18,12 +18,18 @@ pub fn normalize_text_for_tts(input: &str) -> String {
     out.trim().to_string()
 }
 
+fn char_len(text: &str) -> usize {
+    text.chars().count()
+}
+
 /// Split long text into chunks that are suitable for speech synthesis.
 ///
 /// Strategy:
 /// 1) Split by sentence boundaries.
-/// 2) Pack sentences into chunks up to `max_chars`.
-/// 3) If one sentence exceeds max, hard-split it.
+/// 2) Pack sentences into chunks up to `max_chars` characters.
+/// 3) If one sentence exceeds max, hard-split it (words, then characters).
+///
+/// Every chunk is at most `max(max_chars, 1)` characters.
 pub fn split_for_tts(input: &str, max_chars: usize) -> Vec<String> {
     let text = normalize_text_for_tts(input);
     if text.is_empty() {
@@ -31,39 +37,36 @@ pub fn split_for_tts(input: &str, max_chars: usize) -> Vec<String> {
     }
 
     let safe_max = max_chars.max(1);
-    let sentences = sentence_split(&text);
     let mut chunks = Vec::new();
     let mut current = String::new();
+    let mut current_len = 0;
 
-    for sentence in sentences {
-        if sentence.len() > safe_max {
+    for sentence in sentence_split(&text) {
+        let sentence_len = char_len(sentence);
+        if sentence_len > safe_max {
             if !current.is_empty() {
-                chunks.push(current.trim().to_string());
-                current.clear();
+                chunks.push(std::mem::take(&mut current));
+                current_len = 0;
             }
-            for part in hard_split(sentence, safe_max) {
-                chunks.push(part);
-            }
+            chunks.extend(hard_split(sentence, safe_max));
             continue;
         }
 
         if current.is_empty() {
             current.push_str(sentence);
-            continue;
-        }
-
-        if current.len() + 1 + sentence.len() <= safe_max {
+            current_len = sentence_len;
+        } else if current_len + 1 + sentence_len <= safe_max {
             current.push(' ');
             current.push_str(sentence);
+            current_len += 1 + sentence_len;
         } else {
-            chunks.push(current.trim().to_string());
-            current.clear();
-            current.push_str(sentence);
+            chunks.push(std::mem::replace(&mut current, sentence.to_string()));
+            current_len = sentence_len;
         }
     }
 
     if !current.is_empty() {
-        chunks.push(current.trim().to_string());
+        chunks.push(current);
     }
 
     chunks
@@ -84,36 +87,66 @@ fn sentence_split(text: &str) -> Vec<&str> {
         }
     }
 
-    if start < text.len() {
-        let tail = text[start..].trim();
-        if !tail.is_empty() {
-            out.push(tail);
-        }
-    }
-
-    if out.is_empty() {
-        out.push(text.trim());
+    let tail = text[start..].trim();
+    if !tail.is_empty() {
+        out.push(tail);
     }
 
     out
 }
 
-fn hard_split(sentence: &str, max_chars: usize) -> Vec<String> {
+/// Split `text` into pieces of at most `max_chars` characters, cutting only
+/// on char boundaries. Whitespace is kept verbatim.
+fn char_windows(text: &str, max_chars: usize) -> Vec<String> {
+    let max_chars = max_chars.max(1);
     let mut out = Vec::new();
     let mut current = String::new();
+    let mut len = 0;
+    for ch in text.chars() {
+        if len == max_chars {
+            out.push(std::mem::take(&mut current));
+            len = 0;
+        }
+        current.push(ch);
+        len += 1;
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
+/// Pack whitespace-separated words into pieces of at most `max_chars`
+/// characters; words longer than the limit are split by character.
+fn hard_split(sentence: &str, max_chars: usize) -> Vec<String> {
+    let max_chars = max_chars.max(1);
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut current_len = 0;
 
     for word in sentence.split_whitespace() {
-        if current.is_empty() {
-            current.push_str(word);
+        let word_len = char_len(word);
+        if word_len > max_chars {
+            if !current.is_empty() {
+                out.push(std::mem::take(&mut current));
+            }
+            let mut pieces = char_windows(word, max_chars);
+            current = pieces.pop().unwrap_or_default();
+            current_len = char_len(&current);
+            out.extend(pieces);
             continue;
         }
 
-        if current.len() + 1 + word.len() <= max_chars {
+        if current.is_empty() {
+            current.push_str(word);
+            current_len = word_len;
+        } else if current_len + 1 + word_len <= max_chars {
             current.push(' ');
             current.push_str(word);
+            current_len += 1 + word_len;
         } else {
-            out.push(current);
-            current = word.to_string();
+            out.push(std::mem::replace(&mut current, word.to_string()));
+            current_len = word_len;
         }
     }
 
@@ -124,8 +157,18 @@ fn hard_split(sentence: &str, max_chars: usize) -> Vec<String> {
     out
 }
 
+fn is_fence_line(line: &str) -> bool {
+    line.trim().starts_with("```")
+}
+
 /// Split technical text (such as book chapters or code-heavy documentation)
 /// while preserving markdown fenced code blocks and optional breadcrumbs.
+///
+/// Every chunk is at most `max(max_chars, 1)` characters, breadcrumb
+/// included. A breadcrumb is truncated so it uses at most half the budget,
+/// and is omitted when the budget cannot hold it. Unterminated fences are
+/// closed, and a code block whose fences alone exceed the budget is emitted
+/// without fences.
 pub(crate) fn split_technical_content(
     input: &str,
     max_chars: usize,
@@ -136,54 +179,68 @@ pub(crate) fn split_technical_content(
         return Vec::new();
     }
 
-    let prefix = breadcrumb.map(|b| format!("{b}\n\n")).unwrap_or_default();
-    let prefix_len = prefix.chars().count();
-    let target_max = max_chars.saturating_sub(prefix_len).clamp(1, max_chars);
+    let max_chars = max_chars.max(1);
+    let prefix = breadcrumb_prefix(breadcrumb, max_chars);
+    let target_max = max_chars - char_len(&prefix);
 
-    let blocks = segment_markdown_blocks(trimmed);
-    let mut chunks = Vec::new();
+    let mut parts = Vec::new();
     let mut current = String::new();
+    let mut current_len = 0;
 
-    for block in blocks {
-        let block_len = block.chars().count();
+    for block in segment_markdown_blocks(trimmed) {
+        let block_len = char_len(&block);
         if block_len > target_max {
             if !current.is_empty() {
-                chunks.push(format!("{prefix}{}", current.trim()));
-                current.clear();
+                parts.push(std::mem::take(&mut current));
+                current_len = 0;
             }
-            let is_fenced = block.trim_start().starts_with("```");
-            let sub_parts = if is_fenced {
-                split_code_block(&block, target_max)
+            if block.lines().next().is_some_and(is_fence_line) {
+                parts.extend(split_code_block(&block, target_max));
             } else {
-                line_split_block(&block, target_max)
-            };
-            for part in sub_parts {
-                chunks.push(format!("{prefix}{}", part.trim()));
+                parts.extend(line_split_block(&block, target_max));
             }
             continue;
         }
 
         if current.is_empty() {
             current.push_str(&block);
-            continue;
-        }
-
-        let needed = current.chars().count() + 2 + block_len;
-        if needed <= target_max {
+            current_len = block_len;
+        } else if current_len + 2 + block_len <= target_max {
             current.push_str("\n\n");
             current.push_str(&block);
+            current_len += 2 + block_len;
         } else {
-            chunks.push(format!("{prefix}{}", current.trim()));
-            current.clear();
-            current.push_str(&block);
+            parts.push(std::mem::replace(&mut current, block));
+            current_len = block_len;
         }
     }
 
     if !current.is_empty() {
-        chunks.push(format!("{prefix}{}", current.trim()));
+        parts.push(current);
     }
 
-    chunks
+    parts
+        .iter()
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .map(|part| format!("{prefix}{part}"))
+        .collect()
+}
+
+/// Breadcrumb plus blank line, truncated to at most half of `max_chars`.
+/// Empty when there is no room for at least one breadcrumb character.
+fn breadcrumb_prefix(breadcrumb: Option<&str>, max_chars: usize) -> String {
+    let Some(breadcrumb) = breadcrumb.map(str::trim).filter(|b| !b.is_empty()) else {
+        return String::new();
+    };
+    let budget = (max_chars / 2).saturating_sub(2);
+    let crumb: String = breadcrumb.chars().take(budget).collect();
+    let crumb = crumb.trim_end();
+    if crumb.is_empty() {
+        String::new()
+    } else {
+        format!("{crumb}\n\n")
+    }
 }
 
 fn segment_markdown_blocks(text: &str) -> Vec<String> {
@@ -192,8 +249,12 @@ fn segment_markdown_blocks(text: &str) -> Vec<String> {
     let mut in_code_block = false;
 
     for line in text.lines() {
-        let trimmed_line = line.trim();
-        if trimmed_line.starts_with("```") {
+        if is_fence_line(line) {
+            if !in_code_block && !current_block.trim().is_empty() {
+                // A fence directly after prose starts a new block.
+                blocks.push(current_block.trim_end().to_string());
+                current_block.clear();
+            }
             in_code_block = !in_code_block;
             current_block.push_str(line);
             current_block.push('\n');
@@ -210,11 +271,11 @@ fn segment_markdown_blocks(text: &str) -> Vec<String> {
             continue;
         }
 
-        if trimmed_line.is_empty() {
+        if line.trim().is_empty() {
             if !current_block.trim().is_empty() {
                 blocks.push(current_block.trim_end().to_string());
-                current_block.clear();
             }
+            current_block.clear();
         } else {
             if !current_block.is_empty() {
                 current_block.push('\n');
@@ -223,6 +284,9 @@ fn segment_markdown_blocks(text: &str) -> Vec<String> {
         }
     }
 
+    if in_code_block {
+        current_block.push_str("```");
+    }
     if !current_block.trim().is_empty() {
         blocks.push(current_block.trim_end().to_string());
     }
@@ -233,39 +297,34 @@ fn segment_markdown_blocks(text: &str) -> Vec<String> {
 fn line_split_block(block: &str, max_chars: usize) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();
+    let mut current_len = 0;
 
     for line in block.lines() {
-        if line.chars().count() > max_chars {
+        let line_len = char_len(line);
+        if line_len > max_chars {
             if !current.is_empty() {
-                parts.push(current.trim_end().to_string());
-                current.clear();
+                parts.push(std::mem::take(&mut current));
+                current_len = 0;
             }
-            for chunk in hard_split(line, max_chars) {
-                parts.push(chunk);
-            }
+            parts.extend(hard_split(line, max_chars));
             continue;
         }
 
-        let needed = if current.is_empty() {
-            line.chars().count()
-        } else {
-            current.chars().count() + 1 + line.chars().count()
-        };
-
-        if needed <= max_chars {
-            if !current.is_empty() {
-                current.push('\n');
-            }
+        if current.is_empty() {
             current.push_str(line);
-        } else {
-            parts.push(current.trim_end().to_string());
-            current.clear();
+            current_len = line_len;
+        } else if current_len + 1 + line_len <= max_chars {
+            current.push('\n');
             current.push_str(line);
+            current_len += 1 + line_len;
+        } else {
+            parts.push(std::mem::replace(&mut current, line.to_string()));
+            current_len = line_len;
         }
     }
 
     if !current.is_empty() {
-        parts.push(current.trim_end().to_string());
+        parts.push(current);
     }
 
     parts
@@ -274,68 +333,67 @@ fn line_split_block(block: &str, max_chars: usize) -> Vec<String> {
 fn split_code_block(block: &str, target_max: usize) -> Vec<String> {
     let mut lines = block.lines();
     let Some(first_line) = lines.next() else {
-        return vec![block.to_string()];
+        return Vec::new();
     };
-    let fence_header = first_line.trim_end();
+    let fence_header = first_line.trim();
     let fence_close = "```";
     let body_lines: Vec<&str> = lines.collect();
-    let body_lines = if body_lines
-        .last()
-        .map(|l| l.trim())
-        .is_some_and(|l| l.starts_with("```"))
-    {
-        &body_lines[..body_lines.len() - 1]
-    } else {
-        &body_lines[..]
+    let body_lines = match body_lines.split_last() {
+        Some((last, rest)) if is_fence_line(last) => rest,
+        _ => &body_lines[..],
     };
 
-    let overhead = fence_header.chars().count() + 1 + fence_close.chars().count() + 1;
-    let effective_max = target_max.saturating_sub(overhead).max(20);
+    let overhead = char_len(fence_header) + 2 + fence_close.len();
+    let Some(effective_max) = target_max.checked_sub(overhead).filter(|max| *max > 0) else {
+        // The fences alone exceed the budget: emit the body unfenced.
+        return line_split_block(&body_lines.join("\n"), target_max);
+    };
+    let fenced = |body: &str| format!("{fence_header}\n{body}\n{fence_close}");
 
     let mut parts = Vec::new();
-    let mut current_body = String::new();
+    // `None` until the current part holds at least one (possibly empty) line.
+    let mut current: Option<(String, usize)> = None;
 
     for &line in body_lines {
-        let needed = if current_body.is_empty() {
-            line.chars().count()
-        } else {
-            current_body.chars().count() + 1 + line.chars().count()
-        };
+        let line_len = char_len(line);
+        if line_len > effective_max {
+            if let Some((body, _)) = current.take() {
+                parts.push(fenced(&body));
+            }
+            for piece in char_windows(line, effective_max) {
+                parts.push(fenced(&piece));
+            }
+            continue;
+        }
 
-        if needed <= effective_max {
-            if !current_body.is_empty() {
-                current_body.push('\n');
+        match current.as_mut() {
+            Some((body, len)) if *len + 1 + line_len <= effective_max => {
+                body.push('\n');
+                body.push_str(line);
+                *len += 1 + line_len;
             }
-            current_body.push_str(line);
-        } else {
-            if !current_body.is_empty() {
-                parts.push(format!("{fence_header}\n{current_body}\n{fence_close}"));
-                current_body.clear();
-            }
-            if line.chars().count() > effective_max {
-                for part in hard_split(line, effective_max) {
-                    parts.push(format!("{fence_header}\n{part}\n{fence_close}"));
+            Some(_) => {
+                if let Some((body, _)) = current.replace((line.to_string(), line_len)) {
+                    parts.push(fenced(&body));
                 }
-            } else {
-                current_body.push_str(line);
             }
+            None => current = Some((line.to_string(), line_len)),
         }
     }
 
-    if !current_body.is_empty() {
-        parts.push(format!("{fence_header}\n{current_body}\n{fence_close}"));
+    if let Some((body, _)) = current
+        && !body.trim().is_empty()
+    {
+        parts.push(fenced(&body));
     }
 
-    if parts.is_empty() {
-        vec![block.to_string()]
-    } else {
-        parts
-    }
+    parts
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn normalize_collapses_whitespace() {
@@ -396,6 +454,145 @@ let e = 5;
         for chunk in &chunks {
             assert!(chunk.starts_with("```rust"));
             assert!(chunk.ends_with("```"));
+            assert!(chunk.chars().count() <= 35);
+        }
+    }
+
+    #[test]
+    fn regression_zero_max_chars_does_not_panic() {
+        let chunks = split_technical_content("alpha beta", 0, Some("crumb"));
+        assert!(chunks.iter().all(|c| c.chars().count() <= 1));
+        assert!(!chunks.is_empty());
+        let chunks = split_for_tts("alpha beta", 0);
+        assert!(chunks.iter().all(|c| c.chars().count() <= 1));
+    }
+
+    #[test]
+    fn regression_fence_after_prose_line_starts_new_block() {
+        let input = "para\n```rust\nlet x = 1;\n```";
+        let blocks = segment_markdown_blocks(input);
+        assert_eq!(blocks, vec!["para", "```rust\nlet x = 1;\n```"]);
+        let chunks = split_technical_content(input, 200, None);
+        assert!(chunks.iter().all(|c| !c.contains("para```")));
+    }
+
+    #[test]
+    fn regression_long_tokens_respect_max() {
+        let url = format!("https://example.org/{}", "x".repeat(120));
+        for chunk in split_for_tts(&url, 25) {
+            assert!(chunk.chars().count() <= 25, "{chunk}");
+        }
+        let text = format!("see {url} now");
+        for chunk in split_technical_content(&text, 25, None) {
+            assert!(chunk.chars().count() <= 25, "{chunk}");
+        }
+    }
+
+    #[test]
+    fn regression_tts_measures_chars_not_bytes() {
+        // 10 two-byte chars fit a 10-char budget.
+        assert_eq!(split_for_tts("éééééééééé", 10), vec!["éééééééééé"]);
+    }
+
+    #[test]
+    fn regression_unterminated_fence_is_closed() {
+        let chunks = split_technical_content("```rust\nlet x = 1;", 200, None);
+        assert_eq!(chunks, vec!["```rust\nlet x = 1;\n```"]);
+    }
+
+    #[test]
+    fn regression_oversized_breadcrumb_is_truncated() {
+        let crumb = "B".repeat(100);
+        let chunks = split_technical_content("short body text", 40, Some(&crumb));
+        assert!(!chunks.is_empty());
+        for chunk in &chunks {
+            assert!(chunk.chars().count() <= 40, "{chunk}");
+            assert!(chunk.starts_with("BBBB"));
+        }
+    }
+
+    #[test]
+    fn regression_code_indentation_is_preserved_when_split() {
+        let line = format!("    {}", "y".repeat(60));
+        let input = format!("```\n{line}\n```");
+        let chunks = split_technical_content(&input, 30, None);
+        assert!(chunks[0].starts_with("```\n    y"));
+    }
+
+    fn non_ws(text: &str) -> String {
+        text.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    fn fence_count(chunk: &str) -> usize {
+        chunk.lines().filter(|l| is_fence_line(l)).count()
+    }
+
+    fn strip_fence_lines(text: &str) -> String {
+        text.lines()
+            .filter(|l| !is_fence_line(l))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Markdown-ish text whose only backticks are whole fence lines.
+    fn technical_text() -> impl Strategy<Value = String> {
+        let line = prop_oneof![
+            6 => "[a-zA-Z0-9 ,.;:()é漢]{0,60}",
+            1 => Just(String::new()),
+            1 => Just("```".to_string()),
+            1 => Just("```rust".to_string()),
+            1 => "    [a-z{}();=]{0,80}",
+        ];
+        prop::collection::vec(line, 0..40).prop_map(|lines| lines.join("\n"))
+    }
+
+    proptest! {
+        #[test]
+        fn tts_chunks_are_bounded_and_lossless(input in "\\PC{0,400}", max in 0usize..120) {
+            let chunks = split_for_tts(&input, max);
+            for chunk in &chunks {
+                prop_assert!(chunk.chars().count() <= max.max(1));
+                prop_assert!(!chunk.is_empty());
+                prop_assert_eq!(chunk.trim(), chunk.as_str());
+            }
+            prop_assert_eq!(non_ws(&chunks.concat()), non_ws(&input));
+            prop_assert_eq!(&chunks, &split_for_tts(&input, max));
+        }
+
+        #[test]
+        fn technical_chunks_never_panic_on_arbitrary_input(
+            input in "\\PC{0,300}",
+            max in 0usize..120,
+            crumb in proptest::option::of("\\PC{0,40}"),
+        ) {
+            for chunk in split_technical_content(&input, max, crumb.as_deref()) {
+                prop_assert!(chunk.chars().count() <= max.max(1));
+            }
+        }
+
+        #[test]
+        fn technical_chunks_hold_invariants(
+            input in technical_text(),
+            max in 1usize..300,
+            crumb in proptest::option::of("[a-zA-Z >]{1,40}"),
+        ) {
+            let chunks = split_technical_content(&input, max, crumb.as_deref());
+            let prefix = breadcrumb_prefix(crumb.as_deref(), max);
+            let mut bodies = String::new();
+            for chunk in &chunks {
+                prop_assert!(chunk.chars().count() <= max, "oversize chunk {chunk:?}");
+                prop_assert_eq!(chunk.trim(), chunk.as_str());
+                prop_assert!(!chunk.is_empty());
+                prop_assert!(chunk.starts_with(&prefix));
+                prop_assert!(fence_count(chunk).is_multiple_of(2), "unbalanced fences {chunk:?}");
+                bodies.push_str(&chunk[prefix.len()..]);
+                bodies.push('\n');
+            }
+            prop_assert_eq!(
+                non_ws(&strip_fence_lines(&bodies)),
+                non_ws(&strip_fence_lines(&input))
+            );
+            prop_assert_eq!(&chunks, &split_technical_content(&input, max, crumb.as_deref()));
         }
     }
 }

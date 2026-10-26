@@ -231,4 +231,64 @@ mod tests {
         let parsed: PaperMetadata = serde_json::from_value(zotero).unwrap();
         assert_eq!(parsed.abstract_note.as_deref(), Some("From Zotero"));
     }
+
+    use proptest::prelude::*;
+
+    fn json_value() -> impl Strategy<Value = Value> {
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::from),
+            any::<i64>().prop_map(Value::from),
+            "\\PC{0,10}".prop_map(Value::from),
+        ];
+        leaf.prop_recursive(4, 48, 6, |inner| {
+            prop_oneof![
+                prop::collection::vec(inner.clone(), 0..6).prop_map(Value::Array),
+                prop::collection::btree_map("[a-z_]{1,6}", inner, 0..6)
+                    .prop_map(|m| Value::Object(m.into_iter().collect())),
+            ]
+        })
+    }
+
+    /// Walk `root` using `choices` and return the selector for the reached
+    /// node along with the node itself.
+    fn path_into(root: &Value, choices: &[usize]) -> (String, Value) {
+        let mut selector = String::new();
+        let mut current = root;
+        for choice in choices {
+            match current {
+                Value::Array(items) if !items.is_empty() => {
+                    let idx = choice % items.len();
+                    selector.push_str(&format!("[{idx}]"));
+                    current = &items[idx];
+                }
+                Value::Object(map) if !map.is_empty() => {
+                    let (key, next) = map.iter().nth(choice % map.len()).unwrap();
+                    if !selector.is_empty() {
+                        selector.push('.');
+                    }
+                    selector.push_str(key);
+                    current = next;
+                }
+                _ => break,
+            }
+        }
+        (selector, current.clone())
+    }
+
+    proptest! {
+        #[test]
+        fn evaluate_never_panics(root in json_value(), selector in "\\PC{0,40}") {
+            let _ = evaluate(&root, &selector);
+        }
+
+        #[test]
+        fn evaluate_follows_generated_paths(
+            root in json_value(),
+            choices in prop::collection::vec(any::<usize>(), 0..6),
+        ) {
+            let (selector, expected) = path_into(&root, &choices);
+            prop_assert_eq!(evaluate(&root, &selector).unwrap(), expected);
+        }
+    }
 }

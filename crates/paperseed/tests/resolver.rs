@@ -19,3 +19,32 @@ fn parses_minimal_arxiv_atom() {
     assert_eq!(results[0].authors, vec!["Ada Lovelace"]);
     assert_eq!(results[0].year, Some(2024));
 }
+
+proptest::proptest! {
+    #[test]
+    fn arbitrary_atom_never_panics(atom in "\\PC{0,200}") {
+        let _ = parse_arxiv_atom(&atom);
+    }
+
+    #[test]
+    fn atom_like_fragments_never_panic(
+        parts in proptest::collection::vec(
+            proptest::prop_oneof![
+                proptest::prelude::Just("<entry>".to_string()),
+                proptest::prelude::Just("</entry>".to_string()),
+                proptest::prelude::Just("<title>".to_string()),
+                proptest::prelude::Just("</title>".to_string()),
+                proptest::prelude::Just("<published>".to_string()),
+                proptest::prelude::Just("</published>".to_string()),
+                proptest::prelude::Just("<author><name>".to_string()),
+                proptest::prelude::Just("</name></author>".to_string()),
+                proptest::prelude::Just("<id>".to_string()),
+                proptest::prelude::Just("</id>".to_string()),
+                "\\PC{0,6}",
+            ],
+            0..24,
+        )
+    ) {
+        let _ = parse_arxiv_atom(&parts.concat());
+    }
+}

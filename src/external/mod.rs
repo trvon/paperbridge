@@ -221,6 +221,7 @@ impl PaperSearch {
         &self.openlibrary
     }
 
+    #[tracing::instrument(name = "search_fanout", level = "info", skip_all, fields(limit = opts.limit))]
     pub async fn search(&self, opts: SearchOptions) -> Result<PaperSearchOutcome> {
         opts.validate_source_fetch_limit()?;
         let timeout_duration = Duration::from_millis(opts.timeout_ms);
@@ -463,6 +464,7 @@ fn source_wire_name(source: PaperSource) -> String {
         .unwrap_or_else(|| format!("{source:?}").to_ascii_lowercase())
 }
 
+#[tracing::instrument(level = "debug", skip(fut), fields(enabled, missing_key))]
 async fn run_source<F>(
     source: PaperSource,
     enabled: bool,
@@ -525,22 +527,31 @@ pub(crate) async fn send_with_retry(
     global_request_router().send(component, req).await
 }
 
-fn dedupe(hits: Vec<PaperHit>) -> Vec<PaperHit> {
+pub(crate) fn dedupe(hits: Vec<PaperHit>) -> Vec<PaperHit> {
+    // Identity keys are normalized strings; computing them once per record
+    // (and again only after a merge) keeps this from re-normalizing every
+    // pair on every comparison.
     let mut out: Vec<PaperHit> = Vec::with_capacity(hits.len());
+    let mut keys: Vec<IdentityKeys> = Vec::with_capacity(hits.len());
     for hit in hits {
-        if let Some(mut index) = out
+        let hit_keys = IdentityKeys::of(&hit);
+        if let Some(mut index) = keys
             .iter()
-            .position(|existing| compatible_identity(existing, &hit))
+            .position(|existing| existing.compatible(&hit_keys))
         {
             merge_hit_metadata(&mut out[index], hit);
+            keys[index] = IdentityKeys::of(&out[index]);
             // Promoted IDs can connect records that previously had no shared ID.
             // Recheck against the merged evidence; contradictions still veto.
             let mut candidate = 0;
             while candidate < out.len() {
-                if candidate != index && compatible_identity(&out[index], &out[candidate]) {
+                if candidate != index && keys[index].compatible(&keys[candidate]) {
                     let kept = index.min(candidate);
-                    let other = out.remove(index.max(candidate));
+                    let removed = index.max(candidate);
+                    let other = out.remove(removed);
+                    keys.remove(removed);
                     merge_hit_metadata(&mut out[kept], other);
+                    keys[kept] = IdentityKeys::of(&out[kept]);
                     index = kept;
                     candidate = 0;
                 } else {
@@ -549,41 +560,61 @@ fn dedupe(hits: Vec<PaperHit>) -> Vec<PaperHit> {
             }
         } else {
             out.push(hit);
+            keys.push(hit_keys);
         }
     }
     out
 }
 
-/// Strong-ID contradictions veto even a matching title or another shared ID.
-/// Without a shared ID, require both title and a nonempty author to corroborate.
-/// Note: ISBN differences do not veto, allowing different editions of the same
-/// book to merge when title and author match.
-pub(crate) fn compatible_identity(left: &PaperHit, right: &PaperHit) -> bool {
-    let strong_veto_pairs = [
-        (doi_key(left), doi_key(right)),
-        (arxiv_key(left), arxiv_key(right)),
-        (pmid_key(left), pmid_key(right)),
-    ];
-    if strong_veto_pairs
-        .iter()
-        .any(|(a, b)| matches!((a, b), (Some(a), Some(b)) if a != b))
-    {
-        return false;
-    }
-    let shared_id_pairs = [
-        (doi_key(left), doi_key(right)),
-        (arxiv_key(left), arxiv_key(right)),
-        (pmid_key(left), pmid_key(right)),
-        (paper_id_key(left), paper_id_key(right)),
-    ];
-    let neither_is_chapter =
-        left.work_type != Some(WorkType::Chapter) && right.work_type != Some(WorkType::Chapter);
-    let isbn_matches =
-        neither_is_chapter && isbn_key(left).is_some() && isbn_key(left) == isbn_key(right);
+/// Normalized identity evidence for one hit; see [`compatible_identity`].
+struct IdentityKeys {
+    doi: Option<String>,
+    arxiv: Option<String>,
+    pmid: Option<String>,
+    paper_id: Option<String>,
+    isbn: Option<String>,
+    is_chapter: bool,
+    title_author: Option<String>,
+}
 
-    isbn_matches
-        || shared_id_pairs.iter().any(|(a, b)| a.is_some() && a == b)
-        || title_author_key(left).is_some_and(|key| Some(key) == title_author_key(right))
+impl IdentityKeys {
+    fn of(hit: &PaperHit) -> Self {
+        Self {
+            doi: doi_key(hit),
+            arxiv: arxiv_key(hit),
+            pmid: pmid_key(hit),
+            paper_id: paper_id_key(hit),
+            isbn: isbn_key(hit),
+            is_chapter: hit.work_type == Some(WorkType::Chapter),
+            title_author: title_author_key(hit),
+        }
+    }
+
+    fn compatible(&self, other: &Self) -> bool {
+        let conflict =
+            |a: &Option<String>, b: &Option<String>| matches!((a, b), (Some(a), Some(b)) if a != b);
+        if conflict(&self.doi, &other.doi)
+            || conflict(&self.arxiv, &other.arxiv)
+            || conflict(&self.pmid, &other.pmid)
+        {
+            return false;
+        }
+        let shared = |a: &Option<String>, b: &Option<String>| a.is_some() && a == b;
+        let isbn_matches = !self.is_chapter && !other.is_chapter && shared(&self.isbn, &other.isbn);
+        isbn_matches
+            || shared(&self.doi, &other.doi)
+            || shared(&self.arxiv, &other.arxiv)
+            || shared(&self.pmid, &other.pmid)
+            || shared(&self.paper_id, &other.paper_id)
+            || shared(&self.title_author, &other.title_author)
+    }
+}
+
+/// Two hits describe the same work: no strong-id (DOI/arXiv/PMID)
+/// contradiction, and at least one shared id, a shared ISBN (not for
+/// chapters), or the same normalized title + first author.
+pub(crate) fn compatible_identity(left: &PaperHit, right: &PaperHit) -> bool {
+    IdentityKeys::of(left).compatible(&IdentityKeys::of(right))
 }
 
 /// Keep the preferred source/cached record while promoting complementary metadata.
@@ -655,10 +686,15 @@ pub(crate) fn doi_key(hit: &PaperHit) -> Option<String> {
     hit.doi.as_deref().and_then(normalize_doi_key)
 }
 
+/// Canonical arXiv id, or the wrapper/version-stripped form for ids that
+/// fail validation. Matches the id embedded in `arxiv:` hit_ids.
 pub(crate) fn arxiv_key(hit: &PaperHit) -> Option<String> {
-    hit.arxiv_id
-        .as_deref()
-        .map(|a| strip_arxiv_version(a).to_ascii_lowercase())
+    let raw = hit.arxiv_id.as_deref()?;
+    crate::hit_enrich::normalize_arxiv_str(raw)
+        .or_else(|| {
+            let stripped = crate::hit_enrich::strip_arxiv_prefix(raw);
+            Some(crate::hit_enrich::strip_arxiv_version(&stripped).to_string())
+        })
         .filter(|k| !k.is_empty())
 }
 
@@ -692,16 +728,6 @@ pub(crate) fn title_author_key(hit: &PaperHit) -> Option<String> {
     if key.is_empty() { None } else { Some(key) }
 }
 
-fn strip_arxiv_version(id: &str) -> String {
-    if let Some(idx) = id.rfind('v') {
-        let (base, ver) = id.split_at(idx);
-        if ver.len() > 1 && ver[1..].chars().all(|c| c.is_ascii_digit()) {
-            return base.to_string();
-        }
-    }
-    id.to_string()
-}
-
 fn title_authors_key(hit: &PaperHit) -> String {
     let title_norm = normalize_text_key(&hit.title);
     let first_author_norm = hit
@@ -717,25 +743,12 @@ fn title_authors_key(hit: &PaperHit) -> String {
     }
 }
 
+/// Canonical DOI, or the wrapper-stripped lowercase form for DOIs that fail
+/// validation. Matches the DOI embedded in `doi:` hit_ids.
 fn normalize_doi_key(raw: &str) -> Option<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let lowered = trimmed.to_lowercase();
-    let normalized = lowered
-        .strip_prefix("https://doi.org/")
-        .or_else(|| lowered.strip_prefix("http://doi.org/"))
-        .or_else(|| lowered.strip_prefix("doi:"))
-        .unwrap_or(lowered.as_str())
-        .trim();
-
-    if normalized.is_empty() {
-        None
-    } else {
-        Some(normalized.to_string())
-    }
+    crate::hit_enrich::normalize_doi_str(raw)
+        .or_else(|| Some(crate::hit_enrich::strip_doi_prefix(raw)))
+        .filter(|k| !k.is_empty())
 }
 
 fn normalize_text_key(raw: &str) -> String {
@@ -1478,5 +1491,226 @@ mod tests {
         merge_hit_metadata(&mut merged, hit1);
         assert_eq!(merged.isbn, Some("9781491903070".into()));
         assert_eq!(merged.work_type, Some(crate::models::WorkType::Book));
+    }
+    #[test]
+    fn dedupe_merges_arxiv_prefix_and_version_forms() {
+        // Both mint hit_id "arxiv:2401.12345"; the dedupe key used to keep the
+        // "arxiv:" prefix and veto the merge as a strong-ID conflict.
+        let a = mk(
+            PaperSource::Arxiv,
+            "X",
+            None,
+            Some("arXiv:2401.12345"),
+            None,
+        );
+        let b = mk(
+            PaperSource::HuggingFace,
+            "X",
+            None,
+            Some("2401.12345v2"),
+            None,
+        );
+        assert!(compatible_identity(&a, &b));
+        assert_eq!(dedupe(vec![a, b]).len(), 1);
+    }
+
+    #[test]
+    fn dedupe_merges_dx_doi_resolver_form() {
+        let a = mk(
+            PaperSource::Crossref,
+            "A",
+            Some("https://dx.doi.org/10.1/ABC"),
+            None,
+            None,
+        );
+        let b = mk(PaperSource::OpenAlex, "A", Some("10.1/abc"), None, None);
+        assert!(compatible_identity(&a, &b));
+        assert_eq!(dedupe(vec![a, b]).len(), 1);
+    }
+
+    mod props {
+        use super::super::*;
+        use super::{mk, mk_pmid};
+        use proptest::prelude::*;
+
+        fn arb_hit() -> impl Strategy<Value = PaperHit> {
+            (
+                prop::sample::select(vec![
+                    PaperSource::Arxiv,
+                    PaperSource::Crossref,
+                    PaperSource::OpenAlex,
+                    PaperSource::SemanticScholar,
+                ]),
+                prop::sample::select(vec!["Deep Nets", "Graph Search", "deep nets!"]),
+                proptest::option::of(prop::sample::select(vec![
+                    "10.1/a",
+                    "https://doi.org/10.1/A",
+                    "doi:10.1/b",
+                    "https://dx.doi.org/10.1/b",
+                ])),
+                proptest::option::of(prop::sample::select(vec![
+                    "2401.00001",
+                    "arXiv:2401.00001v2",
+                    "https://arxiv.org/abs/2401.00002",
+                ])),
+                proptest::option::of(prop::sample::select(vec!["Ada", "Bob"])),
+                proptest::option::of(prop::sample::select(vec!["111", "222"])),
+            )
+                .prop_map(|(source, title, doi, arxiv, author, pmid)| {
+                    let mut hit = match pmid {
+                        Some(pmid) => {
+                            let mut h = mk_pmid(source, title, pmid);
+                            h.doi = doi.map(str::to_string);
+                            h.arxiv_id = arxiv.map(str::to_string);
+                            h.authors = author.map(|a| vec![a.to_string()]).unwrap_or_default();
+                            h
+                        }
+                        None => mk(source, title, doi, arxiv, author),
+                    };
+                    hit.citation_count = None;
+                    hit
+                })
+        }
+
+        fn strong_keys(hits: &[PaperHit]) -> std::collections::BTreeSet<String> {
+            hits.iter()
+                .flat_map(|h| {
+                    [
+                        doi_key(h).map(|k| format!("doi:{k}")),
+                        arxiv_key(h).map(|k| format!("arxiv:{k}")),
+                        pmid_key(h).map(|k| format!("pmid:{k}")),
+                    ]
+                })
+                .flatten()
+                .collect()
+        }
+
+        // Pre-optimization dedupe, kept verbatim as an oracle for the
+        // key-caching implementation.
+        fn dedupe_reference(hits: Vec<PaperHit>) -> Vec<PaperHit> {
+            let mut out: Vec<PaperHit> = Vec::with_capacity(hits.len());
+            for hit in hits {
+                if let Some(mut index) = out
+                    .iter()
+                    .position(|existing| compatible_identity_reference(existing, &hit))
+                {
+                    merge_hit_metadata(&mut out[index], hit);
+                    // Promoted IDs can connect records that previously had no shared ID.
+                    // Recheck against the merged evidence; contradictions still veto.
+                    let mut candidate = 0;
+                    while candidate < out.len() {
+                        if candidate != index
+                            && compatible_identity_reference(&out[index], &out[candidate])
+                        {
+                            let kept = index.min(candidate);
+                            let other = out.remove(index.max(candidate));
+                            merge_hit_metadata(&mut out[kept], other);
+                            index = kept;
+                            candidate = 0;
+                        } else {
+                            candidate += 1;
+                        }
+                    }
+                } else {
+                    out.push(hit);
+                }
+            }
+            out
+        }
+
+        /// Strong-ID contradictions veto even a matching title or another shared ID.
+        /// Without a shared ID, require both title and a nonempty author to corroborate.
+        /// Note: ISBN differences do not veto, allowing different editions of the same
+        /// book to merge when title and author match.
+        fn compatible_identity_reference(left: &PaperHit, right: &PaperHit) -> bool {
+            let strong_veto_pairs = [
+                (doi_key(left), doi_key(right)),
+                (arxiv_key(left), arxiv_key(right)),
+                (pmid_key(left), pmid_key(right)),
+            ];
+            if strong_veto_pairs
+                .iter()
+                .any(|(a, b)| matches!((a, b), (Some(a), Some(b)) if a != b))
+            {
+                return false;
+            }
+            let shared_id_pairs = [
+                (doi_key(left), doi_key(right)),
+                (arxiv_key(left), arxiv_key(right)),
+                (pmid_key(left), pmid_key(right)),
+                (paper_id_key(left), paper_id_key(right)),
+            ];
+            let neither_is_chapter = left.work_type != Some(WorkType::Chapter)
+                && right.work_type != Some(WorkType::Chapter);
+            let isbn_matches =
+                neither_is_chapter && isbn_key(left).is_some() && isbn_key(left) == isbn_key(right);
+
+            isbn_matches
+                || shared_id_pairs.iter().any(|(a, b)| a.is_some() && a == b)
+                || title_author_key(left).is_some_and(|key| Some(key) == title_author_key(right))
+        }
+
+        proptest! {
+            #[test]
+            fn dedupe_matches_reference_implementation(
+                hits in prop::collection::vec(arb_hit(), 0..10),
+                a in arb_hit(),
+                b in arb_hit(),
+            ) {
+                prop_assert_eq!(compatible_identity(&a, &b), compatible_identity_reference(&a, &b));
+                let fast = dedupe(hits.clone());
+                let slow = dedupe_reference(hits);
+                prop_assert_eq!(
+                    serde_json::to_value(&fast).unwrap(),
+                    serde_json::to_value(&slow).unwrap()
+                );
+            }
+
+            #[test]
+            fn dedupe_invariants(hits in prop::collection::vec(arb_hit(), 0..8)) {
+                // Tag each input with its position to check first-occurrence order.
+                let hits: Vec<PaperHit> = hits
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, mut h)| {
+                        h.relevance_score = Some(i as f32);
+                        h
+                    })
+                    .collect();
+                let input_keys = strong_keys(&hits);
+                let out = dedupe(hits.clone());
+
+                prop_assert!(out.len() <= hits.len());
+                for (i, a) in out.iter().enumerate() {
+                    for b in &out[i + 1..] {
+                        prop_assert!(!compatible_identity(a, b), "{:?} ~ {:?}", a.title, b.title);
+                    }
+                }
+                prop_assert_eq!(strong_keys(&out), input_keys);
+                let order: Vec<f32> = out.iter().filter_map(|h| h.relevance_score).collect();
+                prop_assert_eq!(order.len(), out.len());
+                prop_assert!(order.windows(2).all(|w| w[0] < w[1]), "{:?}", order);
+
+                let again = dedupe(out.clone());
+                prop_assert_eq!(again.len(), out.len());
+            }
+
+            #[test]
+            fn equal_strong_hit_ids_have_equal_dedupe_keys(a in arb_hit(), b in arb_hit()) {
+                let (mut ea, mut eb) = (a.clone(), b.clone());
+                crate::hit_enrich::enrich_hit_identity(&mut ea);
+                crate::hit_enrich::enrich_hit_identity(&mut eb);
+                if ea.hit_id == eb.hit_id {
+                    let id = ea.hit_id.clone().unwrap_or_default();
+                    if id.starts_with("arxiv:") {
+                        prop_assert_eq!(arxiv_key(&a), arxiv_key(&b));
+                        prop_assert_eq!(Some(format!("arxiv:{}", arxiv_key(&a).unwrap())), ea.hit_id);
+                    } else if id.starts_with("doi:") {
+                        prop_assert_eq!(doi_key(&a), doi_key(&b));
+                        prop_assert_eq!(Some(format!("doi:{}", doi_key(&a).unwrap())), ea.hit_id);
+                    }
+                }
+            }
+        }
     }
 }

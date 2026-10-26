@@ -112,7 +112,7 @@ impl CloudZoteroBackend {
                 .map_err(|e| self.http_error(format!("Failed to read response body: {e}")))?;
             let parsed = self.parse_json::<T>(&body)?;
             if let Some(secs) = backoff {
-                sleep(Duration::from_secs(secs)).await;
+                sleep(capped_server_delay(secs)).await;
             }
 
             return Ok(parsed);
@@ -736,15 +736,23 @@ fn is_retryable(status: StatusCode) -> bool {
     status == StatusCode::TOO_MANY_REQUESTS || status == StatusCode::SERVICE_UNAVAILABLE
 }
 
+/// Upper bound on any server-requested wait (`Retry-After`, `Backoff`).
+/// Zotero asks clients to honor these headers; normal values are seconds to a
+/// few minutes, but an unbounded value would stall a tool call indefinitely.
+const MAX_SERVER_DELAY: Duration = Duration::from_secs(60);
+
+fn capped_server_delay(secs: u64) -> Duration {
+    Duration::from_secs(secs).min(MAX_SERVER_DELAY)
+}
+
 fn retry_delay(headers: &HeaderMap, attempt: u32) -> Option<Duration> {
     if let Some(secs) = parse_retry_after_secs(headers) {
-        return Some(Duration::from_secs(secs));
+        return Some(capped_server_delay(secs));
     }
     if let Some(secs) = parse_backoff_secs(headers) {
-        return Some(Duration::from_secs(secs));
+        return Some(capped_server_delay(secs));
     }
-    let base = 1u64.checked_shl(attempt).unwrap_or(1);
-    Some(Duration::from_secs(base.max(1)))
+    Some(retry_delay_for_attempt(attempt))
 }
 
 fn retry_delay_for_attempt(attempt: u32) -> Duration {
@@ -1054,8 +1062,56 @@ fn extract_year(date: Option<&str>) -> Option<String> {
 mod tests {
     use super::*;
     use crate::config::{BackendModeConfig, LibraryType};
+    use proptest::prelude::*;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn delay_headers(retry_after: Option<u64>, backoff: Option<u64>) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        if let Some(v) = retry_after {
+            headers.insert(RETRY_AFTER, v.to_string().parse().unwrap());
+        }
+        if let Some(v) = backoff {
+            headers.insert(
+                HeaderName::from_static("backoff"),
+                v.to_string().parse().unwrap(),
+            );
+        }
+        headers
+    }
+
+    #[test]
+    fn regression_huge_retry_after_is_capped() {
+        let headers = delay_headers(Some(u64::MAX), None);
+        assert_eq!(retry_delay(&headers, 0), Some(MAX_SERVER_DELAY));
+        assert_eq!(capped_server_delay(u64::MAX), MAX_SERVER_DELAY);
+        assert_eq!(
+            retry_delay(&delay_headers(Some(5), None), 0),
+            Some(Duration::from_secs(5))
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn retry_delay_is_bounded_and_monotone(
+            retry_after in proptest::option::of(any::<u64>()),
+            backoff in proptest::option::of(any::<u64>()),
+            attempt in any::<u32>(),
+            bump in 0u64..1_000,
+        ) {
+            let delay = retry_delay(&delay_headers(retry_after, backoff), attempt).unwrap();
+            prop_assert!(delay >= Duration::from_secs(1) || retry_after == Some(0) || (retry_after.is_none() && backoff == Some(0)));
+            prop_assert!(delay <= MAX_SERVER_DELAY.max(retry_delay_for_attempt(u32::MAX)));
+            if retry_after.is_some() || backoff.is_some() {
+                prop_assert!(delay <= MAX_SERVER_DELAY);
+            }
+            if let Some(v) = retry_after {
+                let larger = retry_delay(&delay_headers(Some(v.saturating_add(bump)), backoff), attempt).unwrap();
+                prop_assert!(larger >= delay);
+            }
+            prop_assert!(retry_delay_for_attempt(attempt.saturating_add(1)) >= retry_delay_for_attempt(attempt));
+        }
+    }
 
     fn test_config(api_base: String) -> Config {
         Config {

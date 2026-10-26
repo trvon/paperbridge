@@ -1,0 +1,59 @@
+[package]
+name = "paperbridge-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+paperbridge = { path = ".." }
+paperseed-index = { path = "../crates/paperseed-index" }
+serde_json = "1"
+
+# Standalone: not a member of the root workspace, so stable CI never builds it.
+[workspace]
+
+[[bin]]
+name = "tei_parse"
+path = "fuzz_targets/tei_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "identifiers"
+path = "fuzz_targets/identifiers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "index_from_bytes"
+path = "fuzz_targets/index_from_bytes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chunking"
+path = "fuzz_targets/chunking.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "book_toc"
+path = "fuzz_targets/book_toc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "selector"
+path = "fuzz_targets/selector.rs"
+test = false
+doc = false
+bench = false

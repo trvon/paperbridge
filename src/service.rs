@@ -176,6 +176,7 @@ impl PaperbridgeService {
         self
     }
 
+    #[tracing::instrument(level = "info", skip_all, fields(detail = ?opts.detail))]
     pub async fn search_papers(&self, opts: SearchOptions) -> Result<SearchPapersResult> {
         // Preserve the original query for ranking (its exact form still drives
         // the DOI/arXiv exact-match short-circuit in rank_search_hits). When
@@ -232,7 +233,10 @@ impl PaperbridgeService {
             && let Some(api) = &self.paperseed
         {
             let cache_start = hits.len();
-            match api.search_cached_papers(&opts.query, opts.source_fetch_limit() as usize) {
+            let cached = tracing::debug_span!("paperseed_cache_search").in_scope(|| {
+                api.search_cached_papers(&opts.query, opts.source_fetch_limit() as usize)
+            });
+            match cached {
                 Ok(mut cached_hits) => {
                     if cache_mode == SearchCacheMode::Auto {
                         cached_hits.retain(|hit| should_surface_cached_hit(&original_query, hit));
@@ -257,19 +261,23 @@ impl PaperbridgeService {
             .is_none_or(|sources| sources.contains(&PaperSource::Research));
         if research_requested {
             match self.paperseed.as_ref() {
-                Some(api) if api.research_enabled() => match api.search_research_papers(
-                    &expand_agent_search_query(&original_query),
-                    opts.source_fetch_limit() as usize,
-                ) {
-                    Ok(research_hits) => {
-                        diagnostics.sources_ok.push("research".into());
-                        hits.extend(research_hits.into_iter().map(research_paper_to_hit));
+                Some(api) if api.research_enabled() => {
+                    match tracing::debug_span!("research_search").in_scope(|| {
+                        api.search_research_papers(
+                            &expand_agent_search_query(&original_query),
+                            opts.source_fetch_limit() as usize,
+                        )
+                    }) {
+                        Ok(research_hits) => {
+                            diagnostics.sources_ok.push("research".into());
+                            hits.extend(research_hits.into_iter().map(research_paper_to_hit));
+                        }
+                        Err(error) => diagnostics.sources_failed.push(SourceDiagnostic {
+                            source: "research".into(),
+                            reason: error.to_string(),
+                        }),
                     }
-                    Err(error) => diagnostics.sources_failed.push(SourceDiagnostic {
-                        source: "research".into(),
-                        reason: error.to_string(),
-                    }),
-                },
+                }
                 _ => diagnostics.sources_skipped.push(SourceDiagnostic {
                     source: "research".into(),
                     reason: "yams_not_ready".into(),
@@ -277,7 +285,8 @@ impl PaperbridgeService {
             }
         }
         if cache_mode != SearchCacheMode::Off {
-            self.annotate_cached_hits(&mut hits);
+            tracing::debug_span!("annotate_cached_hits", hits = hits.len())
+                .in_scope(|| self.annotate_cached_hits(&mut hits));
         }
         rank_search_hits(&original_query, &mut hits);
         for diagnostic in diagnostics
@@ -327,6 +336,7 @@ impl PaperbridgeService {
     }
 
     /// Resolve a paper by id and return requested slices (metadata/fulltext/structure/chunks).
+    #[tracing::instrument(level = "info", skip_all, fields(want = ?req.want))]
     pub async fn open_paper(&self, req: OpenPaperRequest) -> Result<serde_json::Value> {
         let max_chars = validated_fulltext_limit(req.max_chars)?;
         let offset = req.offset.unwrap_or(0);
@@ -818,6 +828,7 @@ impl PaperbridgeService {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn download_open_fulltext(
         &self,
         resolved: &OpenResolved,
@@ -860,7 +871,15 @@ impl PaperbridgeService {
             }
             bytes.extend_from_slice(&chunk);
         }
-        let content = paperseed::app::extract_pdf_text_from_bytes(&bytes)
+        let content = run_blocking("pdf_extract", move || {
+            paperseed::app::extract_pdf_text_from_bytes(&bytes)
+        })
+        .await
+        .map_err(|_| {
+            ZoteroMcpError::InvalidInput(format!(
+                "Downloaded paper from {url}, but the PDF parser failed on it. Try a real, decrypted PDF, an OCR copy, or a Zotero attachment."
+            ))
+        })?
             .map_err(|error| {
                 ZoteroMcpError::InvalidInput(format!(
                     "Downloaded paper from {url}, but its PDF text could not be read: {error}. Try a real, decrypted PDF, an OCR copy, or a Zotero attachment."
@@ -963,8 +982,9 @@ impl PaperbridgeService {
         let Some(api) = &self.paperseed else {
             return;
         };
-        for hit in hits {
-            if let Some(entry) = api.find_cached_hit(hit) {
+        let matches = api.find_cached_hits(hits);
+        for (hit, entry) in hits.iter_mut().zip(matches) {
+            if let Some(entry) = entry {
                 let has_full_text = entry.has_full_text();
                 let yams_indexed = entry.yams_hash.is_some();
                 hit.cache = Some(CachedPaperSummary {
@@ -1180,6 +1200,7 @@ impl PaperbridgeService {
         paginate_fulltext(&fulltext, max_chars, offset.unwrap_or(0))
     }
 
+    #[tracing::instrument(level = "debug", skip(self))]
     pub async fn get_paper_structure(
         &self,
         item_key: &str,
@@ -1243,6 +1264,7 @@ impl PaperbridgeService {
         Ok(structure)
     }
 
+    #[tracing::instrument(level = "debug", skip(self, cfg))]
     async fn try_grobid_structure(
         &self,
         item_key: &str,
@@ -1271,7 +1293,12 @@ impl PaperbridgeService {
 
         let bytes = self.backend.get_attachment_bytes(attachment_key).await?;
         let tei_xml = client.process_fulltext(bytes).await?;
-        tei::parse_tei(item_key, attachment_key, &tei_xml)
+        let (item_key, attachment_key) = (item_key.to_string(), attachment_key.to_string());
+        run_blocking("tei_parse", move || {
+            tei::parse_tei(&item_key, &attachment_key, &tei_xml)
+        })
+        .await
+        .map_err(|_| ZoteroMcpError::Serde("GROBID TEI parsing failed unexpectedly".to_string()))?
     }
 
     pub async fn query_paper(
@@ -2754,24 +2781,7 @@ fn normalize_search_text(raw: &str) -> String {
 }
 
 fn normalize_doi(raw: &str) -> Option<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let lowered = trimmed.to_lowercase();
-    let normalized = lowered
-        .strip_prefix("https://doi.org/")
-        .or_else(|| lowered.strip_prefix("http://doi.org/"))
-        .or_else(|| lowered.strip_prefix("doi:"))
-        .unwrap_or(lowered.as_str())
-        .trim();
-
-    if validation::looks_like_doi(normalized) {
-        Some(normalized.to_string())
-    } else {
-        None
-    }
+    crate::hit_enrich::normalize_doi_str(raw)
 }
 
 fn normalize_arxiv_id(raw: &str) -> Option<String> {
@@ -2796,6 +2806,22 @@ fn source_rank_bias(source: crate::models::PaperSource) -> u8 {
         crate::models::PaperSource::OpenLibrary => 5,
         crate::models::PaperSource::ScholarApi => 0,
     }
+}
+
+/// Run CPU-bound or blocking work on tokio's blocking pool inside a
+/// `blocking` span. A panic in `work` (e.g. a malformed PDF tripping the
+/// parser) is returned as `Err` instead of unwinding into the caller.
+async fn run_blocking<T, F>(stage: &'static str, work: F) -> std::result::Result<T, ()>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let span = tracing::debug_span!("blocking", stage);
+    tokio::task::spawn_blocking(move || span.in_scope(work))
+        .await
+        .map_err(|error| {
+            tracing::warn!(stage, %error, "blocking task failed");
+        })
 }
 
 fn research_paper_to_hit(hit: crate::paperseed_api::ResearchPaperHit) -> PaperHit {
@@ -5429,5 +5455,177 @@ Relational models and document stores.
             err.to_string().contains("requires hit_id"),
             "unexpected: {err}"
         );
+    }
+    #[test]
+    fn resolve_open_targets_accepts_dx_doi_and_arxiv_prefix_forms() {
+        let r = resolve_open_targets(&OpenPaperRequest {
+            doi: Some("https://dx.doi.org/10.1000/XYZ".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(r.doi.as_deref(), Some("10.1000/xyz"));
+        let r = resolve_open_targets(&OpenPaperRequest {
+            hit_id: Some("arxiv:arXiv:1706.03762v7".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(r.arxiv_id.as_deref(), Some("1706.03762"));
+    }
+
+    mod props {
+        use super::super::*;
+        use super::make_hit;
+        use crate::models::PaperSource;
+        use proptest::prelude::*;
+
+        fn arb_identity_hit() -> impl Strategy<Value = PaperHit> {
+            (
+                "[A-Za-z ]{1,20}",
+                proptest::option::of(prop::sample::select(vec![
+                    "10.1000/XYZ",
+                    "doi:10.5555/a.b-c",
+                    "https://dx.doi.org/10.48550/arXiv.2401.1",
+                ])),
+                proptest::option::of(prop::sample::select(vec![
+                    "2401.12345v2",
+                    "arXiv:1706.03762",
+                    "hep-th/9901001",
+                ])),
+                proptest::option::of(prop::sample::select(vec![
+                    "978-1-4919-0307-0",
+                    "0-306-40615-2",
+                ])),
+                proptest::option::of(prop::sample::select(vec![
+                    "https://example.org/paper.pdf",
+                    "https://example.org/landing",
+                ])),
+            )
+                .prop_map(|(title, doi, arxiv, isbn, url)| {
+                    let mut hit = make_hit(PaperSource::Crossref, &title, doi);
+                    hit.arxiv_id = arxiv.map(str::to_string);
+                    hit.isbn = isbn.map(str::to_string);
+                    hit.url = url.map(str::to_string);
+                    hit.pdf_url = None;
+                    hit.oa_pdf_url = None;
+                    hit.cache = None;
+                    hit
+                })
+        }
+
+        fn fulltext(content: String) -> FulltextContent {
+            FulltextContent {
+                item_key: "k".into(),
+                content,
+                indexed_pages: None,
+                total_pages: None,
+                indexed_chars: None,
+                total_chars: None,
+            }
+        }
+
+        fn arb_json() -> impl Strategy<Value = serde_json::Value> {
+            let leaf = prop_oneof![
+                Just(serde_json::Value::Null),
+                any::<bool>().prop_map(serde_json::Value::from),
+                any::<i32>().prop_map(serde_json::Value::from),
+                ".{0,30}".prop_map(serde_json::Value::from),
+            ];
+            leaf.prop_recursive(6, 64, 8, |inner| {
+                prop_oneof![
+                    prop::collection::vec(inner.clone(), 0..8).prop_map(serde_json::Value::from),
+                    prop::collection::btree_map("[a-z]{1,4}", inner, 0..8)
+                        .prop_map(|m| { serde_json::Value::Object(m.into_iter().collect()) }),
+                ]
+            })
+        }
+
+        proptest! {
+            /// Every openable hit_id parses back to the identifier it was minted
+            /// from. `title:` and `pmid:` ids are discoverable only and are
+            /// rejected by design.
+            #[test]
+            fn minted_hit_id_round_trips_through_open(mut hit in arb_identity_hit()) {
+                crate::hit_enrich::enrich_hit_identity(&mut hit);
+                let hit_id = hit.hit_id.clone().unwrap();
+                let ids = hit.ids.clone().unwrap();
+                let resolved = resolve_open_targets(&OpenPaperRequest {
+                    hit_id: Some(hit_id.clone()),
+                    ..Default::default()
+                });
+                if hit_id.starts_with("title:") || hit_id.starts_with("pmid:") {
+                    prop_assert!(resolved.is_err());
+                    return Ok(());
+                }
+                let r = resolved.map_err(|e| TestCaseError::fail(format!("{hit_id}: {e}")))?;
+                if hit_id.starts_with("arxiv:") {
+                    prop_assert_eq!(r.arxiv_id, ids.arxiv);
+                } else if hit_id.starts_with("doi:") {
+                    prop_assert_eq!(r.doi, ids.doi);
+                } else if hit_id.starts_with("isbn:") {
+                    prop_assert_eq!(r.isbn, ids.isbn);
+                } else if let Some(url) = hit_id.strip_prefix("url:") {
+                    prop_assert!(r.url.is_some(), "{}", url);
+                } else {
+                    prop_assert!(false, "unexpected hit_id {}", hit_id);
+                }
+            }
+
+            #[test]
+            fn paging_reconstructs_content(content in ".{0,200}", max_chars in 1usize..40) {
+                let full = fulltext(content.clone());
+                let mut rebuilt = String::new();
+                let mut offset = 0usize;
+                let mut pages = 0usize;
+                loop {
+                    let page = paginate_fulltext(&full, max_chars, offset).unwrap();
+                    prop_assert!(page.fulltext.content.chars().count() <= max_chars);
+                    rebuilt.push_str(&page.fulltext.content);
+                    pages += 1;
+                    prop_assert!(pages <= content.len() + 1, "no progress");
+                    match page.next_offset {
+                        Some(next) => {
+                            prop_assert!(next > offset);
+                            offset = next;
+                        }
+                        None => break,
+                    }
+                }
+                prop_assert_eq!(rebuilt, content);
+            }
+
+            #[test]
+            fn paging_rejects_mid_char_offsets_and_never_panics(
+                content in ".{0,60}",
+                max_chars in 1usize..20,
+                offset in 0usize..300,
+            ) {
+                let full = fulltext(content.clone());
+                match paginate_fulltext(&full, max_chars, offset) {
+                    Ok(page) => {
+                        prop_assert!(offset >= content.len() || content.is_char_boundary(offset));
+                        if offset >= content.len() {
+                            prop_assert!(page.fulltext.content.is_empty());
+                        }
+                    }
+                    Err(_) => prop_assert!(!content.is_char_boundary(offset)),
+                }
+            }
+
+            #[test]
+            fn bound_json_strings_respects_budgets(
+                value in arb_json(),
+                budget in 0usize..120,
+                node_budget in 0usize..80,
+            ) {
+                let mut value = value;
+                let mut remaining = budget;
+                let mut nodes = node_budget;
+                let mut omitted = Vec::new();
+                bound_json_strings(&mut value, &mut remaining, &mut nodes, "", &mut omitted);
+                prop_assert!(json_string_chars(&value) <= budget);
+                prop_assert!(omitted.len() <= 16);
+                prop_assert!(remaining <= budget);
+            }
+        }
     }
 }

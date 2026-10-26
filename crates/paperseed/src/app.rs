@@ -105,12 +105,12 @@ pub fn status(paths: &CorpusPaths) -> Result<CorpusDb> {
 pub fn status_summary(paths: &CorpusPaths) -> Result<CorpusStatus> {
     let db = CorpusDb::load(&paths.db_path)?;
     let papers = db.papers.len();
-    let index_docs = indexing::persisted_doc_count(&paths.index_path);
+    let index_status = indexing::persisted_index_status(&db, &paths.index_path);
     Ok(CorpusStatus {
         root: paths.root.clone(),
         papers,
-        index_docs,
-        index_in_sync: index_docs == Some(papers),
+        index_docs: index_status.map(|(docs, _)| docs),
+        index_in_sync: index_status.is_some_and(|(_, in_sync)| in_sync),
     })
 }
 
@@ -198,7 +198,7 @@ fn prepare_local_file(
         None
     };
     let extension = source.extension().and_then(|extension| extension.to_str());
-    let destination = content_addressed_path(&paths.files_dir, &staged.hash, extension);
+    let destination = content_addressed_path(&paths.files_dir, &staged.hash, extension)?;
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -246,7 +246,13 @@ fn externalize_full_text(paths: &CorpusPaths, db: &mut CorpusDb) -> Result<()> {
         let Some(text) = entry.full_text.take() else {
             continue;
         };
-        let path = content_addressed_path(&paths.text_dir, &entry.paper.file.hash, Some("txt"));
+        // A legacy or hand-edited entry with a non-hex hash keeps its text
+        // inline rather than being written outside the text directory.
+        let Ok(path) = content_addressed_path(&paths.text_dir, &entry.paper.file.hash, Some("txt"))
+        else {
+            entry.full_text = Some(text);
+            continue;
+        };
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -674,7 +680,10 @@ fn normalize_pdf_text(text: &str) -> Option<String> {
         }
     }
 
-    (!normalized.trim().is_empty()).then_some(normalized)
+    // A trailing blank line leaves one '\n' behind; drop it so the output is
+    // a fixed point of this function.
+    normalized.truncate(normalized.trim_end_matches('\n').len());
+    (!normalized.is_empty()).then_some(normalized)
 }
 
 pub fn export_bibtex(db: &CorpusDb) -> String {
@@ -682,11 +691,12 @@ pub fn export_bibtex(db: &CorpusDb) -> String {
         .iter()
         .map(|entry| {
             let metadata = &entry.paper.metadata;
-            let key = metadata
-                .doi
-                .as_deref()
+            let key = [metadata.doi.as_deref(), Some(metadata.id.as_str())]
+                .into_iter()
+                .flatten()
                 .map(sanitize_bibtex_key)
-                .unwrap_or_else(|| metadata.id.clone());
+                .find(|key| !key.is_empty())
+                .unwrap_or_else(|| "paper".to_string());
             let mut fields = vec![format!("  title = {{{}}}", escape_bibtex(&metadata.title))];
             if !metadata.authors.is_empty() {
                 fields.push(format!(
@@ -716,8 +726,19 @@ fn sanitize_bibtex_key(input: &str) -> String {
         .collect::<String>()
 }
 
+/// Escape a value for a brace-delimited BibTeX field. Backslashes become
+/// `\textbackslash{}` so a trailing `\` cannot escape the closing brace.
 fn escape_bibtex(input: &str) -> String {
-    input.replace('{', "\\{").replace('}', "\\}")
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '\\' => out.push_str("\\textbackslash{}"),
+            '{' => out.push_str("\\{"),
+            '}' => out.push_str("\\}"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -741,5 +762,139 @@ mod tests {
             normalized,
             "Abstract\nA useful paper.\n\nIntroduction\nText."
         );
+    }
+
+    #[test]
+    fn normalization_drops_trailing_blank_line() {
+        assert_eq!(normalize_pdf_text("a\n\n").as_deref(), Some("a"));
+        assert_eq!(normalize_pdf_text(" \n\t\n"), None);
+    }
+
+    #[test]
+    fn bibtex_escapes_trailing_backslash_and_braces() {
+        assert_eq!(escape_bibtex(r"C:\"), r"C:\textbackslash{}");
+        assert_eq!(escape_bibtex("{x}"), r"\{x\}");
+    }
+
+    fn bibtex_entry(id: &str, title: &str, doi: Option<&str>, venue: Option<&str>) -> IndexedPaper {
+        use crate::models::{License, LocalPaper, PaperMetadata, StoredFile};
+        IndexedPaper {
+            paper: LocalPaper {
+                metadata: PaperMetadata {
+                    id: id.to_string(),
+                    title: title.to_string(),
+                    authors: vec![title.to_string()],
+                    year: Some(2024),
+                    doi: doi.map(str::to_string),
+                    arxiv_id: None,
+                    isbn: None,
+                    work_type: None,
+                    license: License::UserOwnedPrivate,
+                    venue: venue.map(str::to_string),
+                    abstract_note: None,
+                    source_url: None,
+                },
+                file: StoredFile {
+                    path: std::path::PathBuf::from("/tmp/x.pdf"),
+                    hash: "ab".to_string(),
+                    size_bytes: 0,
+                    mime: "application/pdf".to_string(),
+                },
+            },
+            full_text: None,
+            full_text_path: None,
+            yams_hash: None,
+        }
+    }
+
+    /// Brace depth of BibTeX text, treating `\x` as an escaped character.
+    /// Returns `None` if depth ever goes negative.
+    fn brace_depth(text: &str) -> Option<i64> {
+        let mut depth = 0_i64;
+        let mut chars = text.chars();
+        while let Some(ch) = chars.next() {
+            match ch {
+                '\\' => {
+                    chars.next();
+                }
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth < 0 {
+                        return None;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Some(depth)
+    }
+
+    #[test]
+    fn bibtex_key_falls_back_when_doi_has_no_alphanumerics() {
+        let db = CorpusDb {
+            papers: vec![bibtex_entry("", "T", Some("//"), None)],
+        };
+        assert!(export_bibtex(&db).starts_with("@article{paper,\n"));
+    }
+
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn reference_has_pdf_header(bytes: &[u8]) -> bool {
+            (0..bytes.len().min(1024)).any(|i| bytes[i..].starts_with(b"%PDF-"))
+        }
+
+        proptest! {
+            #[test]
+            fn bibtex_braces_balance(
+                id in "\\PC{0,12}",
+                title in "\\PC{0,40}",
+                doi in proptest::option::of("\\PC{0,20}"),
+                venue in proptest::option::of("[{}\\\\a-z ]{0,20}"),
+            ) {
+                let db = CorpusDb { papers: vec![bibtex_entry(&id, &title, doi.as_deref(), venue.as_deref())] };
+                let out = export_bibtex(&db);
+                prop_assert_eq!(brace_depth(&out), Some(0), "{}", out);
+                let key = out.strip_prefix("@article{").unwrap().split(',').next().unwrap();
+                prop_assert!(!key.is_empty());
+                prop_assert!(key.chars().all(|c| c.is_ascii_alphanumeric()));
+            }
+
+            #[test]
+            fn pdf_text_normalization_invariants(text in "[ \\t\\r\\n\\u{0}\\u{7}\\u{a0}\\u{ad}a-zA-Z.\\u{e9}]{0,80}") {
+                if let Some(out) = normalize_pdf_text(&text) {
+                    prop_assert_eq!(normalize_pdf_text(&out), Some(out.clone()));
+                    prop_assert!(!out.contains('\r'));
+                    prop_assert!(!out.contains("\n\n\n"));
+                    prop_assert!(out.chars().all(|c| c == '\n' || !c.is_control()));
+                    prop_assert!(!out.starts_with('\n') && !out.ends_with('\n'));
+                    for line in out.lines() {
+                        prop_assert_eq!(line, line.trim());
+                    }
+                } else {
+                    let only_blank = text
+                        .chars()
+                        .all(|c| c.is_whitespace() || c.is_control() || c == '\u{ad}');
+                    prop_assert!(only_blank);
+                }
+            }
+
+            #[test]
+            fn pdf_header_detected_iff_within_first_kib(
+                prefix_len in 0_usize..1100,
+                header in prop::bool::ANY,
+                filler in any::<u8>(),
+            ) {
+                let filler = if filler == b'%' { b' ' } else { filler };
+                let mut bytes = vec![filler; prefix_len];
+                if header {
+                    bytes.extend_from_slice(b"%PDF-1.7");
+                }
+                prop_assert_eq!(has_pdf_header(&bytes), reference_has_pdf_header(&bytes));
+                prop_assert_eq!(has_pdf_header(&bytes), header && prefix_len < 1024);
+            }
+        }
     }
 }

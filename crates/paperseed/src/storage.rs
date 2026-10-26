@@ -26,17 +26,28 @@ pub fn hash_file(path: impl AsRef<Path>) -> Result<String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
+/// `root/<hash[..2]>/<hash>[.ext]`. The hash must be hex so a value read back
+/// from `corpus.json` can never escape `root`; an extension that is not plain
+/// ASCII alphanumerics is dropped.
 pub fn content_addressed_path(
     root: impl AsRef<Path>,
     hash: &str,
     extension: Option<&str>,
-) -> PathBuf {
-    let prefix = &hash[..2.min(hash.len())];
-    let suffix = match extension {
-        Some(ext) if !ext.is_empty() => format!("{hash}.{}", ext.trim_start_matches('.')),
-        _ => hash.to_string(),
+) -> Result<PathBuf> {
+    if hash.len() < 2 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(PaperseedError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid content hash {hash:?}: expected at least two hex digits"),
+        )));
+    }
+    let extension = extension
+        .map(|ext| ext.trim_start_matches('.'))
+        .filter(|ext| !ext.is_empty() && ext.bytes().all(|byte| byte.is_ascii_alphanumeric()));
+    let file_name = match extension {
+        Some(ext) => format!("{hash}.{ext}"),
+        None => hash.to_string(),
     };
-    root.as_ref().join(prefix).join(suffix)
+    Ok(root.as_ref().join(&hash[..2]).join(file_name))
 }
 
 pub fn describe_file(path: impl AsRef<Path>, mime: impl Into<String>) -> Result<StoredFile> {
@@ -92,7 +103,7 @@ pub fn copy_and_describe_file(
 
     let hash = hasher.finalize().to_hex().to_string();
     let extension = source.extension().and_then(|extension| extension.to_str());
-    let destination = content_addressed_path(root, &hash, extension);
+    let destination = content_addressed_path(root, &hash, extension)?;
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)?;
     }

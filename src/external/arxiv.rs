@@ -250,13 +250,7 @@ fn apply_link(entry: &mut EntryBuilder, link: (Option<String>, Option<String>, O
 /// - Otherwise → `all:…` (legacy bag-of-words)
 pub(crate) fn build_arxiv_search_query(raw: &str) -> String {
     let trimmed = raw.trim();
-    if looks_like_arxiv_id(trimmed) {
-        let id = trimmed
-            .trim_start_matches("https://arxiv.org/abs/")
-            .trim_start_matches("http://arxiv.org/abs/")
-            .trim_start_matches("arxiv:")
-            .trim_start_matches("arXiv:");
-        let id = strip_version_suffix(id);
+    if let Some(id) = crate::hit_enrich::normalize_arxiv_str(trimmed) {
         return format!("id:{id}");
     }
     // Quoted phrase from user
@@ -297,32 +291,6 @@ fn looks_like_title_phrase(raw: &str) -> bool {
                 "a" | "an" | "and" | "are" | "for" | "is" | "of" | "the" | "to" | "with"
             )
         })
-}
-
-fn looks_like_arxiv_id(raw: &str) -> bool {
-    let s = raw
-        .trim()
-        .trim_start_matches("https://arxiv.org/abs/")
-        .trim_start_matches("http://arxiv.org/abs/")
-        .trim_start_matches("arxiv:")
-        .trim_start_matches("arXiv:");
-    let s = strip_version_suffix(s);
-    // new-style: 1706.03762 or old-style: hep-th/9901001
-    let new = s.len() >= 9
-        && s.chars().filter(|c| *c == '.').count() == 1
-        && s.chars().all(|c| c.is_ascii_digit() || c == '.');
-    let old = s.contains('/') && s.chars().any(|c| c.is_ascii_digit());
-    new || old
-}
-
-fn strip_version_suffix(id: &str) -> &str {
-    if let Some(idx) = id.rfind('v') {
-        let (base, ver) = id.split_at(idx);
-        if ver.len() > 1 && ver[1..].chars().all(|c| c.is_ascii_digit()) {
-            return base;
-        }
-    }
-    id
 }
 
 impl EntryBuilder {
@@ -563,5 +531,24 @@ mod tests {
             build_arxiv_search_query("attention is all you need"),
             "ti:\"attention is all you need\" OR all:\"attention is all you need\""
         );
+    }
+    #[test]
+    fn id_queries_use_canonical_arxiv_id() {
+        assert_eq!(build_arxiv_search_query("1706.03762v7"), "id:1706.03762");
+        assert_eq!(
+            build_arxiv_search_query("https://arxiv.org/pdf/1706.03762v2.pdf"),
+            "id:1706.03762"
+        );
+        assert_eq!(
+            build_arxiv_search_query("arXiv:hep-th/9901001"),
+            "id:hep-th/9901001"
+        );
+    }
+
+    #[test]
+    fn slash_and_digit_text_is_not_an_arxiv_id() {
+        // The old check treated anything with '/' and a digit as an old-style id.
+        assert!(!build_arxiv_search_query("Rust/C++ 2024").starts_with("id:"));
+        assert!(!build_arxiv_search_query("TCP/IP 4").starts_with("id:"));
     }
 }

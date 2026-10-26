@@ -4,8 +4,6 @@ use crate::models::{
     AccessInfo, ContentState, MatchInfo, MatchKind, PaperHit, PaperIds, PaperSource, SearchDetail,
     WorkType,
 };
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 /// Mint a stable `hit_id` and fill ids/access/next (match filled separately).
 pub fn enrich_hit_identity(hit: &mut PaperHit) {
@@ -221,11 +219,7 @@ fn classify_match(prep: &PreparedQuery, hit: &PaperHit) -> MatchKind {
         return MatchKind::ExactId;
     }
     if let Some(ref arxiv) = prep.arxiv {
-        let hit_a = hit
-            .arxiv_id
-            .as_deref()
-            .map(strip_arxiv_version)
-            .map(|s| s.to_ascii_lowercase());
+        let hit_a = hit.arxiv_id.as_deref().and_then(normalize_arxiv_str);
         if hit_a.as_deref() == Some(arxiv.as_str()) {
             return MatchKind::ExactId;
         }
@@ -277,36 +271,61 @@ fn normalize(raw: &str) -> String {
         .join(" ")
 }
 
-fn normalize_doi_str(raw: &str) -> Option<String> {
+/// Lowercase `raw` and strip DOI wrappers: `doi:`, and `http(s)://`,
+/// `www.`/`dx.` + `doi.org/` resolver prefixes. Does not validate.
+pub(crate) fn strip_doi_prefix(raw: &str) -> String {
     let lowered = raw.trim().to_lowercase();
-    let n = lowered
-        .strip_prefix("https://doi.org/")
-        .or_else(|| lowered.strip_prefix("http://doi.org/"))
+    let rest = strip_scheme(&lowered);
+    let rest = rest
+        .strip_prefix("www.")
+        .or_else(|| rest.strip_prefix("dx."))
+        .unwrap_or(rest);
+    let stripped = rest
+        .strip_prefix("doi.org/")
         .or_else(|| lowered.strip_prefix("doi:"))
-        .unwrap_or(lowered.as_str())
-        .trim();
+        .unwrap_or(lowered.as_str());
+    stripped.trim().to_string()
+}
+
+/// Canonical DOI: lowercase `10.<digits>/<suffix>` with wrappers removed and
+/// no whitespace. `None` when the input is not a DOI.
+pub(crate) fn normalize_doi_str(raw: &str) -> Option<String> {
+    let n = strip_doi_prefix(raw);
     let (prefix, suffix) = n.strip_prefix("10.")?.split_once('/')?;
     (!prefix.is_empty()
         && prefix.bytes().all(|b| b.is_ascii_digit())
         && !suffix.is_empty()
         && !n.chars().any(char::is_whitespace))
-    .then(|| n.to_string())
+    .then_some(n)
 }
 
-pub(crate) fn normalize_arxiv_str(raw: &str) -> Option<String> {
+/// Lowercase `raw` and strip arXiv wrappers: `arxiv:`, and
+/// `http(s)://(www.|export.)arxiv.org/(abs|pdf)/` plus a trailing `.pdf`.
+/// Keeps any version suffix. Does not validate.
+pub(crate) fn strip_arxiv_prefix(raw: &str) -> String {
     let lowered = raw.trim().to_lowercase();
-    let id = lowered
-        .strip_prefix("https://arxiv.org/abs/")
-        .or_else(|| lowered.strip_prefix("http://arxiv.org/abs/"))
-        .or_else(|| lowered.strip_prefix("https://arxiv.org/pdf/"))
-        .or_else(|| lowered.strip_prefix("http://arxiv.org/pdf/"))
+    let rest = strip_scheme(&lowered);
+    let rest = rest
+        .strip_prefix("www.")
+        .or_else(|| rest.strip_prefix("export."))
+        .unwrap_or(rest);
+    let id = rest
+        .strip_prefix("arxiv.org/abs/")
+        .or_else(|| rest.strip_prefix("arxiv.org/pdf/"))
         .or_else(|| lowered.strip_prefix("arxiv:"))
         .unwrap_or(lowered.as_str())
         .trim();
+    id.strip_suffix(".pdf").unwrap_or(id).to_string()
+}
+
+/// Canonical version-less arXiv id (`2401.12345` or `hep-th/9901001`).
+/// `None` when the input is not an arXiv id.
+pub(crate) fn normalize_arxiv_str(raw: &str) -> Option<String> {
+    let id = strip_arxiv_prefix(raw);
     if id.is_empty() {
         return None;
     }
-    let base = strip_arxiv_version(id.trim_end_matches(".pdf"));
+    let base = strip_arxiv_version(&id);
     let modern = base.split_once('.').is_some_and(|(date, number)| {
         date.len() == 4
             && (4..=5).contains(&number.len())
@@ -323,23 +342,34 @@ pub(crate) fn normalize_arxiv_str(raw: &str) -> Option<String> {
             && number.len() == 7
             && number.bytes().all(|b| b.is_ascii_digit())
     });
-    (modern || legacy).then_some(base)
+    (modern || legacy).then(|| base.to_string())
 }
 
-fn strip_arxiv_version(id: &str) -> String {
-    if let Some(idx) = id.rfind('v') {
-        let (base, ver) = id.split_at(idx);
-        if ver.len() > 1 && ver[1..].chars().all(|c| c.is_ascii_digit()) {
-            return base.to_string();
-        }
-    }
-    id.to_string()
+/// Strip a trailing arXiv version (`v<digits>`), if present.
+pub(crate) fn strip_arxiv_version(id: &str) -> &str {
+    id.rfind('v')
+        .and_then(|idx| {
+            let ver = &id[idx + 1..];
+            (!ver.is_empty() && ver.bytes().all(|b| b.is_ascii_digit())).then_some(&id[..idx])
+        })
+        .unwrap_or(id)
 }
 
+fn strip_scheme(s: &str) -> &str {
+    s.strip_prefix("https://")
+        .or_else(|| s.strip_prefix("http://"))
+        .unwrap_or(s)
+}
+
+/// 64-bit FNV-1a, truncated to 48 bits of hex. Fixed across Rust releases,
+/// unlike `DefaultHasher`, so `title:` hit_ids stay stable.
 fn short_hash(s: &str) -> String {
-    let mut hasher = DefaultHasher::new();
-    s.hash(&mut hasher);
-    format!("{:012x}", hasher.finish())
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0100_0000_01b3;
+    let hash = s
+        .bytes()
+        .fold(OFFSET, |h, b| (h ^ u64::from(b)).wrapping_mul(PRIME));
+    format!("{:012x}", hash & 0xffff_ffff_ffff)
 }
 
 #[cfg(test)]
@@ -643,5 +673,174 @@ mod tests {
         assert_eq!(hit.hit_id.as_deref(), Some("isbn:9781491903070"));
         assert!(hit.access.as_ref().unwrap().pdf);
         assert!(hit.next.contains(&"open_paper".to_string()));
+    }
+    #[test]
+    fn doi_wrappers_normalize_to_bare_doi() {
+        for raw in [
+            "10.1234/ABC",
+            "doi:10.1234/abc",
+            "DOI:10.1234/abc",
+            "https://doi.org/10.1234/abc",
+            "http://dx.doi.org/10.1234/abc",
+            "https://dx.doi.org/10.1234/ABC",
+            "https://www.doi.org/10.1234/abc",
+            "doi.org/10.1234/abc",
+            "  10.1234/abc  ",
+        ] {
+            assert_eq!(
+                normalize_doi_str(raw).as_deref(),
+                Some("10.1234/abc"),
+                "{raw}"
+            );
+        }
+        assert_eq!(normalize_doi_str("https://example.com/10.1234/abc"), None);
+        assert_eq!(normalize_doi_str("10.foo/bar"), None);
+        assert_eq!(normalize_doi_str("10.1234/a b"), None);
+    }
+
+    #[test]
+    fn arxiv_wrappers_normalize_to_versionless_id() {
+        for raw in [
+            "2401.12345",
+            "2401.12345v3",
+            "arXiv:2401.12345",
+            "ARXIV:2401.12345v1",
+            "https://arxiv.org/abs/2401.12345v2",
+            "http://export.arxiv.org/abs/2401.12345",
+            "https://www.arxiv.org/pdf/2401.12345v2.pdf",
+            "arxiv.org/abs/2401.12345",
+        ] {
+            assert_eq!(
+                normalize_arxiv_str(raw).as_deref(),
+                Some("2401.12345"),
+                "{raw}"
+            );
+        }
+        assert_eq!(
+            normalize_arxiv_str("arXiv:hep-th/9901001v2").as_deref(),
+            Some("hep-th/9901001")
+        );
+        assert_eq!(normalize_arxiv_str("Rust/C++ 2024"), None);
+    }
+
+    #[test]
+    fn short_hash_is_fixed_fnv1a() {
+        // Pinned so title: hit_ids cannot drift across Rust releases.
+        assert_eq!(short_hash(""), "9ce484222325");
+        assert_eq!(short_hash("a"), short_hash("a"));
+        assert_ne!(short_hash("a"), short_hash("b"));
+    }
+
+    mod props {
+        use super::super::*;
+        use proptest::prelude::*;
+
+        fn doi_core() -> impl Strategy<Value = String> {
+            ("[0-9]{4,5}", "[a-z0-9][a-z0-9._;()/:-]{0,20}")
+                .prop_map(|(prefix, suffix)| format!("10.{prefix}/{suffix}"))
+        }
+
+        fn doi_wrapper() -> impl Strategy<Value = &'static str> {
+            prop::sample::select(vec![
+                "",
+                "doi:",
+                "DOI:",
+                "https://doi.org/",
+                "http://doi.org/",
+                "https://dx.doi.org/",
+                "http://dx.doi.org/",
+                "doi.org/",
+            ])
+        }
+
+        fn arxiv_core() -> impl Strategy<Value = String> {
+            prop_oneof![
+                ("[0-9]{4}", "[0-9]{4,5}").prop_map(|(d, n)| format!("{d}.{n}")),
+                (
+                    prop::sample::select(vec!["hep-th", "math.gt", "cs", "astro-ph"]),
+                    "[0-9]{7}"
+                )
+                    .prop_map(|(a, n)| format!("{a}/{n}")),
+            ]
+        }
+
+        fn arxiv_wrapper() -> impl Strategy<Value = (&'static str, &'static str)> {
+            prop::sample::select(vec![
+                ("", ""),
+                ("arXiv:", ""),
+                ("arxiv:", ""),
+                ("https://arxiv.org/abs/", ""),
+                ("http://arxiv.org/abs/", ""),
+                ("https://arxiv.org/pdf/", ".pdf"),
+                ("https://export.arxiv.org/abs/", ""),
+            ])
+        }
+
+        fn random_case(s: &str, mask: u64) -> String {
+            s.chars()
+                .enumerate()
+                .map(|(i, c)| {
+                    if (mask >> (i % 64)) & 1 == 1 {
+                        c.to_ascii_uppercase()
+                    } else {
+                        c
+                    }
+                })
+                .collect()
+        }
+
+        proptest! {
+            #[test]
+            fn doi_wrapped_forms_agree(
+                core in doi_core(),
+                wrap in doi_wrapper(),
+                mask: u64,
+                pad in " {0,2}",
+            ) {
+                let raw = format!("{pad}{wrap}{}{pad}", random_case(&core, mask));
+                prop_assert_eq!(normalize_doi_str(&raw), Some(core.to_lowercase()));
+            }
+
+            #[test]
+            fn doi_normalization_is_idempotent_and_implies_looks_like(raw in ".{0,40}") {
+                if let Some(n) = normalize_doi_str(&raw) {
+                    prop_assert_eq!(normalize_doi_str(&n), Some(n.clone()));
+                    prop_assert!(crate::validation::looks_like_doi(&raw));
+                    prop_assert!(crate::validation::looks_like_doi(&n));
+                }
+            }
+
+            #[test]
+            fn arxiv_wrapped_forms_agree(
+                core in arxiv_core(),
+                (prefix, suffix) in arxiv_wrapper(),
+                version in proptest::option::of(1u8..20),
+                mask: u64,
+            ) {
+                let version = version.map(|v| format!("v{v}")).unwrap_or_default();
+                let raw = format!("{prefix}{}{version}{suffix}", random_case(&core, mask));
+                prop_assert_eq!(normalize_arxiv_str(&raw), Some(core.clone()));
+            }
+
+            #[test]
+            fn arxiv_normalization_is_idempotent(raw in ".{0,30}") {
+                if let Some(n) = normalize_arxiv_str(&raw) {
+                    prop_assert_eq!(normalize_arxiv_str(&n), Some(n.clone()));
+                    prop_assert_eq!(strip_arxiv_version(&n), n.as_str());
+                }
+            }
+
+            #[test]
+            fn strip_arxiv_version_returns_a_prefix(raw in ".{0,20}") {
+                prop_assert!(raw.starts_with(strip_arxiv_version(&raw)));
+            }
+
+            #[test]
+            fn short_hash_is_twelve_hex_chars(raw in ".{0,40}") {
+                let h = short_hash(&raw);
+                prop_assert_eq!(h.len(), 12);
+                prop_assert!(h.bytes().all(|b| b.is_ascii_hexdigit()));
+            }
+        }
     }
 }
