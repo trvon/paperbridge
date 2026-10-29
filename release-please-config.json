@@ -6,7 +6,8 @@
       "bump-patch-for-minor-pre-major": true,
       "extra-files": [
         "Formula/paperbridge.rb"
-      ]
+      ],
+      "include-component-in-tag": false
     }
   }
 }
