@@ -142,8 +142,13 @@ jobs:
 
       - name: Set version
         run: |
-          VERSION="${{ needs.release-please.outputs.tag_name }}"
-          VERSION="${VERSION#v}"
+          TAG="${{ needs.release-please.outputs.tag_name }}"
+          # Accept both "v1.2.3" and "<component>-v1.2.3" tags.
+          VERSION="${TAG##*v}"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+].*)?$ ]]; then
+            echo "Cannot derive npm version from tag '$TAG' (got '$VERSION')" >&2
+            exit 1
+          fi
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - name: Download platform artifacts
