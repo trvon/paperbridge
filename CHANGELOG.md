@@ -47,6 +47,14 @@
 
 * Bump `quick-xml` to 0.41 (RUSTSEC-2026-0194 / 0195)
 
+## [2.2.1](https://github.com/trvon/paperbridge/compare/v2.2.0...v2.2.1) (2026-10-30)
+
+
+### Bug Fixes
+
+* **release:** restore vX.Y.Z tags so npm publish gets a valid version ([31aaf2c](https://github.com/trvon/paperbridge/commit/31aaf2c75b38cc23ad0db296a0124e2bcb50d8d1))
+* **release:** restore vX.Y.Z tags so npm publish works ([4707f87](https://github.com/trvon/paperbridge/commit/4707f876ad9dbec905aac3c43647f44c17258d6e))
+
 ## [2.2.0](https://github.com/trvon/paperbridge/compare/paperbridge-v2.1.0...paperbridge-v2.2.0) (2026-10-26)
 
 
