@@ -524,6 +524,14 @@ pub struct AccessInfo {
     pub pdf: bool,
     pub cached: bool,
     pub full_text: bool,
+    /// True when a source supplied an abstract. Compact hits omit the text;
+    /// request `detail=full` to receive it.
+    #[serde(
+        rename = "abstract",
+        default,
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub has_abstract: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_state: Option<ContentState>,
 }

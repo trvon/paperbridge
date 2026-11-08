@@ -78,6 +78,13 @@ pub fn enrich_hit_identity(hit: &mut PaperHit) {
         || hit.cache.as_ref().is_some_and(|c| c.cached);
     let full_text = existing_access.as_ref().is_some_and(|a| a.full_text)
         || hit.cache.as_ref().is_some_and(|c| c.has_full_text);
+    // Research hits carry a search snippet in `abstract_note`, not an abstract.
+    let has_abstract = existing_access.as_ref().is_some_and(|a| a.has_abstract)
+        || (hit.source != PaperSource::Research
+            && hit
+                .abstract_note
+                .as_deref()
+                .is_some_and(|text| !text.trim().is_empty()));
     let content_state = existing_access
         .and_then(|access| access.content_state)
         .or_else(|| {
@@ -91,6 +98,7 @@ pub fn enrich_hit_identity(hit: &mut PaperHit) {
         pdf,
         cached,
         full_text,
+        has_abstract,
         content_state,
     });
 
@@ -421,6 +429,7 @@ mod tests {
             pdf: false,
             cached: true,
             full_text: true,
+            has_abstract: false,
             content_state: Some(ContentState::Ready),
         });
 
@@ -842,5 +851,53 @@ mod tests {
                 prop_assert!(h.bytes().all(|b| b.is_ascii_hexdigit()));
             }
         }
+    }
+
+    #[test]
+    fn compact_hit_flags_abstract_it_omits() {
+        let mut hit = PaperHit::new(
+            PaperSource::OpenAlex,
+            "Paper".into(),
+            vec![],
+            None,
+            Some("10.1/x".into()),
+            None,
+            None,
+            Some("An abstract.".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        enrich_hit_identity(&mut hit);
+        apply_detail(&mut hit, SearchDetail::Compact, None);
+        assert!(hit.abstract_note.is_none());
+        assert!(hit.access.as_ref().is_some_and(|a| a.has_abstract));
+        let json = serde_json::to_value(&hit).unwrap();
+        assert_eq!(json["access"]["abstract"], true);
+    }
+
+    #[test]
+    fn research_snippet_is_not_flagged_as_abstract() {
+        let mut hit = PaperHit::new(
+            PaperSource::Research,
+            "Notes".into(),
+            vec![],
+            None,
+            None,
+            None,
+            None,
+            Some("matched snippet".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        enrich_hit_identity(&mut hit);
+        assert!(hit.access.as_ref().is_some_and(|a| !a.has_abstract));
+        let json = serde_json::to_value(&hit).unwrap();
+        assert!(json["access"].get("abstract").is_none());
     }
 }

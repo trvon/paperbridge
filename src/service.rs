@@ -27,6 +27,9 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::debug;
 
+/// Bound on the best-effort abstract lookup when opening a paper.
+const OPEN_ABSTRACT_TIMEOUT_MS: u64 = 8_000;
+
 pub const DEFAULT_CHUNK_SIZE: usize = 1200;
 pub const DEFAULT_PIPELINE_SEARCH_LIMIT: u32 = 5;
 
@@ -293,6 +296,20 @@ impl PaperbridgeService {
                 .in_scope(|| self.annotate_cached_hits(&mut hits));
         }
         rank_search_hits(&original_query, &mut hits);
+        if detail == crate::models::SearchDetail::Full && cache_mode != SearchCacheMode::Only {
+            // Only the returned page pays for lookups; the cap bounds latency.
+            let start = (opts.offset as usize).min(hits.len());
+            let end = (start + opts.page_limit() as usize).min(hits.len());
+            let failed = self
+                .paper_search
+                .backfill_abstracts(
+                    &mut hits[start..end],
+                    crate::external::ABSTRACT_BACKFILL_LIMIT,
+                    std::time::Duration::from_millis(opts.timeout_ms),
+                )
+                .await;
+            diagnostics.sources_failed.extend(failed);
+        }
         for diagnostic in diagnostics
             .sources_failed
             .iter_mut()
@@ -812,24 +829,37 @@ impl PaperbridgeService {
     }
 
     async fn open_paper_metadata(&self, resolved: &OpenResolved) -> crate::models::PaperMetadata {
-        if let Some(doi) = resolved.doi.as_deref()
-            && let Ok(work) = self.resolve_doi(doi).await
-        {
-            return crate::models::PaperMetadata {
-                title: work.title,
-                authors: work.authors,
-                abstract_note: work.abstract_note,
-                doi: Some(work.doi),
-                year: work.year,
-            };
-        }
-        crate::models::PaperMetadata {
+        let mut metadata = crate::models::PaperMetadata {
             title: None,
             authors: Vec::new(),
             abstract_note: None,
             doi: resolved.doi.clone(),
             year: None,
+        };
+        if let Some(doi) = resolved.doi.as_deref()
+            && let Ok(work) = self.resolve_doi(doi).await
+        {
+            metadata = crate::models::PaperMetadata {
+                title: work.title,
+                authors: work.authors,
+                abstract_note: work.abstract_note.filter(|text| !text.trim().is_empty()),
+                doi: Some(work.doi),
+                year: work.year,
+            };
         }
+        if metadata.abstract_note.is_none() {
+            // Crossref was already tried above whenever a DOI is present.
+            metadata.abstract_note = self
+                .paper_search
+                .abstract_for(
+                    resolved.doi.as_deref(),
+                    resolved.arxiv_id.as_deref(),
+                    true,
+                    std::time::Duration::from_millis(OPEN_ABSTRACT_TIMEOUT_MS),
+                )
+                .await;
+        }
+        metadata
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -2851,6 +2881,7 @@ fn research_paper_to_hit(hit: crate::paperseed_api::ResearchPaperHit) -> PaperHi
         pdf: is_pdf,
         cached: true,
         full_text: hit.content_available,
+        has_abstract: false,
         content_state: Some(if hit.content_available {
             ContentState::Ready
         } else {

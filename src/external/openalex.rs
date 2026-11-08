@@ -56,6 +56,41 @@ impl OpenAlexClient {
             .await
     }
 
+    /// Fetch the abstract for one DOI. `Ok(None)` when OpenAlex has no record
+    /// or the record carries no abstract.
+    pub async fn abstract_by_doi(&self, doi: &str) -> Result<Option<String>> {
+        let doi = doi.trim();
+        if doi.is_empty() {
+            return Ok(None);
+        }
+        let encoded = urlencoding::encode(doi).replace("%2F", "/");
+        let mut url = format!(
+            "{}/works/doi:{encoded}?select=abstract_inverted_index",
+            self.base_url
+        );
+        if let Some(email) = self.mailto.as_deref() {
+            url.push_str(&format!("&mailto={}", urlencoding::encode(email)));
+        }
+
+        let response = send_with_retry("openalex", self.client.get(&url)).await?;
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            return Err(ZoteroMcpError::Api {
+                status: status.as_u16(),
+                message: format!("OpenAlex API error at {url}"),
+            });
+        }
+
+        let raw: RawOpenAlexAbstract = response.json().await?;
+        Ok(raw
+            .abstract_inverted_index
+            .map(reconstruct_abstract)
+            .filter(|text| !text.trim().is_empty()))
+    }
+
     async fn fetch_works(&self, params: &str) -> Result<Vec<PaperHit>> {
         let mut url = format!("{}/works?{params}", self.base_url);
         if let Some(email) = self.mailto.as_deref() {
@@ -106,6 +141,11 @@ impl std::fmt::Debug for OpenAlexClient {
 struct RawOpenAlexResponse {
     #[serde(default)]
     results: Vec<RawOpenAlexWork>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawOpenAlexAbstract {
+    abstract_inverted_index: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -443,5 +483,18 @@ mod tests {
         let hits = client.search(title, 5).await.unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].title, title);
+    }
+
+    #[tokio::test]
+    async fn abstract_by_doi_missing_record_is_none() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let client = OpenAlexClient::new(Some(&server.uri()), None);
+        assert_eq!(client.abstract_by_doi("10.1/missing").await.unwrap(), None);
     }
 }

@@ -44,6 +44,8 @@ const DEFAULT_TIMEOUT_MS: u64 = 8000;
 pub const DEFAULT_PAGE_LIMIT: u32 = 10;
 pub const MAX_PAGE_LIMIT: u32 = 50;
 pub const MAX_SOURCE_FETCH_LIMIT: u32 = 200;
+/// Most abstract lookups one `detail=full` search page may trigger.
+pub const ABSTRACT_BACKFILL_LIMIT: usize = 5;
 
 #[derive(Debug, Clone)]
 pub struct SearchOptions {
@@ -56,7 +58,7 @@ pub struct SearchOptions {
     pub limit: u32,
     pub cache_mode: SearchCacheMode,
     pub detail: SearchDetail,
-    /// When set, truncate abstracts to this many chars (full detail). None = default 280 in compact.
+    /// Abstract cap for full detail (None = 280, 0 = unlimited). Compact never returns abstracts.
     pub abstract_max_chars: Option<usize>,
 }
 
@@ -443,6 +445,120 @@ impl PaperSearch {
         })
     }
 
+    /// Fill missing abstracts on `hits` by DOI (Crossref, then OpenAlex) or by
+    /// arXiv id, for at most `max_lookups` hits. Lookups run concurrently and
+    /// never fail the caller. Failures come back as diagnostics, one per source.
+    pub async fn backfill_abstracts(
+        &self,
+        hits: &mut [PaperHit],
+        max_lookups: usize,
+        per_lookup: Duration,
+    ) -> Vec<SourceDiagnostic> {
+        let targets: Vec<usize> = hits
+            .iter()
+            .enumerate()
+            .filter(|(_, hit)| needs_abstract(hit))
+            .map(|(index, _)| index)
+            .take(max_lookups)
+            .collect();
+        if targets.is_empty() {
+            return Vec::new();
+        }
+
+        let lookups = targets.iter().map(|&index| {
+            let hit = &hits[index];
+            let doi = hit.doi.clone();
+            let arxiv = hit.arxiv_id.clone();
+            let skip_crossref = hit.source == PaperSource::Crossref;
+            async move {
+                let found = timeout(
+                    per_lookup,
+                    self.lookup_abstract(doi.as_deref(), arxiv.as_deref(), skip_crossref),
+                )
+                .await
+                .unwrap_or_else(|_| (None, vec![("abstract_lookup", "timeout".to_string())]));
+                (index, found)
+            }
+        });
+        let results = futures::future::join_all(lookups).await;
+
+        let mut diagnostics: Vec<SourceDiagnostic> = Vec::new();
+        for (index, (text, failures)) in results {
+            if let Some(text) = text {
+                hits[index].abstract_note = Some(text);
+            }
+            for (source, reason) in failures {
+                if diagnostics.iter().any(|d| d.source == source) {
+                    continue;
+                }
+                diagnostics.push(SourceDiagnostic {
+                    source: source.to_string(),
+                    reason: crate::error::sanitize_message(
+                        &format!("abstract_backfill: {reason}"),
+                        &[],
+                    ),
+                    retry_after_ms: None,
+                });
+            }
+        }
+        diagnostics
+    }
+
+    /// Best-effort abstract for one paper; `None` when no source has one,
+    /// a lookup fails, or `per_lookup` elapses.
+    pub(crate) async fn abstract_for(
+        &self,
+        doi: Option<&str>,
+        arxiv: Option<&str>,
+        skip_crossref: bool,
+        per_lookup: Duration,
+    ) -> Option<String> {
+        timeout(per_lookup, self.lookup_abstract(doi, arxiv, skip_crossref))
+            .await
+            .ok()
+            .and_then(|(text, _)| text)
+    }
+
+    async fn lookup_abstract(
+        &self,
+        doi: Option<&str>,
+        arxiv: Option<&str>,
+        skip_crossref: bool,
+    ) -> (Option<String>, Vec<(&'static str, String)>) {
+        let mut failures = Vec::new();
+        if let Some(doi) = doi {
+            if !skip_crossref {
+                match self.crossref.resolve_doi(doi).await {
+                    Ok(work) => {
+                        if let Some(text) = non_blank(work.abstract_note) {
+                            return (Some(text), failures);
+                        }
+                    }
+                    Err(error) => failures.push(("crossref", error.to_string())),
+                }
+            }
+            match self.openalex.abstract_by_doi(doi).await {
+                Ok(Some(text)) => return (Some(text), failures),
+                Ok(None) => {}
+                Err(error) => failures.push(("openalex", error.to_string())),
+            }
+        }
+        if let Some(arxiv) = arxiv {
+            match self.arxiv.search(arxiv, 1).await {
+                Ok(found) => {
+                    if let Some(text) = found
+                        .into_iter()
+                        .find_map(|hit| non_blank(hit.abstract_note))
+                    {
+                        return (Some(text), failures);
+                    }
+                }
+                Err(error) => failures.push(("arxiv", error.to_string())),
+            }
+        }
+        (None, failures)
+    }
+
     /// Resolve an exact DOI through the same Crossref client used by the
     /// search fan-out. This keeps test/custom endpoints and production
     /// behavior aligned.
@@ -461,6 +577,20 @@ impl std::fmt::Debug for PaperSearch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PaperSearch").finish()
     }
+}
+
+fn needs_abstract(hit: &PaperHit) -> bool {
+    // Research hits carry a snippet in `abstract_note` and no backfill identity.
+    hit.source != PaperSource::Research
+        && hit
+            .abstract_note
+            .as_deref()
+            .is_none_or(|text| text.trim().is_empty())
+        && (hit.doi.is_some() || hit.arxiv_id.is_some())
+}
+
+fn non_blank(text: Option<String>) -> Option<String> {
+    text.filter(|text| !text.trim().is_empty())
 }
 
 fn source_wire_name(source: PaperSource) -> String {
@@ -1734,6 +1864,178 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn backfill_search(base: &str) -> PaperSearch {
+        let mut search = PaperSearch::with_clients(
+            ArxivClient::new(Some(base)),
+            HuggingFaceClient::new(Some(base), None),
+            SemanticScholarClient::new(Some(base), None),
+            CrossrefClient::new(Some(base)),
+        );
+        search.openalex = OpenAlexClient::new(Some(base), None);
+        search
+    }
+
+    fn dblp_hit(title: &str, doi: Option<&str>) -> PaperHit {
+        PaperHit::new(
+            PaperSource::Dblp,
+            title.into(),
+            vec![],
+            None,
+            doi.map(str::to_string),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn backfill_fills_abstract_from_crossref() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/works/10\.1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "message": {"DOI": "10.1/dblp", "abstract": "<jats:p>Crossref abstract.</jats:p>"}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/works/doi:"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let search = backfill_search(&server.uri());
+        let mut hits = vec![dblp_hit("PathDump", Some("10.1/dblp"))];
+        let failed = search
+            .backfill_abstracts(&mut hits, 5, Duration::from_secs(5))
+            .await;
+        assert!(failed.is_empty(), "{failed:?}");
+        assert_eq!(hits[0].abstract_note.as_deref(), Some("Crossref abstract."));
+    }
+
+    #[tokio::test]
+    async fn backfill_falls_back_to_openalex_without_crossref_abstract() {
+        use wiremock::matchers::{method, path, path_regex, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/works/10\.1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "message": {"DOI": "10.1/oa"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/works/doi:10.1/oa"))
+            .and(query_param("select", "abstract_inverted_index"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "abstract_inverted_index": {"OpenAlex": [0], "abstract": [1]}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let search = backfill_search(&server.uri());
+        let mut hits = vec![dblp_hit("Zeno", Some("10.1/oa"))];
+        let failed = search
+            .backfill_abstracts(&mut hits, 5, Duration::from_secs(5))
+            .await;
+        assert!(failed.is_empty(), "{failed:?}");
+        assert_eq!(hits[0].abstract_note.as_deref(), Some("OpenAlex abstract"));
+    }
+
+    #[tokio::test]
+    async fn backfill_failures_leave_hits_and_report_each_source_once() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let search = backfill_search(&server.uri());
+        let mut hits = vec![dblp_hit("A", Some("10.1/a")), dblp_hit("B", Some("10.1/b"))];
+        let failed = search
+            .backfill_abstracts(&mut hits, 5, Duration::from_secs(5))
+            .await;
+        assert!(hits.iter().all(|hit| hit.abstract_note.is_none()));
+        let sources: Vec<&str> = failed.iter().map(|d| d.source.as_str()).collect();
+        assert_eq!(sources, vec!["crossref", "openalex"]);
+        assert!(
+            failed
+                .iter()
+                .all(|d| d.reason.starts_with("abstract_backfill:"))
+        );
+    }
+
+    #[tokio::test]
+    async fn backfill_respects_limit_and_skips_ineligible_hits() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/works/10\.1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "message": {"DOI": "10.1/x", "abstract": "Filled."}
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let search = backfill_search(&server.uri());
+        let mut has_abstract = dblp_hit("Has", Some("10.1/has"));
+        has_abstract.abstract_note = Some("Already here.".into());
+        let mut hits = vec![
+            has_abstract,
+            dblp_hit("No ids", None),
+            dblp_hit("One", Some("10.1/one")),
+            dblp_hit("Two", Some("10.1/two")),
+            dblp_hit("Three", Some("10.1/three")),
+        ];
+        search
+            .backfill_abstracts(&mut hits, 2, Duration::from_secs(5))
+            .await;
+        assert_eq!(hits[0].abstract_note.as_deref(), Some("Already here."));
+        assert!(hits[1].abstract_note.is_none());
+        assert_eq!(hits[2].abstract_note.as_deref(), Some("Filled."));
+        assert_eq!(hits[3].abstract_note.as_deref(), Some("Filled."));
+        assert!(hits[4].abstract_note.is_none());
+    }
+
+    #[tokio::test]
+    async fn abstract_for_arxiv_id_uses_arxiv_summary() {
+        use wiremock::matchers::{method, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(query_param("search_query", "id:2301.00001"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"<feed xmlns="http://www.w3.org/2005/Atom"><entry>
+                <id>http://arxiv.org/abs/2301.00001v1</id>
+                <title>Sample</title><summary>arXiv abstract.</summary>
+                </entry></feed>"#,
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let search = backfill_search(&server.uri());
+        let text = search
+            .abstract_for(None, Some("2301.00001"), true, Duration::from_secs(5))
+            .await;
+        assert_eq!(text.as_deref(), Some("arXiv abstract."));
     }
 
     #[tokio::test]
