@@ -55,6 +55,19 @@ impl DblpClient {
                 message: format!("DBLP API error at {url}"),
             });
         }
+        // DBLP can answer API calls with an HTML bot-check page (HTTP 202);
+        // report that plainly rather than as a JSON decode failure.
+        let is_html = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("html"));
+        if status != reqwest::StatusCode::OK || is_html {
+            return Err(ZoteroMcpError::Api {
+                status: status.as_u16(),
+                message: "DBLP returned a bot-check page instead of JSON; DBLP results are unavailable right now".to_string(),
+            });
+        }
 
         let raw: RawDblpResponse = response.json().await?;
         Ok(raw
@@ -322,5 +335,23 @@ mod tests {
             "SwitchPointer Effective Network Debugging"
         );
         assert_eq!(dblp_query("\"PathDump\""), "PathDump");
+    }
+
+    #[tokio::test]
+    async fn bot_check_page_reports_clear_error() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(202)
+                    .insert_header("content-type", "text/html; charset=utf-8")
+                    .set_body_string("<!doctype html><title>Making sure you're not a bot!</title>"),
+            )
+            .mount(&server)
+            .await;
+        let client = DblpClient::new(Some(&server.uri()));
+        let err = client.search("PathDump", 3).await.unwrap_err();
+        assert!(err.to_string().contains("bot-check page"), "{err}");
     }
 }
