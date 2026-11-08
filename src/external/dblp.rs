@@ -40,7 +40,8 @@ impl DblpClient {
             ));
         }
 
-        let encoded = urlencoding::encode(trimmed);
+        let query = dblp_query(trimmed);
+        let encoded = urlencoding::encode(&query);
         let url = format!(
             "{}/search/publ/api?q={encoded}&format=json&h={limit}",
             self.base_url
@@ -63,6 +64,23 @@ impl DblpClient {
             .map(|hits| hits.into_iter().map(|h| convert_info(h.info)).collect())
             .unwrap_or_default())
     }
+}
+
+/// DBLP matches word prefixes, and punctuation in pasted titles (`:`, `|`,
+/// `-`, quotes) is either an operator or noise there. Title-class queries are
+/// reduced to their words. Other queries pass through unchanged.
+fn dblp_query(query: &str) -> String {
+    let quoted = query.len() > 2 && query.starts_with('"') && query.ends_with('"');
+    if !quoted && !crate::external::arxiv::looks_like_title_phrase(query) {
+        return query.to_string();
+    }
+    query
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 impl std::fmt::Debug for DblpClient {
@@ -294,5 +312,15 @@ mod tests {
             matches!(err, ZoteroMcpError::Http(_) | ZoteroMcpError::Serde(_)),
             "expected decode error, got {err:?}"
         );
+    }
+
+    #[test]
+    fn dblp_query_strips_title_punctuation_only() {
+        assert_eq!(dblp_query("network telemetry"), "network telemetry");
+        assert_eq!(
+            dblp_query("SwitchPointer: Effective Network Debugging"),
+            "SwitchPointer Effective Network Debugging"
+        );
+        assert_eq!(dblp_query("\"PathDump\""), "PathDump");
     }
 }

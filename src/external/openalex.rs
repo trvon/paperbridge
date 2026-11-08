@@ -41,8 +41,23 @@ impl OpenAlexClient {
             ));
         }
 
+        if let Some(title) = title_filter_value(trimmed) {
+            let encoded = urlencoding::encode(&title);
+            let hits = self
+                .fetch_works(&format!("filter=title.search:{encoded}&per_page={limit}"))
+                .await?;
+            if !hits.is_empty() {
+                return Ok(hits);
+            }
+        }
+
         let encoded = urlencoding::encode(trimmed);
-        let mut url = format!("{}/works?search={encoded}&per_page={limit}", self.base_url);
+        self.fetch_works(&format!("search={encoded}&per_page={limit}"))
+            .await
+    }
+
+    async fn fetch_works(&self, params: &str) -> Result<Vec<PaperHit>> {
+        let mut url = format!("{}/works?{params}", self.base_url);
         if let Some(email) = self.mailto.as_deref() {
             url.push_str(&format!("&mailto={}", urlencoding::encode(email)));
         }
@@ -59,6 +74,23 @@ impl OpenAlexClient {
         let raw: RawOpenAlexResponse = response.json().await?;
         Ok(raw.results.into_iter().map(convert_work).collect())
     }
+}
+
+/// Title-class queries get a `title.search` filter value; commas separate
+/// filters in OpenAlex, so they are dropped from the phrase.
+fn title_filter_value(query: &str) -> Option<String> {
+    let unquoted = query
+        .strip_prefix('"')
+        .and_then(|q| q.strip_suffix('"'))
+        .filter(|q| !q.trim().is_empty());
+    let phrase = match unquoted {
+        Some(inner) => inner,
+        None if crate::external::arxiv::looks_like_title_phrase(query) => query,
+        None => return None,
+    };
+    let cleaned = phrase.replace(',', " ");
+    let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!cleaned.is_empty()).then_some(cleaned)
 }
 
 impl std::fmt::Debug for OpenAlexClient {
@@ -370,5 +402,46 @@ mod tests {
             matches!(err, ZoteroMcpError::Http(_) | ZoteroMcpError::Serde(_)),
             "expected decode/serde error, got {err:?}"
         );
+    }
+
+    #[test]
+    fn title_filter_only_for_title_queries() {
+        assert_eq!(title_filter_value("quantum"), None);
+        assert_eq!(
+            title_filter_value("Diagnosing Datacenter Network Problems, Quickly"),
+            Some("Diagnosing Datacenter Network Problems Quickly".into())
+        );
+        assert_eq!(title_filter_value("\"PathDump\""), Some("PathDump".into()));
+    }
+
+    #[tokio::test]
+    async fn title_query_uses_title_filter_then_falls_back_to_search() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let title = "Simplifying Datacenter Network Debugging with PathDump";
+        Mock::given(method("GET"))
+            .and(path("/works"))
+            .and(query_param("filter", format!("title.search:{title}")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"results": []})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/works"))
+            .and(query_param("search", title))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"title": title}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = OpenAlexClient::new(Some(&server.uri()), None);
+        let hits = client.search(title, 5).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].title, title);
     }
 }

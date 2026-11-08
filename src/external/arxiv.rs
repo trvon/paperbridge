@@ -268,7 +268,7 @@ pub(crate) fn build_arxiv_search_query(raw: &str) -> String {
     format!("all:{trimmed}")
 }
 
-fn looks_like_title_phrase(raw: &str) -> bool {
+pub(crate) fn looks_like_title_phrase(raw: &str) -> bool {
     let words: Vec<&str> = raw.split_whitespace().collect();
     if words.len() < 3 {
         return false;
