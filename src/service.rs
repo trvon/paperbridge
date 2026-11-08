@@ -215,6 +215,7 @@ impl PaperbridgeService {
                     diagnostics.sources_failed.push(SourceDiagnostic {
                         source: "crossref".into(),
                         reason: error.to_string(),
+                        retry_after_ms: None,
                     });
                     Vec::new()
                 }
@@ -251,6 +252,7 @@ impl PaperbridgeService {
                     diagnostics.sources_failed.push(SourceDiagnostic {
                         source: "paperseed".into(),
                         reason: e.to_string(),
+                        retry_after_ms: None,
                     });
                 }
             }
@@ -275,12 +277,14 @@ impl PaperbridgeService {
                         Err(error) => diagnostics.sources_failed.push(SourceDiagnostic {
                             source: "research".into(),
                             reason: error.to_string(),
+                            retry_after_ms: None,
                         }),
                     }
                 }
                 _ => diagnostics.sources_skipped.push(SourceDiagnostic {
                     source: "research".into(),
                     reason: "yams_not_ready".into(),
+                    retry_after_ms: None,
                 }),
             }
         }

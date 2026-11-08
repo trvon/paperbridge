@@ -532,6 +532,10 @@ pub struct AccessInfo {
 pub struct SourceDiagnostic {
     pub source: String,
     pub reason: String,
+    /// For `rate_limited` failures: how long the provider asked callers to
+    /// wait before retrying this source (e.g. with `sources=[...]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Default, schemars::JsonSchema)]

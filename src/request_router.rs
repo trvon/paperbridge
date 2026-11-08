@@ -104,6 +104,8 @@ pub struct RequestRouter {
     metrics: Arc<RouterMetrics>,
     last_event: StdMutex<Option<RequestRouterEvent>>,
     components: StdMutex<HashMap<&'static str, ComponentLatency>>,
+    /// Uncapped provider retry hint from each component's last exhausted 429/503.
+    rate_limit_hints: StdMutex<HashMap<&'static str, (Instant, Duration)>>,
     next_request_id: AtomicU64,
 }
 
@@ -122,6 +124,7 @@ impl RequestRouter {
             metrics: Arc::new(RouterMetrics::default()),
             last_event: StdMutex::new(None),
             components: StdMutex::new(HashMap::new()),
+            rate_limit_hints: StdMutex::new(HashMap::new()),
             next_request_id: AtomicU64::new(1),
         }
     }
@@ -264,6 +267,10 @@ impl RequestRouter {
                     drop(origin_permit);
                     continue;
                 }
+                self.rate_limit_hints
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(component, (Instant::now(), retry_hint(response.headers())));
             }
 
             return Ok(RoutedResponse {
@@ -275,6 +282,18 @@ impl RequestRouter {
                 },
             });
         }
+    }
+
+    /// Remaining time the provider asked callers to wait after `component`'s
+    /// last exhausted rate limit, or `None` once that window has passed.
+    pub(crate) fn rate_limit_hint(&self, component: &str) -> Option<Duration> {
+        let hints = self
+            .rate_limit_hints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (at, hint) = hints.get(component)?;
+        hint.checked_sub(at.elapsed())
+            .filter(|remaining| !remaining.is_zero())
     }
 
     async fn origin(&self, origin: &str) -> Arc<OriginState> {
@@ -393,6 +412,11 @@ fn request_origin(request: &RequestBuilder) -> Result<String> {
 }
 
 fn retry_delay(headers: &HeaderMap) -> Duration {
+    retry_hint(headers).min(Duration::from_millis(RETRY_DELAY_CAP_MS))
+}
+
+/// Provider-requested wait (longest of `Retry-After` / `Backoff`), uncapped.
+fn retry_hint(headers: &HeaderMap) -> Duration {
     let retry_after = parse_seconds_header(headers, RETRY_AFTER);
     let backoff = parse_seconds_header(headers, BACKOFF);
     let delay_ms = retry_after
@@ -400,8 +424,7 @@ fn retry_delay(headers: &HeaderMap) -> Duration {
         .chain(backoff)
         .max()
         .map(|seconds| seconds.saturating_mul(1_000))
-        .unwrap_or(RETRY_DELAY_DEFAULT_MS)
-        .min(RETRY_DELAY_CAP_MS);
+        .unwrap_or(RETRY_DELAY_DEFAULT_MS);
     Duration::from_millis(delay_ms)
 }
 

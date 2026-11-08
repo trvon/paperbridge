@@ -130,6 +130,7 @@ enum SourceRunResult {
     },
     Failed {
         reason: String,
+        retry_after_ms: Option<u64>,
     },
 }
 
@@ -421,12 +422,17 @@ impl PaperSearch {
                     diagnostics.sources_skipped.push(SourceDiagnostic {
                         source: name,
                         reason,
+                        retry_after_ms: None,
                     });
                 }
-                SourceRunResult::Failed { reason } => {
+                SourceRunResult::Failed {
+                    reason,
+                    retry_after_ms,
+                } => {
                     diagnostics.sources_failed.push(SourceDiagnostic {
                         source: name,
                         reason,
+                        retry_after_ms,
                     });
                 }
             }
@@ -498,13 +504,28 @@ where
             message,
         })) => {
             let reason = crate::error::sanitize_message(&format!("rate_limited: {message}"), &[]);
-            tracing::debug!(?source, status = 429, %reason, "source rate-limited after retry");
-            (source, SourceRunResult::Failed { reason })
+            let retry_after_ms = global_request_router()
+                .rate_limit_hint(&source_wire_name(source))
+                .map(|hint| u64::try_from(hint.as_millis()).unwrap_or(u64::MAX));
+            tracing::debug!(?source, status = 429, %reason, ?retry_after_ms, "source rate-limited after retry");
+            (
+                source,
+                SourceRunResult::Failed {
+                    reason,
+                    retry_after_ms,
+                },
+            )
         }
         Ok(Err(e)) => {
             let reason = crate::error::sanitize_message(&e.to_string(), &[]);
             tracing::debug!(?source, %reason, "source search failed");
-            (source, SourceRunResult::Failed { reason })
+            (
+                source,
+                SourceRunResult::Failed {
+                    reason,
+                    retry_after_ms: None,
+                },
+            )
         }
         Err(_) => {
             tracing::debug!(?source, "source search timed out");
@@ -512,6 +533,7 @@ where
                 source,
                 SourceRunResult::Failed {
                     reason: "timeout".into(),
+                    retry_after_ms: None,
                 },
             )
         }
@@ -1241,7 +1263,7 @@ mod tests {
             false,
         )
         .await;
-        let SourceRunResult::Failed { reason } = result else {
+        let SourceRunResult::Failed { reason, .. } = result else {
             panic!("expected source failure")
         };
         assert!(reason.len() <= crate::error::MAX_ERROR_BYTES);
@@ -1712,5 +1734,32 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn rate_limited_source_reports_provider_retry_hint() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "30"))
+            .mount(&server)
+            .await;
+
+        let base = server.uri();
+        let search = PaperSearch::with_clients(
+            ArxivClient::new(Some(&base)),
+            HuggingFaceClient::new(Some(&base), None),
+            SemanticScholarClient::new(Some(&base), None),
+            CrossrefClient::new(Some(&base)),
+        );
+        let mut opts = SearchOptions::new("telemetry");
+        opts.sources = Some(vec![PaperSource::Crossref]);
+        let result = search.search(opts).await.unwrap();
+        let failed = &result.diagnostics.sources_failed[0];
+        assert_eq!(failed.source, "crossref");
+        assert!(failed.reason.starts_with("rate_limited"));
+        let hint = failed.retry_after_ms.expect("retry hint");
+        assert!((20_000..=30_000).contains(&hint), "{hint}");
     }
 }

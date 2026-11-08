@@ -58,6 +58,7 @@ fn representative_result(detail: SearchDetail) -> SearchPapersResult {
             sources_skipped: vec![SourceDiagnostic {
                 source: "semantic_scholar".into(),
                 reason: "missing_api_key".into(),
+                retry_after_ms: None,
             }],
             sources_failed: Vec::new(),
         }),
