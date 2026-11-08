@@ -241,6 +241,15 @@ per-provider recovery remains a follow-up; suggested actions never execute.
 - [x] **T-F6** YAMS book archiving and tag/collection categorization (`collection=books`, `tags=book`)
 - [x] **T-F7** Skill documentation update (`docs/skill.md`) and MCP prompt synchronization
 
+## Phase G — Verification workflows (abstracts, no-DOI papers)
+
+- [x] **T-G1** Compact hits flag omitted abstracts via `access.abstract`
+- [x] **T-G2** `detail=full` backfills missing abstracts by DOI (Crossref → OpenAlex) or arXiv id, bounded to 5 lookups per page; `open_paper` metadata reuses it
+- [x] **T-G3** Title-class adapters for OpenAlex (`title.search` filter with fallback) and DBLP (punctuation-stripped words)
+- [x] **T-G4** `rate_limited` diagnostics carry the provider's `retry_after_ms`
+
+Acceptance: a title query for a DBLP-only venue paper returns a hit; with `detail=full` a hit with a DOI or arXiv id has an abstract unless no source has one (a diagnostic says why); a throttled source reports when to retry.
+
 ---
 
 ## Suggested implementation PR slices

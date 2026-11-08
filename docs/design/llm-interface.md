@@ -73,7 +73,8 @@ All list and search returns (library items, collections, papers) use:
       {"source": "semantic_scholar", "reason": "missing_api_key"}
     ],
     "sources_failed": [
-      {"source": "core", "reason": "timeout"}
+      {"source": "core", "reason": "timeout"},
+      {"source": "semantic_scholar", "reason": "rate_limited: …", "retry_after_ms": 30000}
     ]
   }
 }
@@ -81,6 +82,9 @@ All list and search returns (library items, collections, papers) use:
 
 Rules:
 
+- `retry_after_ms` appears only on `rate_limited` failures. It is the
+  provider's remaining `Retry-After`/`Backoff` window (not capped like the
+  in-request retry), so callers can retry just that source with `sources=[…]`.
 - `count_kind` is `candidate_window` for merged paper searches; this total is not the global index count. A fixed source prefix avoids pagination-induced reranking, but upstream changes can still reorder results between calls.
 - Library `total_count` is nullable: `count_kind=unknown` when not proven, `exact` only when exhaustion proves the count. `has_more` uses a fetched sentinel, never an invented extra row.
 - Do not return a bare JSON array for primary agent surfaces.
@@ -111,14 +115,25 @@ Rules:
   "access": {
     "pdf": true,
     "cached": false,
-    "full_text": false
+    "full_text": false,
+    "abstract": true
   },
   "next": ["open_paper", "resolve_doi", "get_paper_structure"]
 }
 ```
 
+`access.abstract` (omitted when false) means a source supplied an abstract that
+compact mode left out. Research-workspace snippets never set it.
+
 `detail=full` may add abstract (capped unless unlimited), venue, citation_count,
 urls, `oa_pdf_url`, `relevance_score`, `cache` object, `work_type`, `isbn`, etc.
+
+With `detail=full`, hits on the returned page that still lack an abstract after
+merge are backfilled by DOI (Crossref, then OpenAlex) or arXiv id. At most
+5 lookups run per page, concurrently and bounded by the search timeout. Failures
+appear in `sources_failed` with reasons prefixed `abstract_backfill:` and never
+fail the search. `open_paper` metadata uses the same lookup when Crossref has no
+abstract.
 
 ### `hit_id` rules
 
@@ -164,7 +179,11 @@ Before multi-source fan-out, classify `query`:
   when class is title.
 - **OpenLibrary**: prefer ISBN lookup `/isbn/{isbn}.json` when class is ISBN; free-text search on `/search.json?q=`.
 - **OpenAlex**: preserve relevance; attach verified ids; do not promote
-  obviously non-canonical DOIs without flagging.
+  obviously non-canonical DOIs without flagging. Title-class queries try
+  `filter=title.search:` first and fall back to `search=` when it is empty.
+- **DBLP**: title-class queries are reduced to their words (punctuation
+  stripped), since DBLP matches word prefixes and often holds the only record
+  for venue papers without DOIs (e.g. NSDI/OSDI).
 
 ### Ranking order (descending)
 

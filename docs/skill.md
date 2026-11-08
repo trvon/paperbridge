@@ -313,9 +313,10 @@ paperbridge config snippet --target opencode
 - **Cloud api_base must be HTTPS** (or `http://localhost` for local mode).
 - **Institutional access is optional** — `off` never rewrites URLs; setup never requests institutional credentials.
 - **`--limit` is page size** (default 10). Fan-out uses `--per-source` / MCP `limit_per_source`.
-- **Search is compact by default** — pass `--detail full` / `detail: "full"` for abstracts. Full abstracts default to 280 characters; set `abstract_max_chars=0` for unlimited text.
+- **Search is compact by default** — pass `--detail full` / `detail: "full"` for abstracts. Full abstracts default to 280 characters; set `abstract_max_chars=0` for unlimited text. Compact hits set `access.abstract: true` when an abstract was left out. Full detail backfills missing abstracts by DOI/arXiv id for up to 5 hits per page.
+- **Verifying a citation list** — search each paper by its exact title with `detail: "full"`. Papers without DOIs, such as many NSDI/OSDI papers, usually resolve via OpenAlex (or DBLP when it is reachable). If a full title misses, search the system name alone (e.g. `SwitchPointer`), because remembered titles are often slightly wrong. If a source shows `rate_limited` with `retry_after_ms`, wait that long and retry with `sources: ["<that source>"]` instead of treating the paper as missing.
 - **Search results are paginated** — use `offset`/`limit`; check `has_more` / `next_offset`. The per-source prefix stays fixed (`limit_per_source`, default 10, max 200). To broaden, increase that prefix and restart at offset 0. `count_kind: candidate_window` is not a global index total; library `total_count` can be null with `count_kind: unknown`. Upstream data can still change between requests.
-- **Key-gated sources skip loudly** — see `diagnostics.sources_skipped` / `sources_failed`.
+- **Key-gated sources skip loudly** — see `diagnostics.sources_skipped` / `sources_failed` (rate-limited sources include `retry_after_ms`).
 - **Cached papers are conservative by default**: default cache-only hits need strong relevance, and `--sources` without `paperseed` excludes cache hits. Use `--sources paperseed` for explicit cache-only search.
 - **Research hits report availability**: use `--sources research` for YAMS-only discovery. Do not attempt to open hits with `access.content_state: stale` until the source is re-indexed.
 - **PDF text extraction** happens automatically during local corpus import unless `--no-fulltext` is passed. Deferred extraction runs on first read; neither path performs OCR.
