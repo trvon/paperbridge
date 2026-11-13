@@ -363,7 +363,13 @@ impl<'a> CdpTab<'a> {
 
     /// Navigate and wait until the document is complete and its URL has
     /// stopped changing, so proxy and identity-provider redirects finish.
+    /// A PDF document is final as soon as it is complete.
     pub async fn navigate(&mut self, url: &str) -> Result<PageState> {
+        let before = self
+            .state()
+            .await
+            .map(|state| state.url)
+            .unwrap_or_default();
         let result = self
             .session_call("Page.navigate", json!({"url": url}))
             .await?;
@@ -384,8 +390,14 @@ impl<'a> CdpTab<'a> {
                 } else {
                     0
                 };
+                // A PDF document runs no script, so it cannot redirect and
+                // needs no settling. The URL check keeps a document from
+                // before this navigation from being taken for the new one.
+                let pdf = settled
+                    && state.url != before
+                    && state.content_type.eq_ignore_ascii_case("application/pdf");
                 last = state;
-                if settled && stable >= self.timing.settle_polls {
+                if pdf || (settled && stable >= self.timing.settle_polls) {
                     return Ok(last);
                 }
             }
@@ -550,5 +562,52 @@ mod tests {
         // port without these.
         assert!(CHROME_LAUNCH_LINE.contains("--no-first-run"));
         assert!(CHROME_LAUNCH_LINE.contains("--no-default-browser-check"));
+    }
+    /// Answers every state script from a queue, repeating the last entry.
+    struct StateScript {
+        states: Vec<(&'static str, &'static str)>,
+        asked: usize,
+    }
+
+    #[async_trait]
+    impl CdpTransport for StateScript {
+        async fn call(&mut self, _: Option<&str>, method: &str, _: Value) -> Result<Value> {
+            if method != "Runtime.evaluate" {
+                return Ok(json!({"targetId": "t", "sessionId": "s"}));
+            }
+            let (url, content_type) = self.states[self.asked.min(self.states.len() - 1)];
+            self.asked += 1;
+            let state = json!({"url": url, "ready": "complete", "contentType": content_type});
+            Ok(json!({"result": {"value": state.to_string()}}))
+        }
+    }
+
+    async fn polls_to_settle(states: Vec<(&'static str, &'static str)>) -> usize {
+        let mut transport = StateScript { states, asked: 0 };
+        let timing = BrowserTiming {
+            poll: Duration::from_millis(1),
+            settle_polls: 4,
+            load_timeout: Duration::from_secs(5),
+        };
+        let (tab, _) = CdpTab::open(&mut transport, "https://example.org/x", timing)
+            .await
+            .unwrap();
+        drop(tab);
+        // The first answer is the state read before the navigation.
+        transport.asked - 1
+    }
+
+    #[tokio::test]
+    async fn pdf_document_is_final_without_settling_but_html_and_stale_pages_settle() {
+        const PDF: &str = "application/pdf";
+        let blank = ("about:blank", "text/html");
+        let pdf = ("https://example.org/paper.pdf", PDF);
+        let page = ("https://example.org/landing", "text/html");
+        assert_eq!(polls_to_settle(vec![blank, pdf]).await, 1);
+        assert_eq!(polls_to_settle(vec![blank, page]).await, 5);
+        // An HTML hop that redirects to the PDF ends on the PDF at once.
+        assert_eq!(polls_to_settle(vec![blank, page, page, pdf]).await, 3);
+        // The tab already showed this PDF: it may be the old document.
+        assert_eq!(polls_to_settle(vec![pdf, pdf]).await, 5);
     }
 }
