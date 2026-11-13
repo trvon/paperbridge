@@ -47,6 +47,36 @@
 
 * Bump `quick-xml` to 0.41 (RUSTSEC-2026-0194 / 0195)
 
+## [2.3.0](https://github.com/trvon/paperbridge/compare/v2.2.1...v2.3.0) (2026-11-13)
+
+
+### Features
+
+* **papers:** fetch full text through a signed-in Chrome; access and extraction fixes ([8a4fe74](https://github.com/trvon/paperbridge/commit/8a4fe74c1479fe77f5c16d5baa5bd35999fda4c7))
+* **papers:** fetch full text through the operator's signed-in Chrome ([bfa1c2f](https://github.com/trvon/paperbridge/commit/bfa1c2fb96fef29de851c8f8b6db4cc5de7df9e7))
+
+
+### Bug Fixes
+
+* **access:** unencoded EZproxy targets and resolver-menu route hints ([83b0690](https://github.com/trvon/paperbridge/commit/83b06905b36af51accc021b3c1b7dea4b2a67646))
+* **fetch:** a journal-level landing page falls through to the publisher and DOI routes ([b70671b](https://github.com/trvon/paperbridge/commit/b70671b89e481e959000e82d7076fefe8d0466bd))
+* **fetch:** http publisher routes, journal-level landings, yams metadata commas ([49ac8f1](https://github.com/trvon/paperbridge/commit/49ac8f1a7b8b7e931350d159085ea909776b617d))
+* **fetch:** mark fetch_paper as destructive in its MCP annotations ([f4bef67](https://github.com/trvon/paperbridge/commit/f4bef67993d88c1b7614c40814eb1cc66dd18ad0))
+* **fetch:** match provider hosts by whole labels, proxied forms only under the configured gateway ([dea009a](https://github.com/trvon/paperbridge/commit/dea009a78a1401b58e6af920db9eee4a0b948119))
+* **fetch:** open routes never return a database menu or sign-in ([3ca7ba9](https://github.com/trvon/paperbridge/commit/3ca7ba955d529f27349f76e7f5918e91816a7452))
+* **fetch:** probe ws:// endpoints, report a stop that did not happen, count cookies as a browser sends them ([bf31be8](https://github.com/trvon/paperbridge/commit/bf31be8354c5e2043588b5a4c0a57286745630c2))
+* **fetch:** wrap http:// publisher pages as https; report preview-only pages as not_entitled ([69f1f1a](https://github.com/trvon/paperbridge/commit/69f1f1afb7c875ee39ed9bf74ee6fd6e85a8d1bb))
+* **paperseed:** contain PDF library panics and allow replacing stored full text ([c9e5cc2](https://github.com/trvon/paperbridge/commit/c9e5cc296a5942e64b0e3a56e1f73f4cd37250c2))
+* **paperseed:** yams add metadata values without commas ([970a66f](https://github.com/trvon/paperbridge/commit/970a66f02013e6f76a7b89461a379890cdff627d))
+
+
+### Performance Improvements
+
+* **fetch:** a PDF document is final without the redirect settle ([4e4cd76](https://github.com/trvon/paperbridge/commit/4e4cd76f70c6c8ddc072c0658e1ec1e340f74152))
+* **fetch:** faster PDF transfer, settle and extraction ([9714006](https://github.com/trvon/paperbridge/commit/9714006e06a927b28251c4929969543134b06f15))
+* **fetch:** read the fetched PDF through IO.read on a Blob stream ([2951c59](https://github.com/trvon/paperbridge/commit/2951c594454aab8251e147f103624260c038858e))
+* **fetch:** run pdftotext while the built-in extractor works ([7d16871](https://github.com/trvon/paperbridge/commit/7d16871abd0baad01aedbc8f9e2fe8cc08825e5b))
+
 ## [2.2.1](https://github.com/trvon/paperbridge/compare/v2.2.0...v2.2.1) (2026-10-30)
 
 

@@ -1855,7 +1855,7 @@ dependencies = [
 
 [[package]]
 name = "paperbridge"
-version = "2.2.1"
+version = "2.3.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -1887,7 +1887,7 @@ dependencies = [
 
 [[package]]
 name = "paperseed"
-version = "2.2.1"
+version = "2.3.0"
 dependencies = [
  "blake3",
  "clap",
@@ -1906,7 +1906,7 @@ dependencies = [
 
 [[package]]
 name = "paperseed-index"
-version = "2.2.1"
+version = "2.3.0"
 dependencies = [
  "criterion",
  "postcard",
