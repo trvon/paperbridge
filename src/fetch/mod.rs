@@ -485,6 +485,10 @@ async fn drive_tab(
                 continue;
             }
             PageKind::SignIn => return Ok(sign_in(&state, route)),
+            PageKind::GatewayMenu if open => {
+                notes.push(format!("{label}: {GATEWAY_MENU_REASON} ({url})"));
+                continue;
+            }
             PageKind::GatewayMenu => {
                 notes.push(format!("{label}: {GATEWAY_MENU_REASON} ({url})"));
                 gateway_menu = Some((state, route));
@@ -512,6 +516,11 @@ async fn drive_tab(
             }
             Landing::NotEntitled { .. } if open => {
                 notes.push(format!("{label}: {} shows a preview only", state.url));
+            }
+            // A PDF request from an open page that redirects to an identity
+            // provider is not the institution asking for sign-in.
+            Landing::Auth { tab_url, what } if open => {
+                notes.push(format!("{label}: {tab_url} asks for sign-in ({what})"));
             }
             // Through the gateway the publisher itself said the session has
             // no entitlement; another route to the same publisher will not

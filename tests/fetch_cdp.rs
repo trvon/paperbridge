@@ -2394,3 +2394,139 @@ async fn journal_toc_with_no_other_route_names_the_journal_level_page() {
         "{reason}"
     );
 }
+
+/// The resolver forwards to a DOAJ journal page and the proxy routes reach
+/// a page with no PDF (or `gateway_to`); only the open routes remain.
+async fn mount_toc_with_empty_gateway(
+    server: &MockServer,
+    doi: &str,
+    publisher: &str,
+    gateway_to: Option<&str>,
+) -> String {
+    let toc = "https://doaj.org/toc/06b1b003af9c4e6e9323930c4fd7279a";
+    let route = "https://example.search.serialssolutions.com/log?L=X&D=DOA&P=Link";
+    Mock::given(method("GET"))
+        .and(path("/example.search.serialssolutions.com/log"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", toc))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/doaj.org/toc/06b1b003af9c4e6e9323930c4fd7279a"))
+        .respond_with(html(include_str!("fixtures/fetch/doaj_toc.html")))
+        .mount(server)
+        .await;
+    let empty = "https://www-mdpi-com.uccs.idm.oclc.org/empty";
+    Mock::given(method("GET"))
+        .and(path("/www-mdpi-com.uccs.idm.oclc.org/empty"))
+        .respond_with(html(
+            "<html><head><title>Article</title></head><body>No files.</body></html>",
+        ))
+        .mount(server)
+        .await;
+    let empty = gateway_to.unwrap_or(empty);
+    mount_gateway(server, publisher, empty).await;
+    mount_gateway(server, &format!("https://doi.org/{doi}"), empty).await;
+    route.to_string()
+}
+
+async fn fetch_toc_case(
+    server: &MockServer,
+    doi: &str,
+    publisher: &str,
+    route: &str,
+) -> (paperbridge::fetch::FetchOutcome, MockConnector) {
+    let mut item = work(route);
+    item.doi = doi.to_string();
+    let hints = uccs_hints_with_publisher(doi, Some(publisher));
+    let mut connector = MockConnector(MockBrowser::new(server));
+    let out = tempfile::tempdir().unwrap();
+    let outcome = fetch_resolved(
+        None,
+        &mut connector,
+        &item,
+        route,
+        &hints,
+        &FetchOptions {
+            ingest: false,
+            out_dir: Some(out.path().to_path_buf()),
+            ..fast_options()
+        },
+        &mut FetchSession::default(),
+    )
+    .await;
+    (outcome, connector)
+}
+
+#[tokio::test]
+async fn a_database_menu_on_an_open_route_is_a_note_not_the_result() {
+    let server = MockServer::start().await;
+    let doi = "10.3390/app11177868";
+    let publisher = "https://www.mdpi.com/2076-3417/11/17/7868";
+    // The proxy routes come back to the resolver, so no institutional
+    // route reaches content.
+    let resolver_page = "https://example.search.serialssolutions.com/menu";
+    Mock::given(method("GET"))
+        .and(path("/example.search.serialssolutions.com/menu"))
+        .respond_with(html("<html><body>No direct link.</body></html>"))
+        .mount(&server)
+        .await;
+    let route = mount_toc_with_empty_gateway(&server, doi, publisher, Some(resolver_page)).await;
+    // Without the proxy, the publisher page bounces to a database menu.
+    Mock::given(method("GET"))
+        .and(path("/www.mdpi.com/2076-3417/11/17/7868"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", DATABASE_MENU_URL))
+        .mount(&server)
+        .await;
+    mount_database_menu(&server).await;
+
+    let (outcome, _) = fetch_toc_case(&server, doi, publisher, &route).await;
+
+    assert_eq!(outcome.status, FetchStatus::NoPdf, "{outcome:?}");
+    assert_ne!(outcome.route, Some(FetchRoute::Publisher), "{outcome:?}");
+    assert_ne!(outcome.route, Some(FetchRoute::Doi), "{outcome:?}");
+}
+
+#[tokio::test]
+async fn sign_in_behind_an_open_route_pdf_is_a_note_not_auth_required() {
+    let server = MockServer::start().await;
+    let doi = "10.3390/app11177868";
+    let publisher = "https://www.mdpi.com/2076-3417/11/17/7868";
+    let route = mount_toc_with_empty_gateway(&server, doi, publisher, None).await;
+    Mock::given(method("GET"))
+        .and(path("/www.mdpi.com/2076-3417/11/17/7868"))
+        .respond_with(html(
+            r#"<html><head><title>Open article</title><meta name="citation_pdf_url" content="https://files.example.org/7868.pdf"></head><body>Article</body></html>"#,
+        ))
+        .mount(&server)
+        .await;
+    // The open page's cross-origin PDF link redirects to an identity provider.
+    Mock::given(method("GET"))
+        .and(path("/files.example.org/7868.pdf"))
+        .respond_with(ResponseTemplate::new(302).insert_header(
+            "location",
+            "https://login.microsoftonline.com/common/oauth2/authorize?client_id=fixture",
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/login.microsoftonline.com/common/oauth2/authorize"))
+        .respond_with(html(MICROSOFT_LOGIN))
+        .mount(&server)
+        .await;
+
+    let (outcome, connector) = fetch_toc_case(&server, doi, publisher, &route).await;
+
+    assert_eq!(outcome.status, FetchStatus::NoPdf, "{outcome:?}");
+    assert!(
+        outcome
+            .reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("asks for sign-in"),
+        "{outcome:?}"
+    );
+    assert!(
+        connector.0.open_tabs().is_empty(),
+        "no tab is handed to the operator"
+    );
+}
