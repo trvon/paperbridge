@@ -628,6 +628,12 @@ pub async fn ingest_pdf(
 ) -> Result<IngestReport> {
     let metadata = metadata_from_crossref(work);
     let license = Some(FETCH_LICENSE.to_string());
+    // pdftotext is a separate process: start it on the fetched file now so
+    // it runs while the built-in extractor works, instead of after it.
+    let pdftotext = {
+        let (command, source) = (pdftotext_command.to_string(), pdf.to_path_buf());
+        tokio::spawn(async move { extract::run_pdftotext(&command, &source).await })
+    };
     let (paper, builtin_error) =
         match api.ingest_with_metadata_options(pdf, metadata.clone(), license.clone(), true) {
             Ok(paper) => (paper, None),
@@ -647,7 +653,7 @@ pub async fn ingest_pdf(
             .and_then(|entry| entry.read_full_text().ok().flatten())
     };
     let builtin_chars = builtin_text.as_deref().map_or(0, extract::text_chars);
-    let pdftotext = extract::run_pdftotext(pdftotext_command, &paper.file.path).await;
+    let pdftotext = pdftotext.await.ok().flatten();
     let measured = pdftotext
         .as_ref()
         .map(|output| (extract::text_chars(&output.text), output.pages));
