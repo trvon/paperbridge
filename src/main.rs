@@ -1350,7 +1350,9 @@ async fn handle_browser(
             dry_run,
         } => {
             let report = launch::stop_browser(&cdp_url, &profile_dir(profile), dry_run).await?;
-            print_output(&report, output)
+            print_output(&report, output)?;
+            // Still running: the report says so, and the command fails.
+            report.failure().map_or(Ok(()), Err)
         }
         BrowserAction::Status { cdp_url, profile } => {
             let gateway = config

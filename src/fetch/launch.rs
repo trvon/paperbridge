@@ -25,6 +25,8 @@ const CHROME_COMMANDS: &[&str] = &[
     "chromium-browser",
 ];
 const START_TIMEOUT: Duration = Duration::from_secs(40);
+const STOP_TIMEOUT: Duration = Duration::from_secs(15);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// `$XDG_DATA_HOME/paperbridge/chrome-profile`, the directory the documented
 /// launch line uses.
@@ -224,14 +226,34 @@ fn endpoint_port(cdp_url: &str) -> Result<u16> {
 }
 
 /// Chrome's version string when a DevTools endpoint answers at `cdp_url`.
+///
+/// An `http://` endpoint is asked for `/json/version`. A `ws://` endpoint is
+/// the browser's own WebSocket, so it is asked `Browser.getVersion` there.
 pub async fn endpoint_browser(cdp_url: &str) -> Option<String> {
     let url = cdp::validate_cdp_url(cdp_url).ok()?;
-    if url.scheme() != "http" {
-        return None;
+    if url.scheme() == "ws" {
+        let probe = async {
+            let mut transport = WsCdpTransport::connect(cdp_url).await.ok()?;
+            let version = transport
+                .call(None, "Browser.getVersion", json!({}))
+                .await
+                .ok()?;
+            Some(
+                version
+                    .get("product")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string(),
+            )
+        };
+        return tokio::time::timeout(PROBE_TIMEOUT, probe)
+            .await
+            .ok()
+            .flatten();
     }
     let client = reqwest::Client::builder()
         .no_proxy()
-        .timeout(Duration::from_secs(2))
+        .timeout(PROBE_TIMEOUT)
         .build()
         .ok()?;
     let version: Value = client
@@ -292,16 +314,30 @@ pub async fn ensure_browser(cdp_url: &str, spec: &LaunchSpec) -> Result<StartRep
             spec.profile.display()
         )));
     }
+    refuse_websocket_launch(cdp_url, port)?;
     report.preferences = Some(ensure_restore_on_startup(&spec.profile)?);
     report.command = Some(launch_chrome(cdp_url, spec).await?);
     report.launched = true;
     Ok(report)
 }
 
+/// A `ws://` endpoint names one running browser: its path carries an id that
+/// Chrome generates at each start. A browser started now would answer at a
+/// different address, so there is nothing to wait for.
+fn refuse_websocket_launch(cdp_url: &str, port: u16) -> Result<()> {
+    if cdp::validate_cdp_url(cdp_url)?.scheme() != "ws" {
+        return Ok(());
+    }
+    Err(ZoteroMcpError::InvalidInput(format!(
+        "nothing answers at {cdp_url}, and a ws:// endpoint names one running browser, so Paperbridge cannot start a browser at it. Pass the http:// form to start one: --cdp-url http://127.0.0.1:{port}"
+    )))
+}
+
 /// Spawn Chrome on the profile and wait for its DevTools port. Returns the
 /// program that was started. Does not touch the profile's preferences.
 pub async fn launch_chrome(cdp_url: &str, spec: &LaunchSpec) -> Result<String> {
     let port = endpoint_port(cdp_url)?;
+    refuse_websocket_launch(cdp_url, port)?;
     let Some((program, leading)) = spec.command.split_first() else {
         return Err(ZoteroMcpError::Config(
             "no Chrome command configured".into(),
@@ -422,6 +458,22 @@ pub fn endpoint_owner(profile: &Path, port: u16) -> std::result::Result<Option<u
     Ok(pid)
 }
 
+/// How a `browser stop` ended.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopStatus {
+    /// Nothing answered at the endpoint; there was nothing to close.
+    #[default]
+    NotRunning,
+    /// A dry run: the browser was identified and left running.
+    WouldStop,
+    /// Chrome exited and released the profile.
+    Stopped,
+    /// Chrome was asked to close but is still running, or still holds the
+    /// profile. Its cookies may not have been written.
+    NotStopped,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct StopReport {
     pub endpoint: String,
@@ -431,9 +483,19 @@ pub struct StopReport {
     pub browser: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
+    pub status: StopStatus,
+    /// True only when Chrome exited and the profile lock is gone.
     pub stopped: bool,
     pub dry_run: bool,
     pub detail: String,
+}
+
+impl StopReport {
+    /// The error a caller should end with when the browser was asked to
+    /// close and did not.
+    pub fn failure(&self) -> Option<ZoteroMcpError> {
+        (self.status == StopStatus::NotStopped).then(|| ZoteroMcpError::Config(self.detail.clone()))
+    }
 }
 
 /// Ask the Chrome running on `profile` to exit cleanly (`Browser.close`),
@@ -441,12 +503,22 @@ pub struct StopReport {
 /// one on `profile` is refused, never closed. With `dry_run`, only reports
 /// what would be closed.
 pub async fn stop_browser(cdp_url: &str, profile: &Path, dry_run: bool) -> Result<StopReport> {
+    stop_browser_within(cdp_url, profile, dry_run, STOP_TIMEOUT).await
+}
+
+async fn stop_browser_within(
+    cdp_url: &str,
+    profile: &Path,
+    dry_run: bool,
+    wait: Duration,
+) -> Result<StopReport> {
     let port = endpoint_port(cdp_url)?;
     let mut report = StopReport {
         endpoint: cdp_url.to_string(),
         profile_dir: profile.display().to_string(),
         browser: endpoint_browser(cdp_url).await,
         pid: None,
+        status: StopStatus::NotRunning,
         stopped: false,
         dry_run,
         detail: String::new(),
@@ -469,18 +541,39 @@ pub async fn stop_browser(cdp_url: &str, profile: &Path, dry_run: bool) -> Resul
         profile.display()
     );
     if dry_run {
+        report.status = StopStatus::WouldStop;
         report.detail = format!("would close {target}");
         return Ok(report);
     }
     let mut transport = WsCdpTransport::connect(cdp_url).await?;
     close_browser(&mut transport).await;
     drop(transport);
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    while (endpoint_browser(cdp_url).await.is_some() || profile_in_use(profile))
-        && tokio::time::Instant::now() < deadline
-    {
-        tokio::time::sleep(Duration::from_millis(200)).await;
+    let deadline = tokio::time::Instant::now() + wait;
+    // Stopped means both: the endpoint is gone and the profile is released.
+    let (answering, locked) = loop {
+        let state = (
+            endpoint_browser(cdp_url).await.is_some(),
+            profile_in_use(profile),
+        );
+        if state == (false, false) || tokio::time::Instant::now() >= deadline {
+            break state;
+        }
+        tokio::time::sleep(Duration::from_millis(200).min(wait)).await;
+    };
+    if answering || locked {
+        let still = match (answering, locked) {
+            (true, true) => "it still answers and still holds the profile",
+            (true, false) => "it still answers at the endpoint",
+            _ => "a Chrome process still holds the profile",
+        };
+        report.status = StopStatus::NotStopped;
+        report.detail = format!(
+            "asked {target} to close, but after {} seconds {still}. Its cookies may not have been written; close that window yourself, then check with `paperbridge browser status`",
+            wait.as_secs()
+        );
+        return Ok(report);
     }
+    report.status = StopStatus::Stopped;
     report.stopped = true;
     report.detail = format!("closed {target}");
     Ok(report)
@@ -507,12 +600,18 @@ pub struct CookieSummary {
     pub latest_expiry: Option<i64>,
 }
 
+/// Whether a browser would send a cookie with this `domain` to `host`.
+/// Chrome reports a domain cookie with a leading dot: it applies to that
+/// domain and everything below it. Without the dot the cookie is host-only.
+/// A cookie scoped to a subdomain of `host` is never sent to `host`.
 fn cookie_matches(domain: &str, host: &str) -> bool {
-    let domain = domain.trim_start_matches('.').to_ascii_lowercase();
-    domain.is_empty().not()
-        && (domain == host
-            || host.ends_with(&format!(".{domain}"))
-            || domain.ends_with(&format!(".{host}")))
+    let domain = domain.to_ascii_lowercase();
+    match domain.strip_prefix('.') {
+        Some(parent) => {
+            parent.is_empty().not() && (host == parent || host.ends_with(&format!(".{parent}")))
+        }
+        None => domain.is_empty().not() && domain == host,
+    }
 }
 
 /// Reduce a CDP cookie list to counts and expiries for `host`. Only the
@@ -798,26 +897,335 @@ mod tests {
             summary,
             CookieSummary {
                 host: "uccs.idm.oclc.org".to_string(),
-                total: 3,
-                session: 2,
+                total: 2,
+                session: 1,
                 persistent: 1,
                 earliest_expiry: Some(1_800_000_000),
                 latest_expiry: Some(1_800_000_000),
             }
         );
-        let printed = serde_json::to_string(&summary).unwrap();
-        for secret in [
-            "SECRET-EZPROXY-SESSION",
-            "SECRET-PERSISTENT",
-            "SECRET-OTHER",
-            "ezproxy",
-            "ESTSAUTH",
-        ] {
-            assert!(COOKIES.contains(secret), "fixture carries {secret}");
-            assert!(printed.contains(secret).not(), "{printed}");
-        }
-        assert!(printed.contains("value").not() && printed.contains("name").not());
+        // The host-only cookie on `login.<gateway>` counts for that host.
+        assert_eq!(
+            summarize_cookies(&reply, "login.uccs.idm.oclc.org").total,
+            3
+        );
         assert_eq!(summarize_cookies(&reply, "example.org").total, 0);
         assert_eq!(summarize_cookies(&json!({}), "uccs.idm.oclc.org").total, 0);
+    }
+
+    /// Every string in the fixture that a summary must never carry: each
+    /// cookie's name and value.
+    fn fixture_names_and_values() -> Vec<String> {
+        let reply: Value = serde_json::from_str(COOKIES).unwrap();
+        reply["cookies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|cookie| [cookie["name"].clone(), cookie["value"].clone()])
+            .map(|field| field.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn cookie_summary_carries_no_cookie_name_or_value() {
+        let reply: Value = serde_json::from_str(COOKIES).unwrap();
+        let withheld = fixture_names_and_values();
+        assert_eq!(withheld.len(), 8);
+        for host in ["uccs.idm.oclc.org", "login.microsoftonline.com"] {
+            let summary = summarize_cookies(&reply, host);
+            assert!(summary.total > 0);
+            let printed = serde_json::to_string(&summary).unwrap();
+            // Counted, not printed: a failure names no fixture string.
+            let leaked = withheld
+                .iter()
+                .filter(|text| printed.contains(text.as_str()))
+                .count();
+            assert_eq!(leaked, 0);
+            let keys: Vec<String> = serde_json::to_value(&summary)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect();
+            assert_eq!(
+                keys,
+                [
+                    "earliest_expiry",
+                    "host",
+                    "latest_expiry",
+                    "persistent",
+                    "session",
+                    "total"
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn cookie_domains_follow_browser_matching() {
+        let host = "proxy.example.edu";
+        for (domain, expected) in [
+            // Host-only cookie: that exact host.
+            ("proxy.example.edu", true),
+            ("PROXY.example.edu", true),
+            // Domain cookies: the host itself, or a parent of it.
+            (".proxy.example.edu", true),
+            (".example.edu", true),
+            // A host-only cookie on a parent is not sent to the host.
+            ("example.edu", false),
+            // A cookie scoped to a subdomain is never sent to its parent.
+            ("evil.proxy.example.edu", false),
+            (".evil.proxy.example.edu", false),
+            // Not a whole label, and names that only contain the host.
+            (".oxy.example.edu", false),
+            ("notproxy.example.edu", false),
+            ("proxy.example.edu.attacker.example", false),
+            (".proxy.example.edu.attacker.example", false),
+            ("", false),
+            (".", false),
+        ] {
+            assert_eq!(cookie_matches(domain, host), expected, "{domain:?}");
+        }
+    }
+
+    #[test]
+    fn subdomain_cookies_do_not_make_the_gateway_look_signed_in() {
+        let reply = json!({"cookies": [
+            {"domain": "evil.proxy.example.edu", "session": true, "expires": -1},
+            {"domain": ".evil.proxy.example.edu", "session": false, "expires": 1_900_000_000},
+        ]});
+        assert_eq!(summarize_cookies(&reply, "proxy.example.edu").total, 0);
+        assert_eq!(summarize_cookies(&reply, "evil.proxy.example.edu").total, 2);
+    }
+
+    /// A DevTools browser WebSocket on loopback. Answers `Browser.getVersion`;
+    /// on `Browser.close` it runs `on_close` and, when that returns true,
+    /// stops answering, as an exiting Chrome does.
+    async fn devtools_socket(on_close: impl Fn() -> bool + Send + Sync + 'static) -> String {
+        use futures::{SinkExt, StreamExt};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let on_close = Arc::new(on_close);
+        let gone = Arc::new(AtomicBool::new(false));
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                if gone.load(Ordering::SeqCst) {
+                    continue;
+                }
+                let (on_close, gone) = (on_close.clone(), gone.clone());
+                tokio::spawn(async move {
+                    let Ok(mut socket) = tokio_tungstenite::accept_async(stream).await else {
+                        return;
+                    };
+                    while let Some(Ok(Message::Text(text))) = socket.next().await {
+                        let request: Value = serde_json::from_str(text.as_str()).unwrap();
+                        if request["method"] == "Browser.close" && on_close() {
+                            gone.store(true, Ordering::SeqCst);
+                            return;
+                        }
+                        let reply = json!({
+                            "id": request["id"],
+                            "result": {"product": "Chrome/Fixture"},
+                        });
+                        if socket.send(Message::text(reply.to_string())).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        format!("ws://127.0.0.1:{port}/devtools/browser/fixture")
+    }
+
+    fn port_of(endpoint: &str) -> u16 {
+        Url::parse(endpoint).unwrap().port().unwrap()
+    }
+
+    /// A long-lived process that holds `profile` the way Chrome does: the
+    /// profile and port are on its command line, and the lock names it.
+    #[cfg(unix)]
+    fn hold_profile(profile: &Path, port: u16) -> std::process::Child {
+        let child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("while :; do sleep 1; done")
+            .arg("fixture-chrome")
+            .arg(format!("--user-data-dir={}", profile.display()))
+            .arg(format!("--remote-debugging-port={port}"))
+            .spawn()
+            .unwrap();
+        std::os::unix::fs::symlink(
+            format!("fixturehost-{}", child.id()),
+            profile.join("SingletonLock"),
+        )
+        .unwrap();
+        std::fs::write(
+            profile.join("DevToolsActivePort"),
+            format!("{port}\n/devtools/browser/fixture\n"),
+        )
+        .unwrap();
+        child
+    }
+
+    #[tokio::test]
+    async fn websocket_endpoint_is_probed_like_an_http_one() {
+        let endpoint = devtools_socket(|| false).await;
+        assert_eq!(
+            endpoint_browser(&endpoint).await.as_deref(),
+            Some("Chrome/Fixture")
+        );
+
+        let profile = profile_with(Some(PREFERENCES));
+        let status = browser_status(&endpoint, profile.path(), None)
+            .await
+            .unwrap();
+        assert!(status.endpoint_answers);
+        assert_eq!(status.browser.as_deref(), Some("Chrome/Fixture"));
+
+        // `start` sees the running browser and starts nothing.
+        let spec = LaunchSpec {
+            command: vec!["/nonexistent/chrome".to_string()],
+            profile: profile.path().to_path_buf(),
+            headless: true,
+        };
+        let report = ensure_browser(&endpoint, &spec).await.unwrap();
+        assert!(report.launched.not());
+        assert!(report.note.is_some());
+
+        // `stop` reaches the ownership check instead of "nothing answers".
+        let error = stop_browser(&endpoint, profile.path(), false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not closing the browser"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn websocket_endpoint_that_is_down_is_reported_and_never_launched() {
+        // A loopback port with nothing listening on it.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let endpoint = format!("ws://127.0.0.1:{port}/devtools/browser/gone");
+        assert_eq!(endpoint_browser(&endpoint).await, None);
+
+        let profile = profile_with(None);
+        let status = browser_status(&endpoint, profile.path(), None)
+            .await
+            .unwrap();
+        assert!(status.endpoint_answers.not());
+
+        let stop = stop_browser(&endpoint, profile.path(), false)
+            .await
+            .unwrap();
+        assert_eq!(stop.status, StopStatus::NotRunning);
+        assert!(stop.stopped.not() && stop.failure().is_none());
+
+        // The command does not exist: reaching the spawn would say so.
+        let spec = LaunchSpec {
+            command: vec!["/nonexistent/chrome".to_string()],
+            profile: profile.path().to_path_buf(),
+            headless: true,
+        };
+        for error in [
+            ensure_browser(&endpoint, &spec).await.unwrap_err(),
+            launch_chrome(&endpoint, &spec).await.unwrap_err(),
+        ] {
+            let error = error.to_string();
+            assert!(
+                error.contains(&format!("--cdp-url http://127.0.0.1:{port}")),
+                "{error}"
+            );
+        }
+        // Nothing was written to the profile on the way to the refusal.
+        assert_eq!(restore_on_startup(profile.path()), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_browser_that_does_not_exit_is_reported_as_not_stopped() {
+        let profile = profile_with(None);
+        // Ignores Browser.close and keeps answering.
+        let endpoint = devtools_socket(|| false).await;
+        let mut holder = hold_profile(profile.path(), port_of(&endpoint));
+
+        let dry = stop_browser_within(&endpoint, profile.path(), true, Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(dry.status, StopStatus::WouldStop);
+        assert!(dry.stopped.not() && dry.failure().is_none());
+
+        let report =
+            stop_browser_within(&endpoint, profile.path(), false, Duration::from_millis(300))
+                .await
+                .unwrap();
+        let _ = holder.kill();
+        let _ = holder.wait();
+
+        assert_eq!(report.status, StopStatus::NotStopped);
+        assert!(report.stopped.not());
+        assert!(
+            report.detail.contains("still answers and still holds"),
+            "{}",
+            report.detail
+        );
+        assert_eq!(
+            serde_json::to_value(&report).unwrap()["status"],
+            "not_stopped"
+        );
+        // The caller ends with an error, so the command exits non-zero.
+        let failure = report.failure().unwrap().to_string();
+        assert!(failure.contains("cookies may not have been written"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_released_endpoint_with_a_held_profile_is_still_not_stopped() {
+        let profile = profile_with(None);
+        // The DevTools port goes away, but the process keeps the profile.
+        let endpoint = devtools_socket(|| true).await;
+        let mut holder = hold_profile(profile.path(), port_of(&endpoint));
+
+        let report =
+            stop_browser_within(&endpoint, profile.path(), false, Duration::from_millis(300))
+                .await
+                .unwrap();
+        let _ = holder.kill();
+        let _ = holder.wait();
+
+        assert_eq!(report.status, StopStatus::NotStopped);
+        assert!(report.stopped.not() && report.failure().is_some());
+        assert!(
+            report.detail.contains("still holds the profile"),
+            "{}",
+            report.detail
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_browser_that_exits_and_releases_the_profile_is_stopped() {
+        let profile = profile_with(None);
+        let lock = profile.path().join("SingletonLock");
+        // Exiting: the port closes and the profile lock is removed.
+        let endpoint = devtools_socket(move || std::fs::remove_file(&lock).is_ok()).await;
+        let mut holder = hold_profile(profile.path(), port_of(&endpoint));
+
+        let report = stop_browser_within(&endpoint, profile.path(), false, Duration::from_secs(10))
+            .await
+            .unwrap();
+        let _ = holder.kill();
+        let _ = holder.wait();
+
+        assert_eq!(report.status, StopStatus::Stopped);
+        assert!(report.stopped && report.failure().is_none());
+        assert!(report.detail.starts_with("closed "), "{}", report.detail);
+        assert_eq!(serde_json::to_value(&report).unwrap()["status"], "stopped");
     }
 }

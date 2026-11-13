@@ -116,12 +116,21 @@ paperbridge browser stop      # clean exit, so cookies are written to the profil
   default the Paperbridge profile): the process holding that profile's lock
   must have been started with the endpoint's `--remote-debugging-port`. Any
   other browser answering at `--cdp-url` is refused, with a message naming
-  what answers there. `--dry-run` reports what would be closed.
+  what answers there. `--dry-run` reports what would be closed. The report's
+  `status` is `stopped` only when Chrome has exited and released the profile;
+  if it is still running after 15 seconds the status is `not_stopped` and the
+  command exits non-zero, because its cookies may not have been written.
+- `--cdp-url` may be the browser's `ws://` address instead of `http://`.
+  `status` and `stop` work on it, and `start` reports a browser that already
+  answers there. Starting a browser needs the `http://` form: a `ws://`
+  address carries an id that Chrome generates at each start.
 - A browser Paperbridge starts runs in its own process group, so it outlives
   the shell or agent that ran `browser start`.
 - `browser status` asks Chrome for its cookie list and reports only how many
   cookies it holds for the gateway host, how many are session cookies, and the
-  earliest and latest expiry. Names and values are discarded unread and are
+  earliest and latest expiry. A cookie counts when the browser would send it
+  to that host: its domain is the host, or it is a domain cookie for the host
+  or a parent of it. Cookies scoped to a subdomain of the host do not count. Names and values are discarded unread and are
   never printed, logged, or stored.
 
 Checked with headless Chrome 157 on Linux: a session cookie set before
@@ -208,8 +217,12 @@ rules to wherever they land. A sign-in page on any of these routes is
 | Wiley | `onlinelibrary.wiley.com` | `/doi/pdfdirect/<doi>?download=true`, then `citation_pdf_url` | same-origin `fetch` |
 | Any other | — | `<meta name="citation_pdf_url">` | same-origin `fetch`, or navigation when the link is on another origin |
 
-A proxied host is recognised in both EZproxy forms:
-`dl.acm.org.ezproxy.example.edu` and `dl-acm-org.example.idm.oclc.org`. A
+A host is a provider's when it is that host or a subdomain of it. A proxied
+host is recognised in both EZproxy forms, `dl.acm.org.ezproxy.example.edu` and
+`dl-acm-org.example.idm.oclc.org`, and only under the host of
+`institution_gateway_url` (for a `login.<proxy>` gateway, also under
+`<proxy>`). A host that merely contains a publisher's name, such as
+`dl.acm.org.other.example`, is treated as any other site. A
 `citation_pdf_url` that names the publisher's own host is rewritten onto the
 proxied origin of the landing page, so the request carries your session.
 
