@@ -151,7 +151,8 @@ Rules for agents:
   never run fetches in parallel.
 - `route` in the result is `direct`, `resolver_menu` (a link on the link
   resolver's menu page was followed), `gateway_publisher`, or `gateway_doi`
-  (the sign-in gateway wrapping the publisher page or `https://doi.org/<doi>`).
+  (the sign-in gateway wrapping the publisher page or `https://doi.org/<doi>`),
+  or `publisher` / `doi` (the same pages without the gateway: an open-access copy).
 - `status: gateway_menu` means the proxy showed its database menu because it
   did not recognise the URL. It is not a sign-in problem: do not ask the user
   to sign in again; report the DOI and move on.

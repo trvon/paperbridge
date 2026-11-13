@@ -437,6 +437,19 @@ fn html_elements_open(html: &str, tag: &str) -> Vec<std::collections::HashMap<St
     found
 }
 
+/// A journal-level page (a table of contents), not an article. A link
+/// resolver can forward to one when it only knows the journal: DOAJ's
+/// `/toc/<id>`, or a publisher's `/toc/<journal>/...` issue listing.
+pub fn journal_level_page(url: &Url) -> bool {
+    let host = url.host_str().unwrap_or_default();
+    let first = url
+        .path_segments()
+        .and_then(|mut segments| segments.find(|segment| segment.is_empty().not()))
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    first == "toc" || (host_is(host, "doaj.org", None) && first == "journal")
+}
+
 /// Evidence, from the landing page's markup, that the publisher shows only a
 /// preview because the session is not entitled to the full text. Read only
 /// after every PDF candidate failed, so a stray marker never hides a PDF.
@@ -472,6 +485,26 @@ mod tests {
     const WILEY: &str = include_str!("../../tests/fixtures/fetch/wiley_landing.html");
     const GENERIC: &str = include_str!("../../tests/fixtures/fetch/generic_landing.html");
     const SPRINGER_PREVIEW: &str = include_str!("../../tests/fixtures/fetch/springer_preview.html");
+
+    #[test]
+    fn journal_tables_of_contents_are_not_articles() {
+        for toc in [
+            "https://doaj.org/toc/06b1b003af9c4e6e9323930c4fd7279a",
+            "https://doaj.org/toc/06b1b003af9c4e6e9323930c4fd7279a?__cf_chl_rt_tk=x",
+            "https://dl.acm.org/toc/csur/2024/56/1",
+            "https://onlinelibrary.wiley.com/toc/10970037/2021/1",
+        ] {
+            assert!(journal_level_page(&url(toc)), "{toc}");
+        }
+        for article in [
+            "https://www.mdpi.com/2076-3417/11/17/7868",
+            "https://doaj.org/article/0123456789abcdef",
+            "https://dl.acm.org/doi/10.1145/3460120.3484766",
+            "https://ieeexplore.ieee.org/document/7346912/",
+        ] {
+            assert!(journal_level_page(&url(article)).not(), "{article}");
+        }
+    }
 
     #[test]
     fn preview_only_reads_springer_no_access_and_ignores_entitled_pages() {

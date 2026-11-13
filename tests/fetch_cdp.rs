@@ -2290,3 +2290,107 @@ async fn session_cookie_survives_a_restart_only_with_restore_on_startup() {
     }
     assert_eq!(survived, vec![true, false], "[with restore, without]");
 }
+
+#[tokio::test]
+async fn resolver_forward_to_a_journal_toc_falls_through_to_the_open_access_publisher_page() {
+    let server = MockServer::start().await;
+    let doi = "10.3390/app11177868";
+    let toc = "https://doaj.org/toc/06b1b003af9c4e6e9323930c4fd7279a";
+    let publisher = "https://www.mdpi.com/2076-3417/11/17/7868";
+    // The resolver knows only the journal and forwards to its DOAJ record.
+    let route = "https://example.search.serialssolutions.com/log?L=X&D=DOA&P=Link";
+    Mock::given(method("GET"))
+        .and(path("/example.search.serialssolutions.com/log"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", toc))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/doaj.org/toc/06b1b003af9c4e6e9323930c4fd7279a"))
+        .respond_with(html(include_str!("fixtures/fetch/doaj_toc.html")))
+        .mount(&server)
+        .await;
+    // The proxy does not carry this open-access publisher.
+    mount_gateway(&server, publisher, DATABASE_MENU_URL).await;
+    mount_gateway(
+        &server,
+        &format!("https://doi.org/{doi}"),
+        DATABASE_MENU_URL,
+    )
+    .await;
+    mount_database_menu(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/www.mdpi.com/2076-3417/11/17/7868"))
+        .respond_with(html(include_str!("fixtures/fetch/mdpi_landing.html")))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/www.mdpi.com/2076-3417/11/17/7868/pdf"))
+        .respond_with(pdf(paper_a()))
+        .mount(&server)
+        .await;
+    let mut mdpi = work(route);
+    mdpi.doi = doi.to_string();
+    let hints = uccs_hints_with_publisher(doi, Some(publisher));
+    let mut connector = MockConnector(MockBrowser::new(&server));
+    let out = tempfile::tempdir().unwrap();
+
+    let outcome = fetch_resolved(
+        None,
+        &mut connector,
+        &mdpi,
+        route,
+        &hints,
+        &FetchOptions {
+            ingest: false,
+            out_dir: Some(out.path().to_path_buf()),
+            ..fast_options()
+        },
+        &mut FetchSession::default(),
+    )
+    .await;
+
+    assert_eq!(outcome.status, FetchStatus::Ok, "{outcome:?}");
+    assert_eq!(outcome.route, Some(FetchRoute::Publisher));
+    assert_eq!(
+        serde_json::to_value(&outcome).unwrap()["route"],
+        "publisher"
+    );
+    assert_eq!(outcome.landing_url.as_deref(), Some(publisher));
+    assert_eq!(outcome.rule.as_deref(), Some("citation_pdf_url"));
+    assert!(connector.0.open_tabs().is_empty());
+}
+
+#[tokio::test]
+async fn journal_toc_with_no_other_route_names_the_journal_level_page() {
+    let server = MockServer::start().await;
+    let toc = "https://doaj.org/toc/06b1b003af9c4e6e9323930c4fd7279a";
+    Mock::given(method("GET"))
+        .and(path("/doaj.org/toc/06b1b003af9c4e6e9323930c4fd7279a"))
+        .respond_with(html(include_str!("fixtures/fetch/doaj_toc.html")))
+        .mount(&server)
+        .await;
+    let mut connector = MockConnector(MockBrowser::new(&server));
+    let out = tempfile::tempdir().unwrap();
+
+    let outcome = fetch_resolved(
+        None,
+        &mut connector,
+        &work(toc),
+        toc,
+        &FetchRouteHints::default(),
+        &FetchOptions {
+            ingest: false,
+            out_dir: Some(out.path().to_path_buf()),
+            ..fast_options()
+        },
+        &mut FetchSession::default(),
+    )
+    .await;
+
+    assert_eq!(outcome.status, FetchStatus::NoPdf, "{outcome:?}");
+    let reason = outcome.reason.unwrap();
+    assert!(
+        reason.contains("is a journal-level page, not the article"),
+        "{reason}"
+    );
+}

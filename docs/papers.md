@@ -193,9 +193,16 @@ Result fields: `doi`, `status`, `reason`, `title`, `route_url`, `landing_url`,
 | `resolver_menu` | the route was the link resolver's menu page (the configured `institution_resolver_url` host); its best link was followed: "Full text" first, then "Article", then "Journal", up to three |
 | `gateway_publisher` | the sign-in gateway (`institution_gateway_url`) wrapping the publisher's landing page from Crossref (an `http://` landing page is wrapped as `https://`: the proxy's insecure form is refused by Chrome); tried first, because proxy configurations match publisher hosts |
 | `gateway_doi` | the sign-in gateway wrapping `https://doi.org/<doi>` |
+| `publisher` | the publisher's landing page from Crossref, without the gateway: an open-access copy the library does not list |
+| `doi` | `https://doi.org/<doi>`, without the gateway |
 
-The gateway routes are used when no resolver-menu link produced a PDF, or when
-the first route ended on the proxy's database menu. For EZproxy the target is
+The fallback routes (gateway first, then `publisher` and `doi`) are used when no
+resolver-menu link produced a PDF, when the first route ended on the proxy's
+database menu, when the direct route's page had no PDF, or when the resolver
+forwarded to a journal-level page (a table of contents such as
+`https://doaj.org/toc/<id>`), which is never treated as the article. The two
+routes without the gateway can only add a PDF; a page on them without one does
+not change the outcome. For EZproxy the target is
 appended to `url=` unencoded
 (`https://proxy.example.edu/login?url=https://doi.org/10.1145/3460120.3484766`):
 EZproxy reads everything after `url=` literally and shows its database menu for
