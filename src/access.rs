@@ -169,29 +169,31 @@ impl InstitutionAccess {
     /// Resolver and gateway routes `papers fetch` may fall back to for a DOI.
     /// Empty when institutional access is off.
     pub fn fetch_route_hints(&self, doi: &str, publisher_url: Option<&str>) -> FetchRouteHints {
+        let doi_url = format!("https://doi.org/{}", doi.trim());
+        // The open routes: the publisher's page and the DOI without the
+        // gateway, for open-access papers the institution routes miss.
+        let open = FetchRouteHints {
+            publisher_url: publisher_url
+                .and_then(https_target)
+                .filter(|target| is_doi_url(target).not())
+                .map(String::from),
+            doi_url: Url::parse(&doi_url).ok().map(String::from),
+            ..FetchRouteHints::default()
+        };
         if self.mode == InstitutionAccessMode::Off {
-            return FetchRouteHints::default();
+            return open;
         }
         let wrap = |target: &str| match (self.gateway_url.as_ref(), self.gateway) {
-            (Some(base), Some(kind)) => Url::parse(target)
-                .ok()
-                .filter(|target| target.scheme() == "https")
+            (Some(base), Some(kind)) => https_target(target)
                 .map(|target| build_gateway_url(base, kind, &target).to_string()),
             _ => None,
-        };
-        let is_doi_host = |target: &str| {
-            Url::parse(target).is_ok_and(|url| {
-                url.host_str()
-                    .is_some_and(|host| host == "doi.org" || host.ends_with(".doi.org"))
-            })
         };
         FetchRouteHints {
             resolver_url: self.resolver_url.clone(),
             gateway_url: self.gateway_url.clone(),
-            gateway_publisher_url: publisher_url
-                .filter(|target| is_doi_host(target).not())
-                .and_then(wrap),
-            gateway_doi_url: wrap(&format!("https://doi.org/{}", doi.trim())),
+            gateway_publisher_url: open.publisher_url.as_deref().and_then(wrap),
+            gateway_doi_url: wrap(&doi_url),
+            ..open
         }
     }
 
@@ -478,6 +480,28 @@ fn parse_target_url(raw: &str) -> Result<Url> {
     Ok(url)
 }
 
+/// A gateway target over HTTPS. Crossref registers many publisher landing
+/// pages as `http://` (IEEE, Springer). Wrapped as is, EZproxy serves them on
+/// an insecure proxied host (`http://ieeexplore.ieee.org.<proxy>/...`) that
+/// Chrome refuses to open (`net::ERR_BLOCKED_BY_CLIENT`), so the publisher
+/// route was dropped. Publishers serve the same page over HTTPS.
+fn is_doi_url(target: &Url) -> bool {
+    target
+        .host_str()
+        .is_some_and(|host| host == "doi.org" || host.ends_with(".doi.org"))
+}
+
+fn https_target(raw: &str) -> Option<Url> {
+    let mut target = Url::parse(raw).ok()?;
+    if target.scheme() == "http" {
+        target.set_scheme("https").ok()?;
+        if target.port() == Some(80) {
+            target.set_port(None).ok()?;
+        }
+    }
+    (target.scheme() == "https").then_some(target)
+}
+
 fn build_gateway_url(base: &Url, kind: InstitutionGatewayKind, target: &Url) -> Url {
     let mut result = base.clone();
     match kind {
@@ -673,6 +697,11 @@ pub struct FetchRouteHints {
     pub gateway_publisher_url: Option<String>,
     /// The sign-in gateway wrapping `https://doi.org/<doi>`.
     pub gateway_doi_url: Option<String>,
+    /// The publisher's landing page from Crossref (as `https://`), opened
+    /// without the gateway: an open-access paper needs no institution.
+    pub publisher_url: Option<String>,
+    /// `https://doi.org/<doi>`, opened without the gateway.
+    pub doi_url: Option<String>,
 }
 
 impl FetchRouteHints {
@@ -1021,7 +1050,7 @@ mod tests {
     }
 
     #[test]
-    fn fetch_route_hints_wrap_the_doi_in_the_gateway_and_are_empty_when_off() {
+    fn fetch_route_hints_wrap_the_doi_in_the_gateway_and_have_no_gateway_when_off() {
         let access = InstitutionAccess::new_profile(
             InstitutionAccessMode::Fallback,
             None,
@@ -1046,12 +1075,35 @@ mod tests {
                 "https://uccs.idm.oclc.org/login?url=https://ieeexplore.ieee.org/document/11571613/?arnumber=11571613&x=1"
             )
         );
-        // A Crossref resource that is only the DOI link adds nothing.
-        assert!(
+        // Crossref's `http://` publisher pages are wrapped as HTTPS: the
+        // proxy cannot serve the insecure form to Chrome.
+        assert_eq!(
             access
-                .fetch_route_hints("10.1/x", Some("https://doi.org/10.1/x"))
+                .fetch_route_hints(
+                    "10.1109/CNS.2015.7346912",
+                    Some("http://ieeexplore.ieee.org/document/7346912/")
+                )
                 .gateway_publisher_url
-                .is_none()
+                .as_deref(),
+            Some(
+                "https://uccs.idm.oclc.org/login?url=https://ieeexplore.ieee.org/document/7346912/"
+            )
+        );
+        // A Crossref resource that is only the DOI link adds nothing.
+        let doi_only = access.fetch_route_hints("10.1/x", Some("https://doi.org/10.1/x"));
+        assert!(doi_only.gateway_publisher_url.is_none() && doi_only.publisher_url.is_none());
+        // The open routes, without the gateway, for open-access papers.
+        let open = access.fetch_route_hints(
+            "10.3390/app11177868",
+            Some("http://www.mdpi.com/2076-3417/11/17/7868"),
+        );
+        assert_eq!(
+            open.publisher_url.as_deref(),
+            Some("https://www.mdpi.com/2076-3417/11/17/7868")
+        );
+        assert_eq!(
+            open.doi_url.as_deref(),
+            Some("https://doi.org/10.3390/app11177868")
         );
         assert!(
             hints.is_resolver_menu(
@@ -1068,7 +1120,11 @@ mod tests {
         );
 
         let off = InstitutionAccess::disabled().fetch_route_hints("10.1/x", None);
-        assert!(off.resolver_url.is_none() && off.gateway_doi_url.is_none());
+        assert!(
+            off.resolver_url.is_none()
+                && off.gateway_doi_url.is_none()
+                && off.gateway_publisher_url.is_none()
+        );
         let resolver_only = InstitutionAccess::new_profile(
             InstitutionAccessMode::Fallback,
             None,

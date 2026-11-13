@@ -270,8 +270,10 @@ cookie across restarts. On the Microsoft sign-in page, tick "Stay signed in".
 `browser status` reports cookie counts and expiry times only, never values.
 
 Each result has `status`: `ok`, `auth_required`, `no_pdf`, `gateway_menu` (the
-proxy did not recognise the URL), or `failed`, with a `reason`, and `route`
-(`direct`, `resolver_menu`, `gateway_publisher`, or `gateway_doi`) for how the
+proxy did not recognise the URL), `not_entitled` (the publisher shows a preview
+only), or `failed`, with a `reason`, and `route`
+(`direct`, `resolver_menu`, `gateway_publisher`, `gateway_doi`, or, for an
+open-access copy, `publisher` or `doi`) for how the
 publisher page was reached. A non-`ok` result exits non-zero. Paperbridge stores no credentials
 or cookies; the session stays in your browser profile. Details and the
 provider rule table: [docs/papers.md](docs/papers.md#fetch-through-your-signed-in-chrome).

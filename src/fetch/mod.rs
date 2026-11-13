@@ -65,6 +65,9 @@ pub enum FetchStatus {
     /// The proxy showed its database menu: it did not recognise the target
     /// URL. Not a sign-in problem.
     GatewayMenu,
+    /// The publisher page shows a preview only: the session reached it but
+    /// is not entitled to the full text. Not a sign-in problem.
+    NotEntitled,
     #[default]
     Failed,
 }
@@ -84,8 +87,9 @@ pub struct FetchOutcome {
     pub landing_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<Provider>,
-    /// How the publisher page was reached: `direct`, `resolver_menu`, or
-    /// `gateway_doi`. Absent when no browser tab was opened.
+    /// How the publisher page was reached: `direct`, `resolver_menu`,
+    /// `gateway_publisher`, `gateway_doi`, `publisher`, or `doi`. Absent when
+    /// no browser tab was opened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<FetchRoute>,
     /// The provider rule that produced the PDF URL.
@@ -144,6 +148,10 @@ pub enum FetchRoute {
     GatewayPublisher,
     /// The sign-in gateway wrapping `https://doi.org/<doi>`.
     GatewayDoi,
+    /// The publisher's landing page without the gateway (open access).
+    Publisher,
+    /// `https://doi.org/<doi>` without the gateway (open access).
+    Doi,
 }
 
 /// Result of the browser stage alone.
@@ -171,6 +179,13 @@ pub enum BrowserFetch {
     /// Every route ended on the proxy's database menu.
     GatewayMenu {
         tab_url: String,
+        reason: String,
+        route: FetchRoute,
+    },
+    /// The publisher page offers a preview only.
+    NotEntitled {
+        landing_url: String,
+        provider: Provider,
         reason: String,
         route: FetchRoute,
     },
@@ -246,6 +261,11 @@ enum Landing {
     NoPdf {
         attempts: Vec<String>,
     },
+    /// No candidate returned a PDF and the page says it is a preview.
+    NotEntitled {
+        evidence: &'static str,
+        attempts: Vec<String>,
+    },
 }
 
 fn finish(
@@ -276,6 +296,21 @@ fn finish(
             reason: format!("{what} is a sign-in page; Paperbridge does not enter credentials"),
             route,
         },
+        Landing::NotEntitled { evidence, attempts } => {
+            let mut reason = format!(
+                "the {} page shows a preview only ({evidence}): this session is not entitled to the full text",
+                provider.as_str()
+            );
+            if attempts.is_empty().not() {
+                reason.push_str(&format!("; tried: {}", attempts.join("; ")));
+            }
+            BrowserFetch::NotEntitled {
+                landing_url: page.url.clone(),
+                provider,
+                reason,
+                route,
+            }
+        }
         Landing::NoPdf { attempts } => {
             let mut all: Vec<String> = notes.to_vec();
             all.extend(attempts);
@@ -322,7 +357,10 @@ async fn drive_tab(
             gateway,
         )
     };
-    let gateway_routes = || {
+    // Routes tried when the first route is not the article: the gateway
+    // forms first, then the publisher page and the DOI without the gateway,
+    // which is where an open-access paper the library does not list is.
+    let fallback_routes = || {
         [
             (
                 FetchRoute::GatewayPublisher,
@@ -334,10 +372,16 @@ async fn drive_tab(
                 "gateway DOI route",
                 hints.gateway_doi_url.as_ref(),
             ),
+            (
+                FetchRoute::Publisher,
+                "publisher route",
+                hints.publisher_url.as_ref(),
+            ),
+            (FetchRoute::Doi, "DOI route", hints.doi_url.as_ref()),
         ]
         .into_iter()
         .filter_map(|(route, label, url)| url.map(|url| (route, label.to_string(), url.clone())))
-        .filter(|(_, _, url)| url != route_url)
+        .filter(|(_, _, url)| url != route_url && *url != landing.url)
     };
 
     let mut notes: Vec<String> = Vec::new();
@@ -346,13 +390,16 @@ async fn drive_tab(
     // page the provider rules could be applied to.
     let mut gateway_menu: Option<(PageState, FetchRoute)> = None;
     let mut reached_content = false;
+    // A publisher page that showed a preview only, kept in case no later
+    // route finds a PDF.
+    let mut preview: Option<(Landing, PageState, FetchRoute)> = None;
     let on_resolver_menu = Url::parse(&landing.url).is_ok_and(|page| hints.is_resolver_menu(&page));
     match page_kind(tab, &landing).await? {
         PageKind::SignIn => return Ok(sign_in(&landing, FetchRoute::Direct)),
         PageKind::GatewayMenu => {
             notes.push(format!("direct: {GATEWAY_MENU_REASON}"));
             gateway_menu = Some((landing.clone(), FetchRoute::Direct));
-            routes.extend(gateway_routes());
+            routes.extend(fallback_routes());
         }
         _ if on_resolver_menu => {
             // The link resolver showed its menu instead of redirecting.
@@ -372,12 +419,42 @@ async fn drive_tab(
                     link.url,
                 )
             }));
-            routes.extend(gateway_routes());
+            routes.extend(fallback_routes());
         }
-        _ => {
-            let result = try_landing(tab, &landing, doi, gateway, options).await?;
-            return Ok(finish(result, &landing, FetchRoute::Direct, &[], gateway));
+        // The resolver forwarded to a journal's table of contents: it knew
+        // the journal, not the article. Nothing on it is this paper's PDF.
+        _ if Url::parse(&landing.url).is_ok_and(|page| providers::journal_level_page(&page)) => {
+            notes.push(format!(
+                "direct: {} is a journal-level page, not the article",
+                landing.url
+            ));
+            routes.extend(fallback_routes());
         }
+        _ => match try_landing(tab, &landing, doi, gateway, options).await? {
+            Landing::NoPdf { attempts } if fallback_routes().next().is_some() => {
+                reached_content = true;
+                if attempts.is_empty() {
+                    notes.push(format!("direct: no PDF rule matched {}", landing.url));
+                }
+                notes.extend(
+                    attempts
+                        .into_iter()
+                        .map(|attempt| format!("direct: {attempt}")),
+                );
+                routes.extend(fallback_routes());
+            }
+            Landing::NotEntitled { evidence, attempts } if fallback_routes().next().is_some() => {
+                reached_content = true;
+                notes.push(format!("direct: {} shows a preview only", landing.url));
+                preview = Some((
+                    Landing::NotEntitled { evidence, attempts },
+                    landing.clone(),
+                    FetchRoute::Direct,
+                ));
+                routes.extend(fallback_routes());
+            }
+            result => return Ok(finish(result, &landing, FetchRoute::Direct, &[], gateway)),
+        },
     }
 
     let mut last_page = landing.clone();
@@ -387,10 +464,14 @@ async fn drive_tab(
         FetchRoute::Direct
     };
     for (route, label, url) in routes {
+        // The routes without the gateway are a last try for an open-access
+        // copy. They can only add a PDF: their pages are not the
+        // institution's answer, so they never decide the outcome otherwise.
+        let open = matches!(route, FetchRoute::Publisher | FetchRoute::Doi);
         let state = match tab.navigate(&url).await {
             Ok(state) => state,
             Err(error) => {
-                notes.push(format!("{label}: {error}"));
+                notes.push(format!("{label}: {}", navigation_note(&error.to_string())));
                 continue;
             }
         };
@@ -399,7 +480,15 @@ async fn drive_tab(
             continue;
         }
         match page_kind(tab, &state).await? {
+            PageKind::SignIn if open => {
+                notes.push(format!("{label}: {} is a sign-in page", state.url));
+                continue;
+            }
             PageKind::SignIn => return Ok(sign_in(&state, route)),
+            PageKind::GatewayMenu if open => {
+                notes.push(format!("{label}: {GATEWAY_MENU_REASON} ({url})"));
+                continue;
+            }
             PageKind::GatewayMenu => {
                 notes.push(format!("{label}: {GATEWAY_MENU_REASON} ({url})"));
                 gateway_menu = Some((state, route));
@@ -407,8 +496,10 @@ async fn drive_tab(
             }
             _ => {}
         }
-        reached_content = true;
-        last_route = route;
+        if open.not() {
+            reached_content = true;
+            last_route = route;
+        }
         match try_landing(tab, &state, doi, gateway, options).await? {
             Landing::NoPdf { attempts } => {
                 if attempts.is_empty() {
@@ -419,7 +510,30 @@ async fn drive_tab(
                         .into_iter()
                         .map(|attempt| format!("{label}: {attempt}")),
                 );
-                last_page = state;
+                if open.not() {
+                    last_page = state;
+                }
+            }
+            Landing::NotEntitled { .. } if open => {
+                notes.push(format!("{label}: {} shows a preview only", state.url));
+            }
+            // A PDF request from an open page that redirects to an identity
+            // provider is not the institution asking for sign-in.
+            Landing::Auth { tab_url, what } if open => {
+                notes.push(format!("{label}: {tab_url} asks for sign-in ({what})"));
+            }
+            // Through the gateway the publisher itself said the session has
+            // no entitlement; another route to the same publisher will not
+            // change that. A resolver link may still lead to another host.
+            Landing::NotEntitled { evidence, attempts } => {
+                if matches!(route, FetchRoute::GatewayPublisher | FetchRoute::GatewayDoi) {
+                    let found = Landing::NotEntitled { evidence, attempts };
+                    return Ok(finish(found, &state, route, &[], gateway));
+                }
+                notes.push(format!("{label}: {} shows a preview only", state.url));
+                if preview.is_none() {
+                    preview = Some((Landing::NotEntitled { evidence, attempts }, state, route));
+                }
             }
             found => return Ok(finish(found, &state, route, &[], gateway)),
         }
@@ -430,6 +544,9 @@ async fn drive_tab(
             reason: format!("{GATEWAY_MENU_REASON}: {}", notes.join("; ")),
             route,
         });
+    }
+    if let Some((found, page, route)) = preview {
+        return Ok(finish(found, &page, route, &[], gateway));
     }
     Ok(finish(
         Landing::NoPdf {
@@ -538,7 +655,21 @@ async fn try_landing(
             Err(error) => attempts.push(format!("{}: {error}", candidate.rule)),
         }
     }
+    if let Some(evidence) = providers::preview_only(&html) {
+        return Ok(Landing::NotEntitled { evidence, attempts });
+    }
     Ok(Landing::NoPdf { attempts })
+}
+
+/// A failed navigation, explained when Chrome's own error code is opaque.
+fn navigation_note(error: &str) -> String {
+    if error.contains("ERR_BLOCKED_BY_CLIENT") {
+        format!(
+            "{error} (Chrome refused the page; a DOI that redirects to an http:// publisher URL comes back from the proxy on an insecure proxied host)"
+        )
+    } else {
+        error.to_string()
+    }
 }
 
 /// Paperseed metadata for a Crossref record, so the corpus entry carries the
@@ -885,6 +1016,23 @@ pub async fn fetch_resolved(
             );
             return outcome;
         }
+        BrowserFetch::NotEntitled {
+            landing_url,
+            provider,
+            reason,
+            route,
+        } => {
+            outcome.route = Some(route);
+            outcome.status = FetchStatus::NotEntitled;
+            outcome.landing_url = Some(landing_url);
+            outcome.provider = Some(provider);
+            outcome.reason = Some(reason);
+            outcome.next = Some(
+                "The library does not license the full text; signing in again changes nothing. Request it through interlibrary loan or from the authors."
+                    .to_string(),
+            );
+            return outcome;
+        }
         BrowserFetch::NoPdf {
             landing_url,
             provider,
@@ -1204,6 +1352,7 @@ mod tests {
             (FetchStatus::Ok, "ok"),
             (FetchStatus::AuthRequired, "auth_required"),
             (FetchStatus::NoPdf, "no_pdf"),
+            (FetchStatus::NotEntitled, "not_entitled"),
             (FetchStatus::GatewayMenu, "gateway_menu"),
             (FetchStatus::Failed, "failed"),
         ] {
