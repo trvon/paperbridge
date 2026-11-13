@@ -219,6 +219,94 @@ fn yams_index_sends_title_path_and_text() {
     assert!(args.iter().any(|arg| arg == "--verify"));
 }
 
+/// What `yams add` does with one `--metadata=` argument: CLI11 splits it on
+/// every `,`, then each piece must be `key=value`
+/// ("Metadata entries must be formatted as key=value").
+fn yams_metadata_entries(arg: &str) -> Vec<(String, String)> {
+    let raw = arg
+        .strip_prefix("--metadata=")
+        .expect("a --metadata argument");
+    raw.split(',')
+        .map(|piece| {
+            let (key, value) = piece
+                .split_once('=')
+                .unwrap_or_else(|| panic!("yams would reject {piece:?} from {arg:?}"));
+            (key.trim().to_string(), value.trim().to_string())
+        })
+        .collect()
+}
+
+#[test]
+fn yams_index_metadata_survives_commas_in_title_authors_and_venue() {
+    let runner = FakeRunner::new(YamsOutput {
+        status_success: true,
+        stdout: r#"{"hash":"comma-hash"}"#.to_string(),
+        stderr: String::new(),
+    });
+    let config = YamsConfig {
+        enabled: true,
+        binary: PathBuf::from("yams"),
+    };
+    let mut paper = fake_paper();
+    paper.metadata.title =
+        "ID2T: A DIY dataset creation toolkit, for Intrusion\nDetection Systems".to_string();
+    // Crossref names arrive as `Family, Given`.
+    paper.metadata.authors = vec![
+        "Cordero, Carlos Garcia".to_string(),
+        "Vasilomanolakis, Emmanouil".to_string(),
+        "Muhlhauser, Max, Jr.".to_string(),
+    ];
+    paper.metadata.venue =
+        Some("2015 IEEE Conference on Communications, and Network Security".to_string());
+    paper.metadata.source_url = Some("https://example.test/a,b?x=1".to_string());
+
+    assert_eq!(
+        index_paper_with_runner(
+            &config,
+            &runner,
+            YamsIndexRequest {
+                paper: &paper,
+                full_text: None
+            }
+        ),
+        Some("comma-hash".to_string())
+    );
+
+    let calls = runner.calls.borrow();
+    let args = &calls[0];
+    let metadata: Vec<(String, String)> = args
+        .iter()
+        .filter(|arg| arg.starts_with("--metadata="))
+        .flat_map(|arg| yams_metadata_entries(arg))
+        .collect();
+    let value = |key: &str| {
+        let matches: Vec<&String> = metadata
+            .iter()
+            .filter(|(name, _)| name == key)
+            .map(|(_, value)| value)
+            .collect();
+        assert_eq!(matches.len(), 1, "one {key} entry in {metadata:?}");
+        matches[0].clone()
+    };
+    assert_eq!(
+        value("authors"),
+        "Carlos Garcia Cordero; Emmanouil Vasilomanolakis; Muhlhauser; Max; Jr."
+    );
+    assert_eq!(
+        value("venue"),
+        "2015 IEEE Conference on Communications; and Network Security"
+    );
+    assert_eq!(value("source_url"), "https://example.test/a;b?x=1");
+    assert_eq!(value("doi"), "10.1/yams");
+    // `--name` is not split on commas, so the title keeps them; the line
+    // break YAMS would reject as a control character becomes a space.
+    assert!(
+        args.iter().any(|arg| arg
+            == "--name=ID2T: A DIY dataset creation toolkit, for Intrusion Detection Systems"),
+        "{args:?}"
+    );
+}
+
 #[test]
 fn index_paper_tags_books_cleanly() {
     let runner = FakeRunner::new(YamsOutput {

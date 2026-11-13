@@ -1,6 +1,7 @@
 use crate::db::QueryHit;
 use crate::models::LocalPaper;
 use serde::{Deserialize, Serialize};
+use std::ops::Not;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -259,7 +260,7 @@ pub fn index_paper_with_runner(
         "--json".to_string(),
         "add".to_string(),
         request.paper.file.path.display().to_string(),
-        format!("--name={}", request.paper.metadata.title),
+        format!("--name={}", name_value(&request.paper.metadata.title)),
         if is_book {
             "--tags=paperseed,paperbridge,book".to_string()
         } else {
@@ -270,37 +271,41 @@ pub fn index_paper_with_runner(
         } else {
             "--collection=paperbridge".to_string()
         },
-        format!("--metadata=paperseed_id={}", request.paper.metadata.id),
-        format!(
-            "--metadata=doi={}",
-            request.paper.metadata.doi.as_deref().unwrap_or_default()
+        metadata_arg("paperseed_id", &request.paper.metadata.id),
+        metadata_arg(
+            "doi",
+            request.paper.metadata.doi.as_deref().unwrap_or_default(),
         ),
         // Char count, not byte length — YAMS metadata is informational and
         // `text.len()` over-reports for non-ASCII titles/authors/full text.
         format!("--metadata=paperseed_text_chars={}", text.chars().count()),
     ];
     if let Some(work_type) = request.paper.metadata.work_type.as_deref() {
-        args.push(format!("--metadata=work_type={work_type}"));
+        args.push(metadata_arg("work_type", work_type));
     } else if is_book {
         args.push("--metadata=work_type=book".to_string());
     }
     if let Some(isbn) = request.paper.metadata.isbn.as_deref() {
-        args.push(format!("--metadata=isbn={isbn}"));
+        args.push(metadata_arg("isbn", isbn));
     }
     if !request.paper.metadata.authors.is_empty() {
-        args.push(format!(
-            "--metadata=authors={}",
-            request.paper.metadata.authors.join("; ")
-        ));
+        let authors: Vec<String> = request
+            .paper
+            .metadata
+            .authors
+            .iter()
+            .map(|author| display_author(author))
+            .collect();
+        args.push(metadata_arg("authors", &authors.join("; ")));
     }
     if let Some(year) = request.paper.metadata.year {
         args.push(format!("--metadata=year={year}"));
     }
     if let Some(venue) = request.paper.metadata.venue.as_deref() {
-        args.push(format!("--metadata=venue={venue}"));
+        args.push(metadata_arg("venue", venue));
     }
     if let Some(source_url) = request.paper.metadata.source_url.as_deref() {
-        args.push(format!("--metadata=source_url={source_url}"));
+        args.push(metadata_arg("source_url", source_url));
     }
     args.extend([
         "--no-session".to_string(),
@@ -328,6 +333,62 @@ pub fn index_paper_with_runner(
         return None;
     }
     parse_add_hash(&output.stdout)
+}
+
+/// `yams add` caps `--name` at this many bytes and rejects longer names.
+const YAMS_MAX_NAME_BYTES: usize = 256;
+/// `yams add` rejects a metadata value longer than this many bytes.
+const YAMS_MAX_METADATA_VALUE_BYTES: usize = 4096;
+
+/// One `--metadata=key=value` argument that `yams add` accepts as one entry.
+///
+/// `yams add` splits every `--metadata` argument on `,` (CLI11 delimiter,
+/// no escaping) and then requires each piece to be `key=value`, so a comma
+/// in a value (`Cordero, Carlos Garcia`) produced a piece without `=` and
+/// the whole add failed. Commas become `;`, line breaks and other control
+/// characters become spaces, and the value is cut to the length YAMS takes.
+fn metadata_arg(key: &str, value: &str) -> String {
+    let value = clean_value(value).replace(',', ";");
+    format!(
+        "--metadata={key}={}",
+        truncate_bytes(&value, YAMS_MAX_METADATA_VALUE_BYTES)
+    )
+}
+
+/// The `--name` value: not split on commas, but YAMS rejects control
+/// characters and names over its length limit.
+fn name_value(title: &str) -> String {
+    truncate_bytes(&clean_value(title), YAMS_MAX_NAME_BYTES).to_string()
+}
+
+/// An author as `First Last` when stored as `Last, First`, so the metadata
+/// value needs no comma to stay readable.
+fn display_author(author: &str) -> String {
+    match author.split_once(',') {
+        Some((last, first)) if first.contains(',').not() && first.trim().is_empty().not() => {
+            format!("{} {}", first.trim(), last.trim())
+        }
+        _ => author.trim().to_string(),
+    }
+}
+
+fn clean_value(value: &str) -> String {
+    value
+        .split(|ch: char| ch.is_control())
+        .flat_map(str::split_whitespace)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn truncate_bytes(value: &str, max: usize) -> &str {
+    if value.len() <= max {
+        return value;
+    }
+    let mut end = max;
+    while value.is_char_boundary(end).not() {
+        end -= 1;
+    }
+    &value[..end]
 }
 
 pub fn download_with_runner(
