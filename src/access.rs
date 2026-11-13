@@ -173,9 +173,7 @@ impl InstitutionAccess {
             return FetchRouteHints::default();
         }
         let wrap = |target: &str| match (self.gateway_url.as_ref(), self.gateway) {
-            (Some(base), Some(kind)) => Url::parse(target)
-                .ok()
-                .filter(|target| target.scheme() == "https")
+            (Some(base), Some(kind)) => https_target(target)
                 .map(|target| build_gateway_url(base, kind, &target).to_string()),
             _ => None,
         };
@@ -476,6 +474,22 @@ fn parse_target_url(raw: &str) -> Result<Url> {
         ));
     }
     Ok(url)
+}
+
+/// A gateway target over HTTPS. Crossref registers many publisher landing
+/// pages as `http://` (IEEE, Springer). Wrapped as is, EZproxy serves them on
+/// an insecure proxied host (`http://ieeexplore.ieee.org.<proxy>/...`) that
+/// Chrome refuses to open (`net::ERR_BLOCKED_BY_CLIENT`), so the publisher
+/// route was dropped. Publishers serve the same page over HTTPS.
+fn https_target(raw: &str) -> Option<Url> {
+    let mut target = Url::parse(raw).ok()?;
+    if target.scheme() == "http" {
+        target.set_scheme("https").ok()?;
+        if target.port() == Some(80) {
+            target.set_port(None).ok()?;
+        }
+    }
+    (target.scheme() == "https").then_some(target)
 }
 
 fn build_gateway_url(base: &Url, kind: InstitutionGatewayKind, target: &Url) -> Url {
@@ -1044,6 +1058,20 @@ mod tests {
             hints.gateway_publisher_url.as_deref(),
             Some(
                 "https://uccs.idm.oclc.org/login?url=https://ieeexplore.ieee.org/document/11571613/?arnumber=11571613&x=1"
+            )
+        );
+        // Crossref's `http://` publisher pages are wrapped as HTTPS: the
+        // proxy cannot serve the insecure form to Chrome.
+        assert_eq!(
+            access
+                .fetch_route_hints(
+                    "10.1109/CNS.2015.7346912",
+                    Some("http://ieeexplore.ieee.org/document/7346912/")
+                )
+                .gateway_publisher_url
+                .as_deref(),
+            Some(
+                "https://uccs.idm.oclc.org/login?url=https://ieeexplore.ieee.org/document/7346912/"
             )
         );
         // A Crossref resource that is only the DOI link adds nothing.

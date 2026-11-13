@@ -65,6 +65,9 @@ pub enum FetchStatus {
     /// The proxy showed its database menu: it did not recognise the target
     /// URL. Not a sign-in problem.
     GatewayMenu,
+    /// The publisher page shows a preview only: the session reached it but
+    /// is not entitled to the full text. Not a sign-in problem.
+    NotEntitled,
     #[default]
     Failed,
 }
@@ -174,6 +177,13 @@ pub enum BrowserFetch {
         reason: String,
         route: FetchRoute,
     },
+    /// The publisher page offers a preview only.
+    NotEntitled {
+        landing_url: String,
+        provider: Provider,
+        reason: String,
+        route: FetchRoute,
+    },
 }
 
 /// Resolver-menu links followed before falling back to the gateway route.
@@ -246,6 +256,11 @@ enum Landing {
     NoPdf {
         attempts: Vec<String>,
     },
+    /// No candidate returned a PDF and the page says it is a preview.
+    NotEntitled {
+        evidence: &'static str,
+        attempts: Vec<String>,
+    },
 }
 
 fn finish(
@@ -276,6 +291,21 @@ fn finish(
             reason: format!("{what} is a sign-in page; Paperbridge does not enter credentials"),
             route,
         },
+        Landing::NotEntitled { evidence, attempts } => {
+            let mut reason = format!(
+                "the {} page shows a preview only ({evidence}): this session is not entitled to the full text",
+                provider.as_str()
+            );
+            if attempts.is_empty().not() {
+                reason.push_str(&format!("; tried: {}", attempts.join("; ")));
+            }
+            BrowserFetch::NotEntitled {
+                landing_url: page.url.clone(),
+                provider,
+                reason,
+                route,
+            }
+        }
         Landing::NoPdf { attempts } => {
             let mut all: Vec<String> = notes.to_vec();
             all.extend(attempts);
@@ -346,6 +376,9 @@ async fn drive_tab(
     // page the provider rules could be applied to.
     let mut gateway_menu: Option<(PageState, FetchRoute)> = None;
     let mut reached_content = false;
+    // A publisher page that showed a preview only, kept in case no later
+    // route finds a PDF.
+    let mut preview: Option<(Landing, PageState, FetchRoute)> = None;
     let on_resolver_menu = Url::parse(&landing.url).is_ok_and(|page| hints.is_resolver_menu(&page));
     match page_kind(tab, &landing).await? {
         PageKind::SignIn => return Ok(sign_in(&landing, FetchRoute::Direct)),
@@ -390,7 +423,7 @@ async fn drive_tab(
         let state = match tab.navigate(&url).await {
             Ok(state) => state,
             Err(error) => {
-                notes.push(format!("{label}: {error}"));
+                notes.push(format!("{label}: {}", navigation_note(&error.to_string())));
                 continue;
             }
         };
@@ -421,6 +454,19 @@ async fn drive_tab(
                 );
                 last_page = state;
             }
+            // Through the gateway the publisher itself said the session has
+            // no entitlement; another route to the same publisher will not
+            // change that. A resolver link may still lead to another host.
+            Landing::NotEntitled { evidence, attempts } => {
+                if matches!(route, FetchRoute::GatewayPublisher | FetchRoute::GatewayDoi) {
+                    let found = Landing::NotEntitled { evidence, attempts };
+                    return Ok(finish(found, &state, route, &[], gateway));
+                }
+                notes.push(format!("{label}: {} shows a preview only", state.url));
+                if preview.is_none() {
+                    preview = Some((Landing::NotEntitled { evidence, attempts }, state, route));
+                }
+            }
             found => return Ok(finish(found, &state, route, &[], gateway)),
         }
     }
@@ -430,6 +476,9 @@ async fn drive_tab(
             reason: format!("{GATEWAY_MENU_REASON}: {}", notes.join("; ")),
             route,
         });
+    }
+    if let Some((found, page, route)) = preview {
+        return Ok(finish(found, &page, route, &[], gateway));
     }
     Ok(finish(
         Landing::NoPdf {
@@ -538,7 +587,21 @@ async fn try_landing(
             Err(error) => attempts.push(format!("{}: {error}", candidate.rule)),
         }
     }
+    if let Some(evidence) = providers::preview_only(&html) {
+        return Ok(Landing::NotEntitled { evidence, attempts });
+    }
     Ok(Landing::NoPdf { attempts })
+}
+
+/// A failed navigation, explained when Chrome's own error code is opaque.
+fn navigation_note(error: &str) -> String {
+    if error.contains("ERR_BLOCKED_BY_CLIENT") {
+        format!(
+            "{error} (Chrome refused the page; a DOI that redirects to an http:// publisher URL comes back from the proxy on an insecure proxied host)"
+        )
+    } else {
+        error.to_string()
+    }
 }
 
 /// Paperseed metadata for a Crossref record, so the corpus entry carries the
@@ -885,6 +948,23 @@ pub async fn fetch_resolved(
             );
             return outcome;
         }
+        BrowserFetch::NotEntitled {
+            landing_url,
+            provider,
+            reason,
+            route,
+        } => {
+            outcome.route = Some(route);
+            outcome.status = FetchStatus::NotEntitled;
+            outcome.landing_url = Some(landing_url);
+            outcome.provider = Some(provider);
+            outcome.reason = Some(reason);
+            outcome.next = Some(
+                "The library does not license the full text; signing in again changes nothing. Request it through interlibrary loan or from the authors."
+                    .to_string(),
+            );
+            return outcome;
+        }
         BrowserFetch::NoPdf {
             landing_url,
             provider,
@@ -1204,6 +1284,7 @@ mod tests {
             (FetchStatus::Ok, "ok"),
             (FetchStatus::AuthRequired, "auth_required"),
             (FetchStatus::NoPdf, "no_pdf"),
+            (FetchStatus::NotEntitled, "not_entitled"),
             (FetchStatus::GatewayMenu, "gateway_menu"),
             (FetchStatus::Failed, "failed"),
         ] {

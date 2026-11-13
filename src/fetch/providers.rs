@@ -437,6 +437,29 @@ fn html_elements_open(html: &str, tag: &str) -> Vec<std::collections::HashMap<St
     found
 }
 
+/// Evidence, from the landing page's markup, that the publisher shows only a
+/// preview because the session is not entitled to the full text. Read only
+/// after every PDF candidate failed, so a stray marker never hides a PDF.
+pub fn preview_only(html: &str) -> Option<&'static str> {
+    // Springer Nature's data layer: `"Access Type":"no-access"` on a page
+    // that offers a preview and a buy box; entitled pages say otherwise.
+    const MARKERS: [(&str, &str); 2] = [
+        (
+            "\"access type\":\"no-access\"",
+            "the page reports Access Type no-access",
+        ),
+        (
+            "preview of subscription content",
+            "the page offers a preview of subscription content",
+        ),
+    ];
+    let lowercase = html.to_ascii_lowercase();
+    MARKERS
+        .iter()
+        .find(|(marker, _)| lowercase.contains(marker))
+        .map(|(_, evidence)| *evidence)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,6 +471,18 @@ mod tests {
         include_str!("../../tests/fixtures/fetch/sciencedirect_landing.html");
     const WILEY: &str = include_str!("../../tests/fixtures/fetch/wiley_landing.html");
     const GENERIC: &str = include_str!("../../tests/fixtures/fetch/generic_landing.html");
+    const SPRINGER_PREVIEW: &str = include_str!("../../tests/fixtures/fetch/springer_preview.html");
+
+    #[test]
+    fn preview_only_reads_springer_no_access_and_ignores_entitled_pages() {
+        assert_eq!(
+            preview_only(SPRINGER_PREVIEW),
+            Some("the page reports Access Type no-access")
+        );
+        for entitled in [SPRINGER, ACM, IEEE, SCIENCEDIRECT, WILEY, GENERIC] {
+            assert_eq!(preview_only(entitled), None);
+        }
+    }
 
     fn url(raw: &str) -> Url {
         Url::parse(raw).unwrap()

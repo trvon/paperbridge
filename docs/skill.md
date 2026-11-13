@@ -155,6 +155,9 @@ Rules for agents:
 - `status: gateway_menu` means the proxy showed its database menu because it
   did not recognise the URL. It is not a sign-in problem: do not ask the user
   to sign in again; report the DOI and move on.
+- `status: not_entitled` means the publisher page loaded but shows a preview
+  only: the library does not license it. Do not ask the user to sign in again;
+  report it.
 - "No Chrome DevTools endpoint" means that Chrome is not running. Run
   `paperbridge browser start` (it sets the profile to restore its session, so
   a sign-in survives restarts) or ask the user to; `paperbridge browser status`
@@ -207,7 +210,7 @@ MCP tools:
 
 - `open_paper { hit_id|doi|arxiv_id|isbn|item_key|paper_id|attachment_key|url, want, chapter?, max_chars?, offset? }` — preferred; use `want: ["toc"]` to inspect book TOC, or `chapter: N` (requires `want` to include `chapter`, `fulltext`, or `chunks`); use `next_offset` to continue fulltext
 - `resolve_source_access { doi?, url? }` — institutional holdings and browser-safe route resolution
-- `fetch_paper { doi, cdp_url?, force? }` — PDF through the user's signed-in Chrome, verified and ingested under its DOI; returns `ok` / `auth_required` / `no_pdf` / `gateway_menu` / `failed`
+- `fetch_paper { doi, cdp_url?, force? }` — PDF through the user's signed-in Chrome, verified and ingested under its DOI; returns `ok` / `auth_required` / `no_pdf` / `gateway_menu` / `not_entitled` / `failed`
 - `get_pdf_text { attachment_key, max_chars?, offset? }` / `get_item_fulltext { attachment_key, max_chars?, offset? }` — low-level bounded attachment/cache paths
 - `prepare_vox_text` / `prepare_item_for_vox` / `prepare_search_result_for_vox` — Vox chunks only
 

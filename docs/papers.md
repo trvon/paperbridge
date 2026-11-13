@@ -180,6 +180,7 @@ Result fields: `doi`, `status`, `reason`, `title`, `route_url`, `landing_url`,
 | `auth_required` | the route or PDF link is a sign-in page | sign in in the tab left open, rerun |
 | `no_pdf` | no rule matched, or every candidate returned something other than a PDF | check entitlement with `papers access --doi <doi>` |
 | `gateway_menu` | every route ended on EZproxy's "Database Menu": the proxy did not recognise the target URL. Not a sign-in problem; the tab is closed and later papers in a batch are still attempted | check the route with `papers access --doi <doi> --no-open`; the publisher may not be in the proxy's configuration |
+| `not_entitled` | the publisher page was reached but shows a preview only (for example Springer's `"Access Type":"no-access"`): the institution does not license the item. Not a sign-in problem | request it through interlibrary loan or from the authors |
 | `failed` | DOI not resolvable, Chrome not reachable, unverified route, or ingest error | follow `reason` |
 
 ### Routes
@@ -190,7 +191,7 @@ Result fields: `doi`, `status`, `reason`, `title`, `route_url`, `landing_url`,
 |---|---|
 | `direct` | the resolved access route led to the publisher page (or the PDF) |
 | `resolver_menu` | the route was the link resolver's menu page (the configured `institution_resolver_url` host); its best link was followed: "Full text" first, then "Article", then "Journal", up to three |
-| `gateway_publisher` | the sign-in gateway (`institution_gateway_url`) wrapping the publisher's landing page from Crossref; tried first, because proxy configurations match publisher hosts |
+| `gateway_publisher` | the sign-in gateway (`institution_gateway_url`) wrapping the publisher's landing page from Crossref (an `http://` landing page is wrapped as `https://`: the proxy's insecure form is refused by Chrome); tried first, because proxy configurations match publisher hosts |
 | `gateway_doi` | the sign-in gateway wrapping `https://doi.org/<doi>` |
 
 The gateway routes are used when no resolver-menu link produced a PDF, or when
