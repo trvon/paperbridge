@@ -248,9 +248,15 @@ enum Landing {
     },
 }
 
-fn finish(landing: Landing, page: &PageState, route: FetchRoute, notes: &[String]) -> BrowserFetch {
+fn finish(
+    landing: Landing,
+    page: &PageState,
+    route: FetchRoute,
+    notes: &[String],
+    gateway: Option<&Url>,
+) -> BrowserFetch {
     let provider = Url::parse(&page.url)
-        .map(|url| providers::detect_provider(&url))
+        .map(|url| providers::detect_provider(&url, gateway))
         .unwrap_or(Provider::Generic);
     match landing {
         Landing::Pdf {
@@ -302,6 +308,8 @@ async fn drive_tab(
     hints: &FetchRouteHints,
     options: &FetchOptions,
 ) -> Result<BrowserFetch> {
+    // Proxied publisher hosts are recognised only under this gateway.
+    let gateway = hints.gateway_url.as_ref();
     let sign_in = |state: &PageState, route: FetchRoute| {
         finish(
             Landing::Auth {
@@ -311,6 +319,7 @@ async fn drive_tab(
             state,
             route,
             &[],
+            gateway,
         )
     };
     let gateway_routes = || {
@@ -366,8 +375,8 @@ async fn drive_tab(
             routes.extend(gateway_routes());
         }
         _ => {
-            let result = try_landing(tab, &landing, doi, options).await?;
-            return Ok(finish(result, &landing, FetchRoute::Direct, &[]));
+            let result = try_landing(tab, &landing, doi, gateway, options).await?;
+            return Ok(finish(result, &landing, FetchRoute::Direct, &[], gateway));
         }
     }
 
@@ -400,7 +409,7 @@ async fn drive_tab(
         }
         reached_content = true;
         last_route = route;
-        match try_landing(tab, &state, doi, options).await? {
+        match try_landing(tab, &state, doi, gateway, options).await? {
             Landing::NoPdf { attempts } => {
                 if attempts.is_empty() {
                     notes.push(format!("{label}: no PDF rule matched {}", state.url));
@@ -412,7 +421,7 @@ async fn drive_tab(
                 );
                 last_page = state;
             }
-            found => return Ok(finish(found, &state, route, &[])),
+            found => return Ok(finish(found, &state, route, &[], gateway)),
         }
     }
     if let (false, Some((page, route))) = (reached_content, gateway_menu) {
@@ -429,6 +438,7 @@ async fn drive_tab(
         &last_page,
         last_route,
         &notes,
+        gateway,
     ))
 }
 
@@ -437,6 +447,7 @@ async fn try_landing(
     tab: &mut CdpTab<'_>,
     landing: &PageState,
     doi: &str,
+    gateway: Option<&Url>,
     options: &FetchOptions,
 ) -> Result<Landing> {
     let page = Url::parse(&landing.url).map_err(|error| {
@@ -462,7 +473,7 @@ async fn try_landing(
 
     let html = tab.html().await?;
     let mut on_landing = true;
-    for candidate in providers::pdf_candidates(&page, doi, &html) {
+    for candidate in providers::pdf_candidates(&page, doi, &html, gateway) {
         let fetched = match candidate.plan {
             FetchPlan::SameOrigin => {
                 if on_landing.not() {

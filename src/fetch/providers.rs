@@ -48,21 +48,53 @@ pub struct PdfCandidate {
     pub plan: FetchPlan,
 }
 
-/// True when `host` is `publisher`, a subdomain of it, or a proxied form of
-/// it: EZproxy suffix form (`dl.acm.org.ezproxy.example.edu`) or hyphenated
-/// form (`dl-acm-org.example.idm.oclc.org`).
-fn host_is(host: &str, publisher: &str) -> bool {
-    let host = host.to_ascii_lowercase();
-    let hyphenated = publisher.replace('.', "-");
-    host == publisher
-        || host.ends_with(&format!(".{publisher}"))
-        || host.starts_with(&format!("{publisher}."))
-        || host.starts_with(&format!("{hyphenated}."))
-        || host.contains(&format!(".{publisher}."))
-        || host.contains(&format!(".{hyphenated}."))
+/// Hosts under which the configured gateway serves proxied publishers: the
+/// gateway host itself and, for a `login.<proxy>` gateway, `<proxy>`.
+fn proxy_bases(gateway: &Url) -> Vec<String> {
+    let Some(host) = gateway.host_str().map(str::to_ascii_lowercase) else {
+        return Vec::new();
+    };
+    let mut bases = Vec::new();
+    if let Some(parent) = host.strip_prefix("login.") {
+        bases.push(parent.to_string());
+    }
+    bases.push(host);
+    bases
 }
 
-pub fn detect_provider(page_url: &Url) -> Provider {
+/// True when `host` is `publisher` or a subdomain of it, or the form the
+/// configured `gateway` serves it under: EZproxy suffix form
+/// (`dl.acm.org.ezproxy.example.edu`) or hyphenated form
+/// (`dl-acm-org.example.idm.oclc.org`).
+///
+/// Whole labels only, and proxied forms only under the configured gateway: a
+/// host that merely contains a publisher's name
+/// (`dl.acm.org.attacker.example`) is not that publisher.
+fn host_is(host: &str, publisher: &str, gateway: Option<&Url>) -> bool {
+    let host = host.to_ascii_lowercase();
+    let host = host.trim_end_matches('.');
+    if host == publisher || host.ends_with(&format!(".{publisher}")) {
+        return true;
+    }
+    let hyphenated = publisher.replace('.', "-");
+    gateway
+        .map(proxy_bases)
+        .unwrap_or_default()
+        .iter()
+        .any(|base| {
+            host.strip_suffix(base.as_str())
+                .and_then(|prefix| prefix.strip_suffix('.'))
+                .is_some_and(|prefix| {
+                    prefix == publisher
+                        || prefix == hyphenated
+                        || prefix.ends_with(&format!(".{publisher}"))
+                })
+        })
+}
+
+/// The provider a page belongs to. `gateway` is the configured institutional
+/// gateway; proxied publisher hosts are recognised only under it.
+pub fn detect_provider(page_url: &Url, gateway: Option<&Url>) -> Provider {
     let Some(host) = page_url.host_str() else {
         return Provider::Generic;
     };
@@ -76,7 +108,7 @@ pub fn detect_provider(page_url: &Url) -> Provider {
     ];
     HOSTS
         .iter()
-        .find(|(publisher, _)| host_is(host, publisher))
+        .find(|(publisher, _)| host_is(host, publisher, gateway))
         .map(|(_, provider)| *provider)
         .unwrap_or(Provider::Generic)
 }
@@ -181,11 +213,12 @@ fn sciencedirect_candidates(page: &Url, html: &str) -> Vec<Url> {
 /// Map a `citation_pdf_url` onto the landing page's origin when the landing
 /// host is a proxied form of the meta host, so the request carries the
 /// institutional session. Otherwise the URL is kept as published.
-fn localize_meta_url(page: &Url, meta: &Url) -> Url {
+fn localize_meta_url(page: &Url, meta: &Url, gateway: Option<&Url>) -> Url {
     let (Some(page_host), Some(meta_host)) = (page.host_str(), meta.host_str()) else {
         return meta.clone();
     };
-    if same_origin(page, meta) || host_is(page_host, &meta_host.to_ascii_lowercase()).not() {
+    if same_origin(page, meta) || host_is(page_host, &meta_host.to_ascii_lowercase(), gateway).not()
+    {
         return meta.clone();
     }
     let mut localized = page.clone();
@@ -197,8 +230,13 @@ fn localize_meta_url(page: &Url, meta: &Url) -> Url {
 
 /// Ordered PDF candidates for a landing page. Provider rules come first; the
 /// `citation_pdf_url` meta tag is the generic fallback for every provider.
-pub fn pdf_candidates(page_url: &Url, doi: &str, html: &str) -> Vec<PdfCandidate> {
-    let provider = detect_provider(page_url);
+pub fn pdf_candidates(
+    page_url: &Url,
+    doi: &str,
+    html: &str,
+    gateway: Option<&Url>,
+) -> Vec<PdfCandidate> {
+    let provider = detect_provider(page_url, gateway);
     let doi = doi_path(doi.trim());
     let mut candidates: Vec<PdfCandidate> = Vec::new();
     let mut push = |rule: &'static str, url: Option<Url>, plan: Option<FetchPlan>| {
@@ -266,7 +304,7 @@ pub fn pdf_candidates(page_url: &Url, doi: &str, html: &str) -> Vec<PdfCandidate
             .or_else(|| join(page_url, &content));
         push(
             "citation_pdf_url",
-            meta.map(|meta| localize_meta_url(page_url, &meta)),
+            meta.map(|meta| localize_meta_url(page_url, &meta, gateway)),
             None,
         );
     }
@@ -415,48 +453,127 @@ mod tests {
         Url::parse(raw).unwrap()
     }
 
+    /// The configured gateway the proxied fixtures sit behind.
+    fn gateway() -> Option<Url> {
+        Some(url("https://uccs.idm.oclc.org/login?url="))
+    }
+
     #[test]
     fn provider_detection_covers_direct_and_proxied_hosts() {
-        for (raw, expected) in [
-            ("https://dl.acm.org/doi/10.1145/1", Provider::Acm),
+        let oclc = gateway();
+        let ezproxy = Some(url("https://login.ezproxy.example.edu/login?url="));
+        for (raw, gateway, expected) in [
+            ("https://dl.acm.org/doi/10.1145/1", &None, Provider::Acm),
+            ("https://DL.ACM.ORG./doi/10.1145/1", &None, Provider::Acm),
             (
                 "https://dl-acm-org.uccs.idm.oclc.org/doi/10.1145/1",
+                &oclc,
                 Provider::Acm,
             ),
             (
                 "https://dl.acm.org.ezproxy.example.edu/doi/10.1145/1",
+                &ezproxy,
+                Provider::Acm,
+            ),
+            (
+                "https://dl-acm-org.ezproxy.example.edu/doi/10.1145/1",
+                &ezproxy,
                 Provider::Acm,
             ),
             (
                 "https://link-springer-com.uccs.idm.oclc.org/article/10.1007/x",
+                &oclc,
                 Provider::Springer,
             ),
             (
                 "https://ieeexplore-ieee-org.uccs.idm.oclc.org/document/1",
+                &oclc,
                 Provider::Ieee,
             ),
             (
                 "https://www-sciencedirect-com.uccs.idm.oclc.org/science/article/pii/S1",
+                &oclc,
                 Provider::ScienceDirect,
             ),
             (
                 "https://onlinelibrary.wiley.com/doi/10.1002/x",
+                &oclc,
                 Provider::Wiley,
             ),
-            ("https://www.usenix.org/conference/x", Provider::Generic),
             (
-                "https://notdl.acm.org.evil.example/doi/1",
+                "https://www.usenix.org/conference/x",
+                &oclc,
                 Provider::Generic,
             ),
         ] {
-            assert_eq!(detect_provider(&url(raw)), expected, "{raw}");
+            assert_eq!(
+                detect_provider(&url(raw), gateway.as_ref()),
+                expected,
+                "{raw}"
+            );
         }
+    }
+
+    #[test]
+    fn hosts_that_only_contain_a_publisher_name_are_not_that_publisher() {
+        let oclc = gateway();
+        let ezproxy = Some(url("https://login.ezproxy.example.edu/login?url="));
+        for raw in [
+            // A publisher name as leading or inner labels of another domain.
+            "https://dl.acm.org.attacker.example/doi/1",
+            "https://evil.dl.acm.org.attacker.example/doi/1",
+            "https://notdl.acm.org.evil.example/doi/1",
+            "https://dl-acm-org.attacker.example/doi/1",
+            "https://evil.dl-acm-org.attacker.example/doi/1",
+            // A proxied form, but not under the configured gateway.
+            "https://dl-acm-org.other.idm.oclc.org/doi/1",
+            "https://dl.acm.org.ezproxy.other.edu/doi/1",
+            // The gateway's name inside another domain.
+            "https://dl-acm-org.uccs.idm.oclc.org.attacker.example/doi/1",
+            "https://dl.acm.org.ezproxy.example.edu.attacker.example/doi/1",
+            // Not a whole label.
+            "https://notdl.acm.org/doi/1",
+            "https://xdl-acm-org.uccs.idm.oclc.org/doi/1",
+            "https://dl-acm-orgx.uccs.idm.oclc.org/doi/1",
+            "https://dl-acm-org.evil-uccs.idm.oclc.org/doi/1",
+        ] {
+            for gateway in [&oclc, &ezproxy] {
+                assert_eq!(
+                    detect_provider(&url(raw), gateway.as_ref()),
+                    Provider::Generic,
+                    "{raw}"
+                );
+            }
+        }
+        // No gateway configured: only the publisher's own hosts count.
+        for raw in [
+            "https://dl-acm-org.uccs.idm.oclc.org/doi/1",
+            "https://dl.acm.org.ezproxy.example.edu/doi/1",
+        ] {
+            assert_eq!(detect_provider(&url(raw), None), Provider::Generic, "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_spoofed_host_gets_no_provider_rule_and_no_rewritten_meta_url() {
+        let spoof =
+            url("https://evil.onlinelibrary.wiley.com.attacker.example/doi/10.1002/spe.3200");
+        let candidates = pdf_candidates(&spoof, "10.1002/spe.3200", WILEY, gateway().as_ref());
+        // Only the meta tag, kept as published: nothing is built on, or
+        // moved onto, the spoofed origin.
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].rule, "citation_pdf_url");
+        assert_eq!(
+            candidates[0].url,
+            "https://onlinelibrary.wiley.com/doi/pdf/10.1002/spe.3200"
+        );
+        assert_eq!(candidates[0].plan, FetchPlan::NavigateThenFetch);
     }
 
     #[test]
     fn acm_rule_builds_same_origin_download_url() {
         let page = url("https://dl-acm-org.uccs.idm.oclc.org/doi/10.1145/3460120.3484766");
-        let candidates = pdf_candidates(&page, "10.1145/3460120.3484766", ACM);
+        let candidates = pdf_candidates(&page, "10.1145/3460120.3484766", ACM, gateway().as_ref());
         assert_eq!(candidates[0].rule, "acm_doi_pdf");
         assert_eq!(
             candidates[0].url,
@@ -468,7 +585,12 @@ mod tests {
     #[test]
     fn springer_rule_builds_content_pdf_url() {
         let page = url("https://link.springer.com/article/10.1007/s10207-023-00803-x");
-        let candidates = pdf_candidates(&page, "10.1007/s10207-023-00803-x", SPRINGER);
+        let candidates = pdf_candidates(
+            &page,
+            "10.1007/s10207-023-00803-x",
+            SPRINGER,
+            gateway().as_ref(),
+        );
         assert_eq!(candidates[0].rule, "springer_content_pdf");
         assert_eq!(
             candidates[0].url,
@@ -481,7 +603,12 @@ mod tests {
     #[test]
     fn ieee_rule_reads_arnumber_from_url_then_html() {
         let page = url("https://ieeexplore-ieee-org.uccs.idm.oclc.org/document/9833691");
-        let candidates = pdf_candidates(&page, "10.1109/SP46214.2022.9833691", IEEE);
+        let candidates = pdf_candidates(
+            &page,
+            "10.1109/SP46214.2022.9833691",
+            IEEE,
+            gateway().as_ref(),
+        );
         assert_eq!(candidates[0].rule, "ieee_stamp_pdf");
         assert_eq!(
             candidates[0].url,
@@ -489,7 +616,12 @@ mod tests {
         );
 
         let abstract_page = url("https://ieeexplore.ieee.org/abstract/landing");
-        let candidates = pdf_candidates(&abstract_page, "10.1109/SP46214.2022.9833691", IEEE);
+        let candidates = pdf_candidates(
+            &abstract_page,
+            "10.1109/SP46214.2022.9833691",
+            IEEE,
+            gateway().as_ref(),
+        );
         assert!(candidates[0].url.contains("arnumber=9833691&ref="));
     }
 
@@ -498,7 +630,12 @@ mod tests {
         let page = url(
             "https://www-sciencedirect-com.uccs.idm.oclc.org/science/article/pii/S0167404824000579",
         );
-        let candidates = pdf_candidates(&page, "10.1016/j.cose.2024.103747", SCIENCEDIRECT);
+        let candidates = pdf_candidates(
+            &page,
+            "10.1016/j.cose.2024.103747",
+            SCIENCEDIRECT,
+            gateway().as_ref(),
+        );
         assert_eq!(candidates[0].rule, "sciencedirect_pdfft");
         assert_eq!(candidates[0].plan, FetchPlan::NavigateThenFetch);
         assert!(candidates[0].url.starts_with(
@@ -506,7 +643,12 @@ mod tests {
         ));
 
         // No link in the markup: the rule falls back to the PII in the URL.
-        let candidates = pdf_candidates(&page, "10.1016/j.cose.2024.103747", "<html></html>");
+        let candidates = pdf_candidates(
+            &page,
+            "10.1016/j.cose.2024.103747",
+            "<html></html>",
+            gateway().as_ref(),
+        );
         assert_eq!(
             candidates[0].url,
             "https://www-sciencedirect-com.uccs.idm.oclc.org/science/article/pii/S0167404824000579/pdfft?isDTMRedir=true&download=true"
@@ -516,7 +658,7 @@ mod tests {
     #[test]
     fn wiley_rule_then_meta_fallback_on_the_proxied_origin() {
         let page = url("https://onlinelibrary-wiley-com.uccs.idm.oclc.org/doi/10.1002/spe.3200");
-        let candidates = pdf_candidates(&page, "10.1002/spe.3200", WILEY);
+        let candidates = pdf_candidates(&page, "10.1002/spe.3200", WILEY, gateway().as_ref());
         assert_eq!(candidates[0].rule, "wiley_pdfdirect");
         assert_eq!(
             candidates[0].url,
@@ -534,7 +676,7 @@ mod tests {
     #[test]
     fn generic_rule_uses_citation_pdf_url_and_rejects_downgrades() {
         let page = url("https://www.usenix.org/conference/usenixsecurity23/presentation/x");
-        let candidates = pdf_candidates(&page, "10.5555/x", GENERIC);
+        let candidates = pdf_candidates(&page, "10.5555/x", GENERIC, gateway().as_ref());
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].rule, "citation_pdf_url");
         assert_eq!(
@@ -543,13 +685,13 @@ mod tests {
         );
 
         let cross = r#"<meta name="citation_pdf_url" content="https://cdn.example.org/a.pdf">"#;
-        let candidates = pdf_candidates(&page, "10.5555/x", cross);
+        let candidates = pdf_candidates(&page, "10.5555/x", cross, gateway().as_ref());
         assert_eq!(candidates[0].plan, FetchPlan::NavigateThenFetch);
 
         let downgrade = r#"<meta name="citation_pdf_url" content="http://cdn.example.org/a.pdf">
             <meta name="citation_pdf_url" content="javascript:alert(1)">"#;
-        assert!(pdf_candidates(&page, "10.5555/x", downgrade).is_empty());
-        assert!(pdf_candidates(&page, "10.5555/x", "<html></html>").is_empty());
+        assert!(pdf_candidates(&page, "10.5555/x", downgrade, gateway().as_ref()).is_empty());
+        assert!(pdf_candidates(&page, "10.5555/x", "<html></html>", gateway().as_ref()).is_empty());
     }
 
     const DATABASE_MENU: &str =

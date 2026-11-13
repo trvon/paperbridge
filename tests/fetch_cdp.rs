@@ -333,12 +333,12 @@ fn pdf(bytes: Vec<u8>) -> ResponseTemplate {
 
 async fn mount_acm(server: &MockServer, pdf_response: ResponseTemplate) {
     Mock::given(method("GET"))
-        .and(path(format!("/dl-acm-org.proxy.test/doi/{DOI}")))
+        .and(path(format!("/dl.acm.org/doi/{DOI}")))
         .respond_with(html(ACM_LANDING))
         .mount(server)
         .await;
     Mock::given(method("GET"))
-        .and(path(format!("/dl-acm-org.proxy.test/doi/pdf/{DOI}")))
+        .and(path(format!("/dl.acm.org/doi/pdf/{DOI}")))
         .and(query_param("download", "true"))
         .respond_with(pdf_response)
         .mount(server)
@@ -355,7 +355,7 @@ async fn requests_to(server: &MockServer, fragment: &str) -> usize {
         .count()
 }
 
-const ACM_ROUTE: &str = "https://dl-acm-org.proxy.test/doi/10.1145/3460120.3484766";
+const ACM_ROUTE: &str = "https://dl.acm.org/doi/10.1145/3460120.3484766";
 
 #[tokio::test]
 async fn fetch_doi_ingests_the_pdf_under_its_doi_and_skips_it_next_time() {
@@ -474,7 +474,7 @@ async fn login_page_is_auth_required_and_the_tab_stays_open_for_the_operator() {
     let server = MockServer::start().await;
     // The proxied publisher bounces an unauthenticated session to the IdP.
     Mock::given(method("GET"))
-        .and(path(format!("/dl-acm-org.proxy.test/doi/{DOI}")))
+        .and(path(format!("/dl.acm.org/doi/{DOI}")))
         .respond_with(ResponseTemplate::new(302).insert_header(
             "location",
             "https://login.microsoftonline.com/common/oauth2/authorize?client_id=fixture",
@@ -620,7 +620,7 @@ async fn sciencedirect_pdfft_link_is_followed_by_navigation_to_the_asset_host() 
         &mut connector,
         &work(landing),
         landing,
-        &FetchRouteHints::default(),
+        &proxy_test_hints(),
         &fast_options(),
         &mut FetchSession::default(),
     )
@@ -1005,6 +1005,59 @@ async fn batch_emits_one_outcome_per_doi_one_tab_at_a_time() {
 const MENU: &str = include_str!("fixtures/fetch/resolver_menu.html");
 const MENU_URL: &str = "https://example.search.serialssolutions.com/?url_ver=Z39.88-2004&rft_id=info:doi/10.1145/3460120.3484766";
 const PROXIED_ACM: &str = "https://dl-acm-org.uccs.idm.oclc.org/doi/10.1145/3460120.3484766";
+
+/// The gateway configured as `proxy.test`: proxied publisher hosts are
+/// recognised under it and nowhere else.
+fn proxy_test_hints() -> FetchRouteHints {
+    FetchRouteHints {
+        gateway_url: Some(Url::parse("https://proxy.test/login?url=").unwrap()),
+        ..FetchRouteHints::default()
+    }
+}
+
+#[tokio::test]
+async fn host_that_only_contains_a_publisher_name_gets_no_provider_rule() {
+    let server = MockServer::start().await;
+    // `dl.acm.org` as the leading labels of somebody else's domain, and a
+    // proxied form under a gateway that is not the configured one.
+    let spoofs = [
+        "https://evil.dl.acm.org.attacker.test/doi/10.1145/3460120.3484766",
+        "https://dl-acm-org.attacker.test/doi/10.1145/3460120.3484766",
+    ];
+    for spoof in spoofs {
+        let spoof = Url::parse(spoof).unwrap();
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/{}{}",
+                spoof.host_str().unwrap(),
+                spoof.path()
+            )))
+            .respond_with(html("<html><head><title>Article</title></head></html>"))
+            .mount(&server)
+            .await;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let api = corpus(&dir);
+    for spoof in spoofs {
+        for hints in [FetchRouteHints::default(), proxy_test_hints()] {
+            let mut connector = MockConnector(MockBrowser::new(&server));
+            let outcome = fetch_resolved(
+                Some(&api),
+                &mut connector,
+                &work(spoof),
+                spoof,
+                &hints,
+                &fast_options(),
+                &mut FetchSession::default(),
+            )
+            .await;
+            assert_eq!(outcome.status, FetchStatus::NoPdf, "{outcome:?}");
+            assert_eq!(outcome.provider, Some(Provider::Generic), "{spoof}");
+        }
+    }
+    // The ACM rule's URL was never built on, or requested from, those hosts.
+    assert_eq!(requests_to(&server, "/doi/pdf/").await, 0);
+}
 
 fn uccs_hints(doi: &str) -> FetchRouteHints {
     paperbridge::access::InstitutionAccess::new_profile(
