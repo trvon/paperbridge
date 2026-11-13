@@ -126,6 +126,59 @@ MCP tool: `resolve_source_access { doi?, url? }`. Provide exactly one input. MCP
 resolution has no browser side effect; the host should open `selected_url` only
 when `browser_open_allowed` is true.
 
+### Fetch a paywalled PDF through the user's signed-in Chrome
+
+When `open_paper` has no full text and the user has institutional access, use
+`papers fetch`. It needs a Chrome the **user** launched with a dedicated
+profile and signed in to their institution:
+
+```bash
+google-chrome-stable --remote-debugging-port=9222 --no-first-run --no-default-browser-check --user-data-dir="$HOME/.local/share/paperbridge/chrome-profile"
+paperbridge --json papers fetch --doi "10.1145/3460120.3484766"
+paperbridge papers fetch --doi-file dois.txt     # one JSON line per paper
+paperbridge papers open --doi "10.1145/3460120.3484766" --want fulltext
+```
+
+Rules for agents:
+
+- Paperbridge stores no credentials or cookies; the session stays in the
+  user's browser profile. Never enter, request, or relay credentials.
+- `status: auth_required` means a tab was left open on a sign-in page. Tell
+  the user to sign in there, then rerun the same command. Do not retry in a loop.
+- `status: no_pdf` means the session cannot read a PDF for that DOI (no
+  entitlement or no rule). Report it; do not look for another route around it.
+- One paper at a time. Use `--doi-file` for lists (default 5 s between papers);
+  never run fetches in parallel.
+- `route` in the result is `direct`, `resolver_menu` (a link on the link
+  resolver's menu page was followed), `gateway_publisher`, or `gateway_doi`
+  (the sign-in gateway wrapping the publisher page or `https://doi.org/<doi>`).
+- `status: gateway_menu` means the proxy showed its database menu because it
+  did not recognise the URL. It is not a sign-in problem: do not ask the user
+  to sign in again; report the DOI and move on.
+- "No Chrome DevTools endpoint" means that Chrome is not running. Run
+  `paperbridge browser start` (it sets the profile to restore its session, so
+  a sign-in survives restarts) or ask the user to; `paperbridge browser status`
+  shows whether the browser answers and how many gateway cookies it holds
+  (counts only). `papers fetch --launch-browser --headless` starts and closes
+  the browser itself; if that returns `auth_required`, the user must run once
+  without `--headless` and sign in (ticking "Stay signed in").
+- `extractor` in the result says whether full text came from the built-in
+  extractor or `pdftotext`.
+- `papers access --browser <cmd>` (or config `browser_command`, or `$BROWSER`)
+  chooses which browser opens a route.
+
+| Provider | Detected by host (direct or proxied) | PDF rule | How it is fetched |
+|---|---|---|---|
+| ACM | `dl.acm.org` | `/doi/pdf/<doi>?download=true` | same-origin `fetch` from the landing page |
+| Springer | `link.springer.com` | `/content/pdf/<doi>.pdf` | same-origin `fetch` |
+| IEEE Xplore | `ieeexplore.ieee.org` | `/stampPDF/getPDF.jsp?tp=&arnumber=N&ref=` (`N` from the URL or page) | same-origin `fetch` |
+| ScienceDirect | `sciencedirect.com` | the page's `pdfft` link (or `/science/article/pii/<PII>/pdfft`) | tab navigates to the link, then fetches the PDF it lands on |
+| Wiley | `onlinelibrary.wiley.com` | `/doi/pdfdirect/<doi>?download=true`, then `citation_pdf_url` | same-origin `fetch` |
+| Any other | — | `<meta name="citation_pdf_url">` | same-origin `fetch`, or navigation when the link is on another origin |
+
+MCP tool: `fetch_paper { doi, cdp_url?, force? }` (full profile) — same flow,
+always ingests, one paper per call.
+
 ### Read content — prefer `open_paper`
 
 ```bash
@@ -154,6 +207,7 @@ MCP tools:
 
 - `open_paper { hit_id|doi|arxiv_id|isbn|item_key|paper_id|attachment_key|url, want, chapter?, max_chars?, offset? }` — preferred; use `want: ["toc"]` to inspect book TOC, or `chapter: N` (requires `want` to include `chapter`, `fulltext`, or `chunks`); use `next_offset` to continue fulltext
 - `resolve_source_access { doi?, url? }` — institutional holdings and browser-safe route resolution
+- `fetch_paper { doi, cdp_url?, force? }` — PDF through the user's signed-in Chrome, verified and ingested under its DOI; returns `ok` / `auth_required` / `no_pdf` / `gateway_menu` / `failed`
 - `get_pdf_text { attachment_key, max_chars?, offset? }` / `get_item_fulltext { attachment_key, max_chars?, offset? }` — low-level bounded attachment/cache paths
 - `prepare_vox_text` / `prepare_item_for_vox` / `prepare_search_result_for_vox` — Vox chunks only
 
@@ -296,6 +350,7 @@ paperbridge config snippet --target opencode
 | `institution_resolver_url` | OpenURL holdings resolver; masked in config output |
 | `institution_gateway_url` | EZproxy or OpenAthens sign-in gateway; masked in config output |
 | `institution_access_url` | backward-compatible single endpoint; new profiles should use the split fields |
+| `browser_command` | browser for `papers access`; overrides `$BROWSER` and the desktop default (`%s` = URL position) |
 | `grobid_url` | GROBID endpoint; if set, auto-spawn is disabled |
 | `grobid_auto_spawn` | launch GROBID via Docker (default `false`) |
 | `grobid_image` | Docker image for auto-spawn |

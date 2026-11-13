@@ -279,8 +279,49 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
             PapersAction::ResolveDoi { doi } => {
                 handle_papers_resolve_doi(config, doi, output).await?
             }
-            PapersAction::Access { doi, url, no_open } => {
-                handle_papers_access(config, doi, url, no_open, output).await?
+            PapersAction::Access {
+                doi,
+                url,
+                no_open,
+                browser,
+            } => handle_papers_access(config, doi, url, no_open, browser, output).await?,
+            PapersAction::Fetch {
+                doi,
+                doi_file,
+                cdp_url,
+                no_ingest,
+                out,
+                force,
+                delay_secs,
+                launch_browser,
+                headless,
+                keep_browser,
+            } => {
+                let options = paperbridge::fetch::FetchOptions {
+                    out_dir: out.map(std::path::PathBuf::from),
+                    ingest: no_ingest.not(),
+                    force,
+                    ..Default::default()
+                };
+                let launch = if launch_browser {
+                    Some((
+                        paperbridge::fetch::launch::LaunchSpec {
+                            command: paperbridge::fetch::launch::resolve_chrome(
+                                None,
+                                config.browser_command.as_deref(),
+                            )?,
+                            profile: paperbridge::fetch::launch::default_profile_dir(),
+                            headless,
+                        },
+                        keep_browser,
+                    ))
+                } else {
+                    None
+                };
+                handle_papers_fetch(
+                    config, doi, doi_file, cdp_url, options, delay_secs, launch, output,
+                )
+                .await?
             }
             PapersAction::Structure { key, attachment } => {
                 handle_paper_structure(config, key, attachment, output).await?
@@ -312,6 +353,7 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
         }
 
         Some(Command::Paperseed { action }) => handle_paperseed(config, action, output).await?,
+        Some(Command::Browser { action }) => handle_browser(config, action, output).await?,
 
         // ---------- Hidden legacy aliases (delegate + deprecation warning) ----------
         Some(Command::Query {
@@ -1209,8 +1251,10 @@ async fn handle_papers_access(
     doi: Option<String>,
     url: Option<String>,
     no_open: bool,
+    browser: Option<String>,
     output: OutputFormat,
 ) -> paperbridge::Result<()> {
+    let browser_command = config.browser_command.clone();
     let service = build_service(config)?;
     let access = service
         .resolve_source_access(url.as_deref(), doi.as_deref())
@@ -1223,7 +1267,201 @@ async fn handle_papers_access(
                     .to_string(),
             ));
         }
-        open_in_default_browser(&access.selected_url)?;
+        let env_browser = std::env::var("BROWSER").ok();
+        let candidates = paperbridge::browser::browser_candidates(
+            browser.as_deref(),
+            browser_command.as_deref(),
+            env_browser.as_deref(),
+            &access.selected_url,
+        );
+        if candidates.is_empty() {
+            open_in_default_browser(&access.selected_url)?;
+        } else {
+            open_in_chosen_browser(&candidates, &access.selected_url)?;
+        }
+    }
+    Ok(())
+}
+
+/// Start the first browser command that launches. The process is detached,
+/// not awaited: a browser that is not yet running stays in the foreground.
+fn open_in_chosen_browser(
+    candidates: &[(paperbridge::browser::BrowserSource, Vec<String>)],
+    url: &str,
+) -> paperbridge::Result<()> {
+    use std::process::{Command as ProcessCommand, Stdio};
+
+    let mut failures = Vec::new();
+    for (source, argv) in candidates {
+        let Some((program, args)) = argv.split_first() else {
+            continue;
+        };
+        match ProcessCommand::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(_) => return Ok(()),
+            Err(error) => failures.push(format!("{program} (from {}): {error}", source.label())),
+        }
+    }
+    Err(paperbridge::ZoteroMcpError::Config(format!(
+        "failed to start the chosen browser: {}. Open this URL manually: {url}",
+        failures.join("; ")
+    )))
+}
+
+async fn handle_browser(
+    config: Config,
+    action: paperbridge::cli::BrowserAction,
+    output: OutputFormat,
+) -> paperbridge::Result<()> {
+    use paperbridge::cli::BrowserAction;
+    use paperbridge::fetch::launch;
+
+    let profile_dir = |profile: Option<String>| {
+        profile
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(launch::default_profile_dir)
+    };
+    match action {
+        BrowserAction::Start {
+            cdp_url,
+            profile,
+            chrome,
+            headless,
+        } => {
+            let spec = launch::LaunchSpec {
+                command: launch::resolve_chrome(
+                    chrome.as_deref(),
+                    config.browser_command.as_deref(),
+                )?,
+                profile: profile_dir(profile),
+                headless,
+            };
+            let report = launch::ensure_browser(&cdp_url, &spec).await?;
+            print_output(&report, output)
+        }
+        BrowserAction::Stop {
+            cdp_url,
+            profile,
+            dry_run,
+        } => {
+            let report = launch::stop_browser(&cdp_url, &profile_dir(profile), dry_run).await?;
+            print_output(&report, output)?;
+            // Still running: the report says so, and the command fails.
+            report.failure().map_or(Ok(()), Err)
+        }
+        BrowserAction::Status { cdp_url, profile } => {
+            let gateway = config
+                .institution_gateway_url
+                .clone()
+                .or_else(|| config.institution_access_url.clone());
+            let status =
+                launch::browser_status(&cdp_url, &profile_dir(profile), gateway.as_deref()).await?;
+            print_output(&status, output)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_papers_fetch(
+    config: Config,
+    doi: Option<String>,
+    doi_file: Option<String>,
+    cdp_url: String,
+    options: paperbridge::fetch::FetchOptions,
+    delay_secs: u64,
+    launch: Option<(paperbridge::fetch::launch::LaunchSpec, bool)>,
+    output: OutputFormat,
+) -> paperbridge::Result<()> {
+    use paperbridge::fetch::{ChromeConnector, FetchOutcome, FetchSession, FetchStatus};
+
+    let api = build_paperseed_api(&config);
+    let service = build_service(config)?;
+    let mut connector = ChromeConnector::new(Some(&cdp_url))?;
+    let mut keep_browser = true;
+    if let Some((spec, keep)) = launch {
+        connector = connector.with_launch(spec);
+        keep_browser = keep;
+    }
+    let summary = |outcome: &FetchOutcome| {
+        format!(
+            "{} was not fetched ({}): {}",
+            outcome.doi,
+            serde_json::to_value(outcome.status)
+                .ok()
+                .and_then(|status| status.as_str().map(str::to_string))
+                .unwrap_or_default(),
+            outcome.reason.as_deref().unwrap_or("no reason reported")
+        )
+    };
+
+    if let Some(file) = doi_file {
+        let text = std::fs::read_to_string(&file).map_err(|error| {
+            paperbridge::ZoteroMcpError::InvalidInput(format!("failed to read {file}: {error}"))
+        })?;
+        let dois = paperbridge::fetch::parse_doi_list(&text);
+        if dois.is_empty() {
+            return Err(paperbridge::ZoteroMcpError::InvalidInput(format!(
+                "{file} lists no DOIs; expected one DOI per line"
+            )));
+        }
+        let outcomes = paperbridge::fetch::fetch_batch(
+            &service,
+            Some(&api),
+            &mut connector,
+            &dois,
+            &options,
+            std::time::Duration::from_secs(delay_secs),
+            |outcome| {
+                if let Ok(line) = serde_json::to_string(outcome) {
+                    println!("{line}");
+                }
+            },
+        )
+        .await;
+        // A headed browser this run started stays open when a paper needs a
+        // sign-in: that window is where the operator signs in.
+        let hand_over = paperbridge::fetch::CdpConnector::headless(&connector).not()
+            && outcomes
+                .iter()
+                .any(|outcome| outcome.status == FetchStatus::AuthRequired);
+        connector.finish(keep_browser || hand_over).await;
+        let fetched = outcomes
+            .iter()
+            .filter(|outcome| outcome.status == FetchStatus::Ok)
+            .count();
+        if fetched < outcomes.len() {
+            return Err(paperbridge::ZoteroMcpError::Http(format!(
+                "fetched {fetched} of {} papers; see the status and reason on each output line",
+                outcomes.len()
+            )));
+        }
+        return Ok(());
+    }
+
+    let doi = doi.unwrap_or_default();
+    let mut session = FetchSession::default();
+    let outcome = paperbridge::fetch::fetch_doi(
+        &service,
+        Some(&api),
+        &mut connector,
+        &doi,
+        &options,
+        &mut session,
+    )
+    .await;
+    // A headed browser this run started stays open on a sign-in page: that
+    // window is where the operator signs in.
+    let hand_over = outcome.status == FetchStatus::AuthRequired
+        && paperbridge::fetch::CdpConnector::headless(&connector).not();
+    connector.finish(keep_browser || hand_over).await;
+    print_output(&outcome, output)?;
+    if outcome.status != FetchStatus::Ok {
+        return Err(paperbridge::ZoteroMcpError::Http(summary(&outcome)));
     }
     Ok(())
 }
@@ -1925,7 +2163,7 @@ fn handle_config_get(
     if let Some(key) = key {
         let value = cfg.get_value(key).ok_or_else(|| {
             paperbridge::ZoteroMcpError::InvalidInput(format!(
-                "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key, core_api_key, ads_api_token, ncbi_api_key, scholarapi_key, unpaywall_email, institution_access_mode, institution_access_url, institution_resolver_url, institution_gateway_url, grobid_url, grobid_timeout_secs, grobid_auto_spawn, grobid_image, update_check_enabled, paperseed_enabled, paperseed_auto_download, paperseed_yams_enabled, paperseed_corpus_root"
+                "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key, core_api_key, ads_api_token, ncbi_api_key, scholarapi_key, unpaywall_email, institution_access_mode, institution_access_url, institution_resolver_url, institution_gateway_url, grobid_url, browser_command, grobid_timeout_secs, grobid_auto_spawn, grobid_image, update_check_enabled, paperseed_enabled, paperseed_auto_download, paperseed_yams_enabled, paperseed_corpus_root"
             ))
         })?;
         if SENSITIVE_CONFIG_KEYS.contains(&key) && !show_secret {

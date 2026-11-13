@@ -126,6 +126,13 @@ impl PaperbridgeService {
         }
     }
 
+    /// Point DOI resolution at another Crossref-compatible endpoint.
+    #[doc(hidden)]
+    pub fn with_crossref_base(mut self, base_url: &str) -> Self {
+        self.crossref = CrossrefClient::new(Some(base_url));
+        self
+    }
+
     pub fn with_unpaywall(mut self, email: Option<String>) -> Self {
         self.unpaywall = email.map(|e| UnpaywallClient::new(None, e));
         self
@@ -1432,30 +1439,93 @@ impl PaperbridgeService {
             }
             (Some(target), None) => (self.institution_access.resolve(target, None)?, None),
             (None, Some(doi)) => {
-                let work = self.resolve_doi(doi).await?;
-                let resolution = if let Some(oa_pdf_url) = work.oa_pdf_url.as_deref() {
-                    self.institution_access
-                        .resolve_direct(oa_pdf_url, Some(&work.doi))?
-                } else {
-                    let target = work
-                        .url
-                        .clone()
-                        .unwrap_or_else(|| format!("https://doi.org/{}", work.doi));
-                    self.institution_access.resolve(&target, Some(&work.doi))?
-                };
+                let (work, resolution) = self.route_for_doi(doi).await?;
                 (resolution, Some(work.doi))
             }
         };
 
+        self.apply_holdings_lookup(&mut resolution, resolved_doi.as_deref())
+            .await;
+        Ok(resolution)
+    }
+
+    /// Resolve a DOI once and return both its Crossref record and the access
+    /// route, for callers that need the metadata as well as the URL.
+    pub async fn resolve_doi_access(
+        &self,
+        doi: &str,
+    ) -> Result<(CrossrefWork, SourceAccessResolution)> {
+        let (work, mut resolution) = self.route_for_doi(doi).await?;
+        self.apply_holdings_lookup(&mut resolution, Some(&work.doi))
+            .await;
+        Ok((work, resolution))
+    }
+
+    /// Fetch one paper through the operator's Chrome and ingest it. One tab
+    /// at a time: concurrent calls queue behind a process-wide lock so MCP
+    /// hosts cannot fan requests out at a publisher.
+    pub async fn fetch_paper(
+        &self,
+        doi: &str,
+        cdp_url: Option<&str>,
+        force: bool,
+    ) -> Result<crate::fetch::FetchOutcome> {
+        static ONE_TAB: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let mut connector = crate::fetch::ChromeConnector::new(cdp_url)?;
+        let options = crate::fetch::FetchOptions {
+            force,
+            ..Default::default()
+        };
+        let _one_tab = ONE_TAB.lock().await;
+        let mut session = crate::fetch::FetchSession::default();
+        Ok(crate::fetch::fetch_doi(
+            self,
+            self.paperseed.as_ref(),
+            &mut connector,
+            doi,
+            &options,
+            &mut session,
+        )
+        .await)
+    }
+
+    /// Fallback routes for `papers fetch`, from the institutional profile.
+    pub fn fetch_route_hints(
+        &self,
+        doi: &str,
+        publisher_url: Option<&str>,
+    ) -> crate::access::FetchRouteHints {
+        self.institution_access
+            .fetch_route_hints(doi, publisher_url)
+    }
+
+    async fn route_for_doi(&self, doi: &str) -> Result<(CrossrefWork, SourceAccessResolution)> {
+        let work = self.resolve_doi(doi).await?;
+        let resolution = if let Some(oa_pdf_url) = work.oa_pdf_url.as_deref() {
+            self.institution_access
+                .resolve_direct(oa_pdf_url, Some(&work.doi))?
+        } else {
+            let target = work
+                .url
+                .clone()
+                .unwrap_or_else(|| format!("https://doi.org/{}", work.doi));
+            self.institution_access.resolve(&target, Some(&work.doi))?
+        };
+        Ok((work, resolution))
+    }
+
+    async fn apply_holdings_lookup(
+        &self,
+        resolution: &mut SourceAccessResolution,
+        resolved_doi: Option<&str>,
+    ) {
         if resolution.resolver.is_some() {
             match self
                 .institution_access
-                .resolve_holdings(&resolution.target_url, resolved_doi.as_deref())
+                .resolve_holdings(&resolution.target_url, resolved_doi)
                 .await
             {
-                Ok(options) => self
-                    .institution_access
-                    .apply_holdings(&mut resolution, options),
+                Ok(options) => self.institution_access.apply_holdings(resolution, options),
                 Err(_) => {
                     resolution.holdings_status = HoldingsStatus::Error;
                     resolution.resolver_error = Some(
@@ -1466,7 +1536,6 @@ impl PaperbridgeService {
                 }
             }
         }
-        Ok(resolution)
     }
 
     pub async fn validate_item_online(&self, req: &ItemWriteRequest) -> Result<ValidationReport> {

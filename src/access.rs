@@ -166,6 +166,35 @@ impl InstitutionAccess {
             .unwrap_or_else(|_| unreachable!("disabled institutional access is always valid"))
     }
 
+    /// Resolver and gateway routes `papers fetch` may fall back to for a DOI.
+    /// Empty when institutional access is off.
+    pub fn fetch_route_hints(&self, doi: &str, publisher_url: Option<&str>) -> FetchRouteHints {
+        if self.mode == InstitutionAccessMode::Off {
+            return FetchRouteHints::default();
+        }
+        let wrap = |target: &str| match (self.gateway_url.as_ref(), self.gateway) {
+            (Some(base), Some(kind)) => Url::parse(target)
+                .ok()
+                .filter(|target| target.scheme() == "https")
+                .map(|target| build_gateway_url(base, kind, &target).to_string()),
+            _ => None,
+        };
+        let is_doi_host = |target: &str| {
+            Url::parse(target).is_ok_and(|url| {
+                url.host_str()
+                    .is_some_and(|host| host == "doi.org" || host.ends_with(".doi.org"))
+            })
+        };
+        FetchRouteHints {
+            resolver_url: self.resolver_url.clone(),
+            gateway_url: self.gateway_url.clone(),
+            gateway_publisher_url: publisher_url
+                .filter(|target| is_doi_host(target).not())
+                .and_then(wrap),
+            gateway_doi_url: wrap(&format!("https://doi.org/{}", doi.trim())),
+        }
+    }
+
     pub fn has_resolver(&self) -> bool {
         self.mode != InstitutionAccessMode::Off && self.resolver_url.is_some()
     }
@@ -452,7 +481,26 @@ fn parse_target_url(raw: &str) -> Result<Url> {
 fn build_gateway_url(base: &Url, kind: InstitutionGatewayKind, target: &Url) -> Url {
     let mut result = base.clone();
     match kind {
-        InstitutionGatewayKind::Ezproxy | InstitutionGatewayKind::OpenAthens => {
+        // EZproxy takes everything after `url=` literally: an encoded target
+        // is not recognised and lands on the proxy's database menu. The
+        // target goes last and unencoded.
+        InstitutionGatewayKind::Ezproxy => {
+            let kept = result
+                .query_pairs()
+                .filter(|(key, _)| key != "url")
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect::<Vec<_>>();
+            result.set_query(None);
+            if kept.is_empty().not() {
+                result.query_pairs_mut().extend_pairs(kept);
+            }
+            let prefix = result
+                .query()
+                .map(|query| format!("{query}&"))
+                .unwrap_or_default();
+            result.set_query(Some(&format!("{prefix}url={target}")));
+        }
+        InstitutionGatewayKind::OpenAthens => {
             replace_query_pair(&mut result, "url", target.as_str());
         }
         InstitutionGatewayKind::OpenUrl => unreachable!("OpenURL is not an authentication gateway"),
@@ -572,6 +620,80 @@ fn parse_openurl_options(
     html: &str,
     gateway_url: Option<&Url>,
 ) -> Result<Vec<AccessOption>> {
+    Ok(labelled_openurl_options(base, html, gateway_url, |_| false)
+        .into_iter()
+        .map(|(_, option)| option)
+        .collect())
+}
+
+/// Rank of a link label on a resolver menu page: explicit full-text links
+/// first, then the article link, then the journal link.
+fn menu_label_rank(label: &str) -> Option<u8> {
+    if is_fulltext_label(label) {
+        return Some(0);
+    }
+    match label.trim().to_ascii_lowercase().as_str() {
+        "article" => Some(1),
+        "journal" => Some(2),
+        _ => None,
+    }
+}
+
+/// Links worth following on an OpenURL resolver's menu page (the page a link
+/// resolver shows instead of redirecting), best first. Links through the
+/// configured resolver or gateway sort ahead of other hosts.
+fn resolver_menu_links(base: &Url, html: &str, gateway_url: Option<&Url>) -> Vec<AccessOption> {
+    let mut links: Vec<(u8, AccessOption)> =
+        labelled_openurl_options(base, html, gateway_url, |label| {
+            menu_label_rank(label).is_some()
+        })
+        .into_iter()
+        .map(|(label, option)| (menu_label_rank(&label).unwrap_or(0), option))
+        .collect();
+    links.sort_by_key(|(label_rank, option)| {
+        (
+            *label_rank,
+            option.auto_open.not(),
+            access_option_rank(option),
+        )
+    });
+    links.into_iter().map(|(_, option)| option).collect()
+}
+
+/// Where `papers fetch` may go when the first route is not a publisher page.
+#[derive(Debug, Clone, Default)]
+pub struct FetchRouteHints {
+    /// The configured OpenURL resolver; a landing page on its origin is a
+    /// resolver menu rather than a publisher page.
+    pub resolver_url: Option<Url>,
+    pub gateway_url: Option<Url>,
+    /// The sign-in gateway wrapping the publisher's landing page, when
+    /// Crossref names one. Proxy configurations match publisher hosts, so
+    /// this is tried before the DOI form.
+    pub gateway_publisher_url: Option<String>,
+    /// The sign-in gateway wrapping `https://doi.org/<doi>`.
+    pub gateway_doi_url: Option<String>,
+}
+
+impl FetchRouteHints {
+    pub fn is_resolver_menu(&self, page: &Url) -> bool {
+        self.resolver_url
+            .as_ref()
+            .is_some_and(|resolver| same_origin(page, resolver))
+    }
+
+    /// Full-text links on a resolver menu page, best first.
+    pub fn menu_links(&self, page: &Url, html: &str) -> Vec<AccessOption> {
+        resolver_menu_links(page, html, self.gateway_url.as_ref())
+    }
+}
+
+fn labelled_openurl_options(
+    base: &Url,
+    html: &str,
+    gateway_url: Option<&Url>,
+    also_accept: impl Fn(&str) -> bool,
+) -> Vec<(String, AccessOption)> {
     let providers = html_elements(html, "span")
         .into_iter()
         .filter_map(|element| {
@@ -598,7 +720,8 @@ fn parse_openurl_options(
                 .split_whitespace()
                 .any(|class| matches!(class, "full-text-link" | "fulltext-link"))
         });
-        if is_fulltext_label(&label).not() && has_fulltext_class.not() {
+        if is_fulltext_label(&label).not() && has_fulltext_class.not() && also_accept(&label).not()
+        {
             continue;
         }
         let Some(href) = element.attributes.get("href") else {
@@ -626,24 +749,27 @@ fn parse_openurl_options(
         let authentication_required = url_chain(&url)
             .iter()
             .any(|candidate| detect_gateway_only(candidate).is_some());
-        options.push(AccessOption {
-            provider,
-            url: url.to_string(),
-            destination_url: (destination != url).then(|| destination.to_string()),
-            authentication_required,
-            auto_open: same_origin(&url, base)
-                || gateway_url.is_some_and(|gateway| same_origin(&url, gateway)),
-        });
+        options.push((
+            label,
+            AccessOption {
+                provider,
+                url: url.to_string(),
+                destination_url: (destination != url).then(|| destination.to_string()),
+                authentication_required,
+                auto_open: same_origin(&url, base)
+                    || gateway_url.is_some_and(|gateway| same_origin(&url, gateway)),
+            },
+        ));
     }
-    Ok(options)
+    options
 }
 
-struct HtmlElement {
-    attributes: HashMap<String, String>,
-    inner: String,
+pub(crate) struct HtmlElement {
+    pub(crate) attributes: HashMap<String, String>,
+    pub(crate) inner: String,
 }
 
-fn html_elements(html: &str, tag: &str) -> Vec<HtmlElement> {
+pub(crate) fn html_elements(html: &str, tag: &str) -> Vec<HtmlElement> {
     let lowercase = html.to_ascii_lowercase();
     let open_marker = format!("<{tag}");
     let close_marker = format!("</{tag}>");
@@ -680,7 +806,7 @@ fn html_elements(html: &str, tag: &str) -> Vec<HtmlElement> {
     elements
 }
 
-fn parse_html_attributes(raw: &str) -> HashMap<String, String> {
+pub(crate) fn parse_html_attributes(raw: &str) -> HashMap<String, String> {
     let bytes = raw.as_bytes();
     let mut cursor = 0;
     let mut attributes = HashMap::new();
@@ -786,10 +912,22 @@ fn url_chain(url: &Url) -> Vec<Url> {
         let Some(current) = chain.last() else {
             break;
         };
-        let nested = current.query_pairs().find_map(|(key, value)| {
-            matches!(key.as_ref(), "U" | "url" | "qurl" | "target")
-                .then(|| Url::parse(value.as_ref()).ok())
-                .flatten()
+        // EZproxy's unencoded form: everything after `url=` is the target,
+        // including its own `&` parameters.
+        let literal = current.query().and_then(|query| {
+            ["url=https://", "url=http://"].iter().find_map(|marker| {
+                query
+                    .match_indices(marker)
+                    .find(|(index, _)| *index == 0 || query.as_bytes()[index - 1] == b'&')
+                    .and_then(|(index, _)| Url::parse(&query[index + 4..]).ok())
+            })
+        });
+        let nested = literal.or_else(|| {
+            current.query_pairs().find_map(|(key, value)| {
+                matches!(key.as_ref(), "U" | "url" | "qurl" | "target")
+                    .then(|| Url::parse(value.as_ref()).ok())
+                    .flatten()
+            })
         });
         let Some(nested) = nested else {
             break;
@@ -841,6 +979,112 @@ mod tests {
     use super::*;
 
     #[test]
+    fn resolver_menu_links_rank_full_text_then_article_then_journal() {
+        let html = include_str!("../tests/fixtures/fetch/resolver_menu.html");
+        let menu = Url::parse(
+            "https://example.search.serialssolutions.com/?rft_id=info:doi/10.1145/3460120.3484766",
+        )
+        .unwrap();
+        let gateway = Url::parse("https://uccs.idm.oclc.org/login?url=").unwrap();
+        let links = resolver_menu_links(&menu, html, Some(&gateway));
+        let destinations: Vec<&str> = links
+            .iter()
+            .map(|link| link.destination_url.as_deref().unwrap())
+            .collect();
+        assert_eq!(
+            destinations,
+            vec![
+                "https://dl.acm.org/doi/10.1145/3460120.3484766",
+                "https://dl.acm.org/doi/abs/10.1145/3460120.3484766",
+                "https://dl.acm.org/conference/ccs",
+            ]
+        );
+        assert!(
+            links
+                .iter()
+                .all(|link| link.auto_open && link.authentication_required)
+        );
+        assert!(
+            links[0]
+                .url
+                .starts_with("https://uccs.idm.oclc.org/login?url=")
+        );
+        // Help, anchors, and mailto links are not routes.
+        assert_eq!(links.len(), 3);
+        // The holdings parser used by `papers access` keeps its narrower rule.
+        assert_eq!(
+            parse_openurl_options(&menu, html, Some(&gateway))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn fetch_route_hints_wrap_the_doi_in_the_gateway_and_are_empty_when_off() {
+        let access = InstitutionAccess::new_profile(
+            InstitutionAccessMode::Fallback,
+            None,
+            Some("https://example.search.serialssolutions.com/"),
+            Some("https://uccs.idm.oclc.org/login?url="),
+        )
+        .unwrap();
+        let hints = access.fetch_route_hints(
+            "10.1109/infocom59046.2026.11571613",
+            Some("https://ieeexplore.ieee.org/document/11571613/?arnumber=11571613&x=1"),
+        );
+        // Golden strings: EZproxy takes the target after `url=` unencoded.
+        assert_eq!(
+            hints.gateway_doi_url.as_deref(),
+            Some(
+                "https://uccs.idm.oclc.org/login?url=https://doi.org/10.1109/infocom59046.2026.11571613"
+            )
+        );
+        assert_eq!(
+            hints.gateway_publisher_url.as_deref(),
+            Some(
+                "https://uccs.idm.oclc.org/login?url=https://ieeexplore.ieee.org/document/11571613/?arnumber=11571613&x=1"
+            )
+        );
+        // A Crossref resource that is only the DOI link adds nothing.
+        assert!(
+            access
+                .fetch_route_hints("10.1/x", Some("https://doi.org/10.1/x"))
+                .gateway_publisher_url
+                .is_none()
+        );
+        assert!(
+            hints.is_resolver_menu(
+                &Url::parse("https://example.search.serialssolutions.com/?url_ver=Z39.88-2004")
+                    .unwrap()
+            )
+        );
+        assert!(
+            hints
+                .is_resolver_menu(
+                    &Url::parse("https://dl-acm-org.uccs.idm.oclc.org/doi/1").unwrap()
+                )
+                .not()
+        );
+
+        let off = InstitutionAccess::disabled().fetch_route_hints("10.1/x", None);
+        assert!(off.resolver_url.is_none() && off.gateway_doi_url.is_none());
+        let resolver_only = InstitutionAccess::new_profile(
+            InstitutionAccessMode::Fallback,
+            None,
+            Some("https://example.search.serialssolutions.com/"),
+            None,
+        )
+        .unwrap();
+        assert!(
+            resolver_only
+                .fetch_route_hints("10.1/x", None)
+                .gateway_doi_url
+                .is_none()
+        );
+    }
+
+    #[test]
     fn legacy_ezproxy_url_wraps_target_without_hard_coded_institution() {
         let access = InstitutionAccess::new(
             InstitutionAccessMode::Fallback,
@@ -852,13 +1096,16 @@ mod tests {
             .unwrap();
 
         assert_eq!(resolution.gateway, Some(InstitutionGatewayKind::Ezproxy));
+        // EZproxy reads the target after `url=` literally, so it is appended
+        // unencoded, query string and all.
+        assert_eq!(
+            resolution.institution_url.as_deref(),
+            Some("https://proxy.example.edu/login?url=https://journals.example.org/paper?a=1&b=2")
+        );
         let generated = Url::parse(resolution.institution_url.as_deref().unwrap()).unwrap();
         assert_eq!(
-            generated
-                .query_pairs()
-                .find(|(key, _)| key == "url")
-                .map(|(_, value)| value.into_owned()),
-            Some("https://journals.example.org/paper?a=1&b=2".to_string())
+            deepest_destination(&generated).as_str(),
+            "https://journals.example.org/paper?a=1&b=2"
         );
     }
 

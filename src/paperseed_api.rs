@@ -382,6 +382,10 @@ impl PaperseedApi {
         })
     }
 
+    pub fn replace_full_text(&self, paper_id: &str, text: String) -> Result<()> {
+        paperseed::app::set_full_text(&self.paths, paper_id, text).map_err(map_error)
+    }
+
     pub fn create_seed_manifest(&self, paper_id: &str) -> Result<SeedManifest> {
         paperseed::app::create_seed_manifest(&self.paths, paper_id).map_err(map_error)
     }

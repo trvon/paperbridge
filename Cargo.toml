@@ -8,6 +8,7 @@ description = "MCP and CLI bridge for paper discovery and PDF/full-text retrieva
 
 [dependencies]
 async-trait = "0.1"
+base64 = "0.23.1"
 clap.workspace = true
 clap_complete = "4"
 dirs = "7"
@@ -19,8 +20,10 @@ rmcp = { version = "3.7", features = ["server", "transport-io", "macros"] }
 schemars = { version = "1", features = ["derive"] }
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["process", "sync"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "handshake"] }
 toml = "1.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -29,7 +32,7 @@ urlencoding.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
-jsonschema = { version = "0.60", default-features = false }
+jsonschema = { version = "0.61", default-features = false }
 proptest.workspace = true
 tempfile.workspace = true
 wiremock = "0.6"

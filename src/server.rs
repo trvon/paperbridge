@@ -284,6 +284,22 @@ pub struct ResolveSourceAccessParams {
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct FetchPaperParams {
+    #[schemars(description = "DOI of the paper to fetch")]
+    pub doi: String,
+
+    #[schemars(
+        description = "Chrome DevTools endpoint of the browser the user launched; loopback only (default http://127.0.0.1:9222)"
+    )]
+    pub cdp_url: Option<String>,
+
+    #[schemars(
+        description = "Fetch again even when the corpus already has full text for the DOI (default false)"
+    )]
+    pub force: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ValidateItemParams {
     #[schemars(description = "Item payload to validate")]
     pub item: ItemWriteRequest,
@@ -901,6 +917,27 @@ impl PaperbridgeServer {
             .resolve_source_access(params.url.as_deref(), params.doi.as_deref())
             .await;
         Self::result_json(access)
+    }
+
+    #[tool(
+        name = "fetch_paper",
+        output_schema = schema_for_type::<crate::fetch::FetchOutcome>(),
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = true),
+        description = "Fetch one paper's PDF through the Chrome the user launched with --remote-debugging-port and signed in to their institution, verify it, and ingest it into the local corpus under its DOI. Returns status ok, auth_required (a tab is left open for the user to sign in; never enter credentials), no_pdf, gateway_menu (the proxy did not recognise the URL; not a sign-in problem), or failed, each with a reason. Stores no credentials or cookies. One paper per call; do not call in parallel."
+    )]
+    async fn fetch_paper(
+        &self,
+        Parameters(params): Parameters<FetchPaperParams>,
+    ) -> std::result::Result<CallToolResult, McpError> {
+        let outcome = self
+            .service
+            .fetch_paper(
+                &params.doi,
+                params.cdp_url.as_deref(),
+                params.force.unwrap_or(false),
+            )
+            .await;
+        Self::result_json(outcome)
     }
 
     #[tool(
