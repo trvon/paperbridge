@@ -9,6 +9,7 @@ Flate-compressed content streams, ligatures, non-ASCII author names).
 | File | Source | License | Why |
 |------|--------|---------|-----|
 | `arxiv_1408_5939_planar_subgraphs.pdf` | [arXiv:1408.5939v2](https://arxiv.org/abs/1408.5939) — *Planar Induced Subgraphs of Sparse Graphs*, Borradaile/Eppstein/Zhu | arXiv non-exclusive license to distribute | Uses LaTeX/TeX subset CM fonts (`CBMXSR+CMBX10`, `DGAPDV+CMMI7`, `DGKNVQ+CMEX10`) — the hand-rolled extractor returned text with a space between every letter (`"G le n c o r a B o r r a d a ile"`). pdf-extract returns the real string. |
+| `tounicode_ligature_range.pdf` | synthetic, generated for this repository | none (no third-party content) | One page whose font has a ToUnicode CMap `bfrange` whose destination is a three-character string (`<006600660069>`, an "ffi" ligature, as publisher PDFs carry). `adobe-cmap-parser` 0.4.1 panics on it ("bad length of hexstring"); the extractor must return an error instead of aborting. `pdftotext` reads the page normally. |
 | `arxiv_1808_06100_polynomial_optimization.pdf` | [arXiv:1808.06100v6](https://arxiv.org/abs/1808.06100) — *On the solution existence and stability of polynomial optimization problems*, Vu Trung Hieu | arXiv non-exclusive license | Vietnamese author name + math fonts (`ANWDFI+CMSY10`, `APHKXY+MSAM10`). Same letter-spacing pathology in the legacy extractor; pdf-extract recovers the name. |
 
 Both PDFs are kept under ~210 KB so the repo overhead is small. Provenance

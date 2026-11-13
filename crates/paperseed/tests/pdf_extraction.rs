@@ -140,3 +140,44 @@ fn malformed_pdf_with_header_reports_parse_failure() {
         .expect_err("malformed PDF must not look like an image-only PDF");
     assert!(matches!(error, PaperseedError::PdfExtraction { .. }));
 }
+
+/// A malformed ToUnicode CMap makes the PDF library panic. The panic must
+/// come back as an extraction error, on every path that extracts text.
+#[test]
+fn pdf_library_panic_is_an_extraction_error_not_an_abort() {
+    let bytes = std::fs::read(fixture_path("tounicode_ligature_range.pdf")).unwrap();
+    let error = extract_pdf_text_from_bytes(&bytes).expect_err("the built-in extractor fails");
+    assert!(
+        matches!(error, PaperseedError::PdfExtraction { .. }),
+        "{error:?}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains(paperseed::app::PDF_EXTRACTOR_PANICKED),
+        "{message}"
+    );
+    assert!(message.contains("bad length of hexstring"), "{message}");
+
+    // Import (the ingest path) reports the same error and stores nothing.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = CorpusPaths::new(dir.path().join("corpus"));
+    let request = |extract_full_text| ImportRequest {
+        path: fixture_path("tounicode_ligature_range.pdf"),
+        title: Some("Malformed CMap".to_string()),
+        license: None,
+        yams_hash: None,
+        extract_full_text,
+    };
+    let error = import_with_yams(&paths, request(true), &YamsConfig::disabled()).unwrap_err();
+    assert!(error.to_string().contains("panicked"), "{error}");
+    assert!(CorpusDb::load(&paths.db_path).unwrap().papers.is_empty());
+
+    // Deferred extraction stores the PDF; the first read then fails cleanly.
+    let paper = import_with_yams(&paths, request(false), &YamsConfig::disabled()).unwrap();
+    let read = paperseed::app::get_full_text(&paths, &paper.metadata.id, &YamsConfig::disabled());
+    assert!(read.unwrap_err().to_string().contains("panicked"));
+
+    // A well-formed PDF still extracts afterwards: the guard leaves no state.
+    let good = std::fs::read(fixture_path("arxiv_1408_5939_planar_subgraphs.pdf")).unwrap();
+    assert!(extract_pdf_text_from_bytes(&good).unwrap().unwrap().len() > 10_000);
+}

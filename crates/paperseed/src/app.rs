@@ -473,6 +473,15 @@ pub fn remove_entry(paths: &CorpusPaths, paper_id: &str) -> Result<IndexedPaper>
     Ok(removed)
 }
 
+/// Replace the stored full text of one entry, keeping its file and metadata.
+/// Used when a second extractor recovers more text than the built-in one.
+pub fn set_full_text(paths: &CorpusPaths, paper_id: &str, text: String) -> Result<()> {
+    let mut entry = get_entry(paths, paper_id)?;
+    entry.full_text = Some(text);
+    entry.full_text_path = None;
+    persist_full_text(paths, entry)
+}
+
 pub fn get_full_text(paths: &CorpusPaths, paper_id: &str, yams: &YamsConfig) -> Result<String> {
     let runner = CommandYamsRunner::new(&yams.binary);
     get_full_text_with_yams_runner(paths, paper_id, yams, &runner)
@@ -617,7 +626,7 @@ pub fn extract_pdf_text_from_bytes(bytes: &[u8]) -> Result<Option<String>> {
         return Err(PaperseedError::InvalidPdf);
     }
 
-    let text = pdf_extract::extract_text_from_mem(bytes).map_err(|error| {
+    let text = guarded_pdf_extract(bytes)?.map_err(|error| {
         let detail = error.to_string();
         let reason = if detail.to_ascii_lowercase().contains("encrypt") {
             "PDF is encrypted; provide a decrypted copy".to_string()
@@ -627,6 +636,45 @@ pub fn extract_pdf_text_from_bytes(bytes: &[u8]) -> Result<Option<String>> {
         PaperseedError::PdfExtraction { reason }
     })?;
     Ok(normalize_pdf_text(&text))
+}
+
+/// Marker at the start of the error reason when the PDF library panicked
+/// instead of returning an error.
+pub const PDF_EXTRACTOR_PANICKED: &str = "built-in PDF extractor panicked";
+
+thread_local! {
+    static QUIET_PANIC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run the PDF library with its panics contained. Malformed PDFs make
+/// `pdf-extract` and its parsers panic (for example on a bad ToUnicode CMap);
+/// that must surface as an extraction error, never abort the caller.
+fn guarded_pdf_extract(
+    bytes: &[u8],
+) -> Result<std::result::Result<String, pdf_extract::OutputError>> {
+    static QUIET_HOOK: std::sync::Once = std::sync::Once::new();
+    // Keep the contained panic off stderr; every other panic reports as usual.
+    QUIET_HOOK.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if !QUIET_PANIC.with(std::cell::Cell::get) {
+                previous(info);
+            }
+        }));
+    });
+    QUIET_PANIC.with(|quiet| quiet.set(true));
+    let outcome = std::panic::catch_unwind(|| pdf_extract::extract_text_from_mem(bytes));
+    QUIET_PANIC.with(|quiet| quiet.set(false));
+    outcome.map_err(|payload| {
+        let detail = payload
+            .downcast_ref::<&str>()
+            .map(|message| (*message).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "no panic message".to_string());
+        PaperseedError::PdfExtraction {
+            reason: format!("{PDF_EXTRACTOR_PANICKED}: {detail}"),
+        }
+    })
 }
 
 fn has_pdf_header(bytes: &[u8]) -> bool {
