@@ -93,6 +93,45 @@ browser side effect. In `fallback` mode, open-access DOI results keep their
 direct OA URL; `prefer` routes them through the configured institutional profile
 first.
 
+`papers access` opens the route with `--browser <cmd>` when given, else the
+`browser_command` config key, else `$BROWSER`, else the desktop default:
+
+```bash
+paperbridge papers access --doi 10.1038/nature12373 --browser google-chrome-stable
+paperbridge config set browser_command "google-chrome-stable"
+```
+
+### Fetch a paywalled PDF through your own signed-in Chrome
+
+`papers fetch` retrieves the PDF your institution entitles you to, verifies it,
+and ingests it into the local corpus under its DOI, so `papers open --doi` finds
+it. Start Chrome yourself with a dedicated profile (Chrome refuses remote
+debugging on its default profile) and sign in to your institution there:
+
+```bash
+google-chrome-stable --remote-debugging-port=9222 --no-first-run --no-default-browser-check --user-data-dir="$HOME/.local/share/paperbridge/chrome-profile"
+paperbridge papers fetch --doi 10.1145/3460120.3484766
+paperbridge papers fetch --doi-file dois.txt --out ~/papers   # one JSON line per paper
+```
+
+Or let Paperbridge start it with session restore enabled, so the sign-in
+survives closing the browser:
+
+```bash
+paperbridge browser start      # sign in once in the window; tick "Stay signed in"
+paperbridge browser status     # endpoint, profile, gateway cookie counts (never values)
+paperbridge papers fetch --doi-file dois.txt --launch-browser --headless
+```
+
+With the manual launch line, keep that Chrome window open while you fetch; the
+sign-in may not survive closing it. Paperbridge stores no institutional username, password, or cookie. The session
+stays in that browser profile; Paperbridge attaches to it over the Chrome
+DevTools Protocol on loopback only, opens one tab at a time, and never types
+into a page. When a sign-in page appears it reports `auth_required` and leaves
+the tab open for you. It fetches only what your session can already read. See
+[docs/papers.md](docs/papers.md#fetch-through-your-signed-in-chrome) for
+statuses, provider rules, and the extraction fallback.
+
 Results are paginated (`--offset`, `--limit`) and deduplicated by DOI, arXiv
 ID, PMID, and corroborated title+author, preserving complementary identifiers.
 Pages reuse a fixed per-source prefix (`--per-source`, default 10, max 200);
@@ -192,6 +231,7 @@ paperseed_yams_enabled = true
 institution_access_mode = "off" # off, fallback, prefer
 # institution_resolver_url = "https://resolver.example.edu/openurl"
 # institution_gateway_url = "https://proxy.example.edu/login?url="
+# browser_command = "google-chrome-stable" # papers access; overrides $BROWSER
 ```
 
 ## Config doctor

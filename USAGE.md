@@ -153,6 +153,9 @@ paperbridge papers structure --key ITEMA
 paperbridge papers query --key ITEMA --selector "sections[0].heading"
 paperbridge papers access --url https://example.org/article  # opens the default browser
 paperbridge --json papers access --doi 10.1038/nature12373 --no-open  # JSON only
+paperbridge papers access --doi 10.1038/nature12373 --browser google-chrome-stable
+paperbridge papers fetch --doi 10.1145/3460120.3484766      # PDF via your signed-in Chrome
+paperbridge papers fetch --doi-file dois.txt --out ~/papers # batch, one JSON line per paper
 paperbridge backend-info
 ```
 
@@ -215,3 +218,60 @@ Delete an item from JSON:
 ```bash
 paperbridge delete-item --file delete-item.example.json
 ```
+
+## Fetch through your signed-in Chrome
+
+`papers access` picks its browser in this order: `--browser <cmd>`, the
+`browser_command` config key (`PAPERBRIDGE_BROWSER_COMMAND`), `$BROWSER`, then
+the desktop default. The command is split on whitespace and run without a
+shell; `%s` marks where the URL goes.
+
+`papers fetch` needs a Chrome that you launched with remote debugging and a
+dedicated profile, signed in to your institution:
+
+```bash
+google-chrome-stable --remote-debugging-port=9222 --no-first-run --no-default-browser-check --user-data-dir="$HOME/.local/share/paperbridge/chrome-profile"
+```
+
+Keep that Chrome window open for as long as you fetch. Closing it removes the
+DevTools endpoint ("No Chrome DevTools endpoint answered"), and the
+institutional sign-in may be a session cookie that does not survive a restart.
+`--no-first-run --no-default-browser-check` matter on a fresh profile: without
+them Chrome waits on its first-run screens and opens no DevTools port.
+
+```bash
+paperbridge papers fetch --doi 10.1145/3460120.3484766
+paperbridge --json papers fetch --doi 10.1145/3460120.3484766 --out ~/papers
+paperbridge papers fetch --doi 10.1145/3460120.3484766 --no-ingest --out .
+paperbridge papers fetch --doi-file dois.txt --delay-secs 10
+```
+
+| Flag | Meaning |
+|---|---|
+| `--doi <doi>` / `--doi-file <file>` | one paper, or a list (one DOI per line, `#` comments) |
+| `--cdp-url <url>` | DevTools endpoint, loopback only (default `http://127.0.0.1:9222`) |
+| `--out <dir>` | keep a copy of the PDF as `<doi with _>.pdf` |
+| `--no-ingest` | save the PDF only; do not add it to the corpus |
+| `--force` | fetch even when the corpus already has full text for the DOI |
+| `--delay-secs <n>` | pause between papers in a batch (default 5) |
+| `--launch-browser` | start Chrome on the Paperbridge profile if none answers; close it afterwards |
+| `--headless` | with `--launch-browser`: no window (sign in once without it first) |
+| `--keep-browser` | with `--launch-browser`: leave the started Chrome running |
+
+```bash
+paperbridge browser start [--headless] [--profile <dir>] [--chrome <cmd>] [--cdp-url <url>]
+paperbridge browser status     # endpoint, profile, restore setting, gateway cookie counts
+paperbridge browser stop [--dry-run]   # clean exit so cookies are saved; only the Chrome on that profile
+```
+
+`browser start` sets the profile to "Continue where you left off"
+(`session.restore_on_startup = 1`), which makes Chrome keep the proxy's session
+cookie across restarts. On the Microsoft sign-in page, tick "Stay signed in".
+`browser status` reports cookie counts and expiry times only, never values.
+
+Each result has `status`: `ok`, `auth_required`, `no_pdf`, `gateway_menu` (the
+proxy did not recognise the URL), or `failed`, with a `reason`, and `route`
+(`direct`, `resolver_menu`, `gateway_publisher`, or `gateway_doi`) for how the
+publisher page was reached. A non-`ok` result exits non-zero. Paperbridge stores no credentials
+or cookies; the session stays in your browser profile. Details and the
+provider rule table: [docs/papers.md](docs/papers.md#fetch-through-your-signed-in-chrome).
