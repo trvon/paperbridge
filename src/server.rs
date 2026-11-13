@@ -922,7 +922,7 @@ impl PaperbridgeServer {
     #[tool(
         name = "fetch_paper",
         output_schema = schema_for_type::<crate::fetch::FetchOutcome>(),
-        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = true),
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = true),
         description = "Fetch one paper's PDF through the Chrome the user launched with --remote-debugging-port and signed in to their institution, verify it, and ingest it into the local corpus under its DOI. Returns status ok, auth_required (a tab is left open for the user to sign in; never enter credentials), no_pdf, gateway_menu (the proxy did not recognise the URL; not a sign-in problem), or failed, each with a reason. Stores no credentials or cookies. One paper per call; do not call in parallel."
     )]
     async fn fetch_paper(
