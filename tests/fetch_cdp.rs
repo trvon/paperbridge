@@ -61,6 +61,7 @@ struct MockBrowser {
     activated: Vec<String>,
     body: Option<Vec<u8>>,
     chunks_served: usize,
+    body_read: usize,
 }
 
 struct Loaded {
@@ -87,6 +88,7 @@ impl MockBrowser {
             activated: Vec::new(),
             body: None,
             chunks_served: 0,
+            body_read: 0,
         }
     }
 
@@ -174,12 +176,10 @@ impl MockBrowser {
                     .to_string()
                 }
             }
-            cdp::CHUNK_MARKER => {
-                let start = usize::try_from(args["start"].as_u64().unwrap()).unwrap();
-                let end = usize::try_from(args["end"].as_u64().unwrap()).unwrap();
-                self.chunks_served += 1;
-                base64::engine::general_purpose::STANDARD
-                    .encode(&self.body.as_ref().expect("a fetched body")[start..end])
+            cdp::BODY_MARKER => {
+                assert!(self.body.is_some(), "a fetched body");
+                self.body_read = 0;
+                return json!({"result": {"type": "object", "objectId": "BODY"}});
             }
             cdp::RELEASE_MARKER => {
                 self.body = None;
@@ -250,6 +250,22 @@ impl CdpTransport for MockBrowser {
                 self.evaluate(&id, params["expression"].as_str().unwrap())
                     .await
             }
+            "IO.resolveBlob" => {
+                assert_eq!(params["objectId"], "BODY");
+                json!({"uuid": "BODY-UUID"})
+            }
+            "IO.read" => {
+                assert_eq!(params["handle"], "blob:BODY-UUID");
+                let size = usize::try_from(params["size"].as_u64().unwrap()).unwrap();
+                let body = self.body.as_ref().expect("a fetched body");
+                let end = (self.body_read + size).min(body.len());
+                let data =
+                    base64::engine::general_purpose::STANDARD.encode(&body[self.body_read..end]);
+                self.body_read = end;
+                self.chunks_served += 1;
+                json!({"base64Encoded": true, "data": data, "eof": end == body.len()})
+            }
+            "IO.close" => json!({}),
             "Target.activateTarget" => {
                 self.activated
                     .push(params["targetId"].as_str().unwrap().to_string());

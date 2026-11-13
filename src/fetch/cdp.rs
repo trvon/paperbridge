@@ -23,7 +23,7 @@ pub const DEFAULT_CDP_URL: &str = "http://127.0.0.1:9222";
 pub const CHROME_LAUNCH_LINE: &str = "google-chrome-stable --remote-debugging-port=9222 --no-first-run --no-default-browser-check --user-data-dir=\"$HOME/.local/share/paperbridge/chrome-profile\"";
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(90);
-/// Raw bytes per `Runtime.evaluate` round trip when reading a fetched body.
+/// Raw bytes per `IO.read` round trip when reading a fetched body.
 const CHUNK_BYTES: usize = 512 * 1024;
 
 /// One CDP request/response exchange. The seam tests replace.
@@ -234,7 +234,7 @@ struct FetchMeta {
 pub const STATE_MARKER: &str = "/*paperbridge:state*/";
 pub const HTML_MARKER: &str = "/*paperbridge:html*/";
 pub const FETCH_MARKER: &str = "/*paperbridge:fetch*/";
-pub const CHUNK_MARKER: &str = "/*paperbridge:chunk*/";
+pub const BODY_MARKER: &str = "/*paperbridge:body*/";
 pub const RELEASE_MARKER: &str = "/*paperbridge:release*/";
 
 /// Page scripts. Arguments travel as one JSON literal on its own line and are
@@ -259,21 +259,16 @@ const FETCH_BODY: &str = r#"(async () => {
     const response = await fetch(args.url === null ? location.href : args.url, {credentials: 'include', redirect: 'follow'});
     const declared = Number(response.headers.get('content-length') || 0);
     if (declared > args.maxBytes) return JSON.stringify({error: 'response is larger than ' + args.maxBytes + ' bytes'});
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    if (bytes.length > args.maxBytes) return JSON.stringify({error: 'response is larger than ' + args.maxBytes + ' bytes'});
-    const pdf = bytes.length >= 5 && String.fromCharCode(...bytes.subarray(0, 5)) === '%PDF-';
-    globalThis.__paperbridgeBody = pdf ? bytes : null;
-    return JSON.stringify({status: response.status, contentType: response.headers.get('content-type') || '', finalUrl: response.url, length: bytes.length, pdf});
+    const body = await response.blob();
+    if (body.size > args.maxBytes) return JSON.stringify({error: 'response is larger than ' + args.maxBytes + ' bytes'});
+    const pdf = await body.slice(0, 5).text() === '%PDF-';
+    globalThis.__paperbridgeBody = pdf ? body : null;
+    return JSON.stringify({status: response.status, contentType: response.headers.get('content-type') || '', finalUrl: response.url, length: body.size, pdf});
   } catch (error) {
     return JSON.stringify({error: String(error)});
   }
 })()"#;
-const CHUNK_BODY: &str = r#"(() => {
-  const slice = globalThis.__paperbridgeBody.subarray(args.start, args.end);
-  let binary = '';
-  for (let i = 0; i < slice.length; i += 0x8000) binary += String.fromCharCode.apply(null, slice.subarray(i, i + 0x8000));
-  return btoa(binary);
-})()"#;
+const BODY_BODY: &str = "globalThis.__paperbridgeBody";
 const RELEASE_BODY: &str = "delete globalThis.__paperbridgeBody";
 
 /// One tab opened by Paperbridge in the operator's browser.
@@ -324,11 +319,13 @@ impl<'a> CdpTab<'a> {
             .await
     }
 
-    async fn evaluate(&mut self, expression: String) -> Result<Value> {
+    /// The `result` object of `Runtime.evaluate`: a value when `by_value`,
+    /// otherwise a remote object reference.
+    async fn evaluate_remote(&mut self, expression: String, by_value: bool) -> Result<Value> {
         let result = self
             .session_call(
                 "Runtime.evaluate",
-                json!({"expression": expression, "awaitPromise": true, "returnByValue": true}),
+                json!({"expression": expression, "awaitPromise": true, "returnByValue": by_value}),
             )
             .await?;
         if let Some(details) = result.get("exceptionDetails") {
@@ -339,10 +336,12 @@ impl<'a> CdpTab<'a> {
                 .unwrap_or("page script failed");
             return Err(ZoteroMcpError::Http(format!("page script failed: {text}")));
         }
-        Ok(result
-            .pointer("/result/value")
-            .cloned()
-            .unwrap_or(Value::Null))
+        Ok(result.get("result").cloned().unwrap_or(Value::Null))
+    }
+
+    async fn evaluate(&mut self, expression: String) -> Result<Value> {
+        let mut result = self.evaluate_remote(expression, true).await?;
+        Ok(result.get_mut("value").map(Value::take).unwrap_or_default())
     }
 
     async fn evaluate_string(&mut self, expression: String) -> Result<String> {
@@ -421,7 +420,7 @@ impl<'a> CdpTab<'a> {
     }
 
     /// Fetch `url` (or the tab's own URL when `None`) from page context with
-    /// the browser's session, then read the body out in base64 chunks.
+    /// the browser's session, then read the body out in chunks.
     pub async fn fetch(&mut self, url: Option<&str>, max_bytes: usize) -> Result<FetchedBody> {
         let args = json!({"url": url, "maxBytes": max_bytes});
         let raw = self
@@ -434,32 +433,11 @@ impl<'a> CdpTab<'a> {
         }
         let mut bytes = Vec::new();
         if meta.pdf {
-            bytes.reserve(meta.length);
-            let mut start = 0;
-            while start < meta.length {
-                let end = (start + CHUNK_BYTES).min(meta.length);
-                let args = json!({"start": start, "end": end});
-                let encoded = self
-                    .evaluate_string(script(CHUNK_MARKER, &args, CHUNK_BODY))
-                    .await?;
-                let chunk = base64::engine::general_purpose::STANDARD
-                    .decode(encoded.as_bytes())
-                    .map_err(|error| {
-                        ZoteroMcpError::Serde(format!("browser returned invalid base64: {error}"))
-                    })?;
-                if chunk.len() != end - start {
-                    return Err(ZoteroMcpError::Http(format!(
-                        "browser returned {} bytes for a {}-byte chunk",
-                        chunk.len(),
-                        end - start
-                    )));
-                }
-                bytes.extend_from_slice(&chunk);
-                start = end;
-            }
+            let read = self.read_body(meta.length).await;
             let _ = self
                 .evaluate(script(RELEASE_MARKER, &Value::Null, RELEASE_BODY))
                 .await;
+            bytes = read?;
         }
         Ok(FetchedBody {
             status: meta.status,
@@ -468,6 +446,60 @@ impl<'a> CdpTab<'a> {
             bytes,
             length: meta.length,
         })
+    }
+
+    /// Read the Blob the fetch script kept, through a browser stream: the
+    /// browser encodes each chunk natively and the page holds no second copy.
+    async fn read_body(&mut self, length: usize) -> Result<Vec<u8>> {
+        let body = self
+            .evaluate_remote(script(BODY_MARKER, &Value::Null, BODY_BODY), false)
+            .await?;
+        let object_id = string_field(&body, "objectId")?;
+        let resolved = self
+            .session_call("IO.resolveBlob", json!({"objectId": object_id}))
+            .await?;
+        let handle = format!("blob:{}", string_field(&resolved, "uuid")?);
+        let mut bytes = Vec::with_capacity(length);
+        let outcome = loop {
+            let chunk = match self
+                .session_call("IO.read", json!({"handle": handle, "size": CHUNK_BYTES}))
+                .await
+            {
+                Ok(chunk) => chunk,
+                Err(error) => break Err(error),
+            };
+            let data = chunk
+                .get("data")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let before = bytes.len();
+            if chunk.get("base64Encoded").and_then(Value::as_bool) == Some(true) {
+                if let Err(error) =
+                    base64::engine::general_purpose::STANDARD.decode_vec(data, &mut bytes)
+                {
+                    break Err(ZoteroMcpError::Serde(format!(
+                        "browser returned invalid base64: {error}"
+                    )));
+                }
+            } else {
+                bytes.extend_from_slice(data.as_bytes());
+            }
+            let eof = chunk.get("eof").and_then(Value::as_bool) == Some(true);
+            if eof || bytes.len() == before || bytes.len() > length {
+                break Ok(());
+            }
+        };
+        let _ = self
+            .session_call("IO.close", json!({"handle": handle}))
+            .await;
+        outcome?;
+        if bytes.len() != length {
+            return Err(ZoteroMcpError::Http(format!(
+                "browser returned {} bytes of a {length}-byte body",
+                bytes.len()
+            )));
+        }
+        Ok(bytes)
     }
 
     /// Bring the tab to the front so the operator can sign in. The tab is
