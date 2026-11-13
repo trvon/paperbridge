@@ -59,6 +59,15 @@ pub enum Command {
         action: CollectionAction,
     },
 
+    /// Start, stop, or inspect the dedicated Chrome that `papers fetch` drives
+    #[command(
+        after_help = "The institutional session lives in the Chrome profile directory. `start` sets that profile to \"Continue where you left off\", so the proxy's session cookie survives closing the browser.\nPaperbridge never reads, stores, or prints a cookie value or a credential.\n\nExamples:\n  paperbridge browser start            # sign in to your institution in the window that opens\n  paperbridge browser status\n  paperbridge papers fetch --doi 10.1145/3460120.3484766\n  paperbridge browser stop\n  paperbridge papers fetch --doi-file dois.txt --launch-browser --headless"
+    )]
+    Browser {
+        #[command(subcommand)]
+        action: BrowserAction,
+    },
+
     /// Search, resolve, and inspect papers
     Papers {
         #[command(subcommand)]
@@ -486,6 +495,49 @@ pub enum PapersAction {
         /// Resolve access without opening a browser
         #[arg(long)]
         no_open: bool,
+        /// Browser command to open the route with (overrides browser_command and $BROWSER)
+        #[arg(long, value_name = "CMD", conflicts_with = "no_open")]
+        browser: Option<String>,
+    },
+    /// Fetch a paper's PDF through your signed-in Chrome and ingest it under its DOI
+    #[command(
+        after_help = "Start Chrome yourself first, with a dedicated profile, and sign in to your institution there:\n  google-chrome-stable --remote-debugging-port=9222 --no-first-run --no-default-browser-check --user-data-dir=\"$HOME/.local/share/paperbridge/chrome-profile\"\n\nKeep that Chrome window open while you fetch: closing it ends the DevTools endpoint and may end the sign-in.\nPaperbridge stores no username, password, or cookie; the session stays in that browser profile.\n\nExamples:\n  paperbridge papers fetch --doi 10.1145/3460120.3484766\n  paperbridge papers fetch --doi-file dois.txt --out ~/papers"
+    )]
+    Fetch {
+        /// DOI of the paper to fetch
+        #[arg(
+            long,
+            conflicts_with = "doi_file",
+            required_unless_present = "doi_file"
+        )]
+        doi: Option<String>,
+        /// File of DOIs, one per line (# comments allowed); prints one JSON line per paper
+        #[arg(long, value_name = "FILE")]
+        doi_file: Option<String>,
+        /// Chrome DevTools endpoint of the browser you launched (loopback only)
+        #[arg(long, value_name = "URL", default_value = "http://127.0.0.1:9222")]
+        cdp_url: String,
+        /// Save the PDF without adding it to the Paperseed corpus
+        #[arg(long)]
+        no_ingest: bool,
+        /// Directory that keeps a copy of the PDF (default with --no-ingest: current directory)
+        #[arg(long, value_name = "DIR")]
+        out: Option<String>,
+        /// Fetch again even when the corpus already has full text for the DOI
+        #[arg(long)]
+        force: bool,
+        /// Seconds to wait between papers when using --doi-file
+        #[arg(long, value_name = "SECS", default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=600))]
+        delay_secs: u64,
+        /// Start Chrome on the Paperbridge profile if none answers at --cdp-url, and close it afterwards
+        #[arg(long)]
+        launch_browser: bool,
+        /// With --launch-browser: run Chrome without a window (sign in once without this first)
+        #[arg(long, requires = "launch_browser")]
+        headless: bool,
+        /// With --launch-browser: leave the started Chrome running
+        #[arg(long, requires = "launch_browser")]
+        keep_browser: bool,
     },
     /// Fetch the full paper structure for a Zotero item or cached paper
     Structure {
@@ -556,6 +608,46 @@ pub enum PaperseedAction {
     Seed {
         #[command(subcommand)]
         action: PaperseedSeedAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BrowserAction {
+    /// Start Chrome on the dedicated profile with session restore enabled
+    Start {
+        /// DevTools endpoint to open (loopback only)
+        #[arg(long, value_name = "URL", default_value = "http://127.0.0.1:9222")]
+        cdp_url: String,
+        /// Chrome profile directory (default: the Paperbridge profile in your data directory)
+        #[arg(long, value_name = "DIR")]
+        profile: Option<String>,
+        /// Chrome command (default: browser_command if it is Chrome, else google-chrome-stable)
+        #[arg(long, value_name = "CMD")]
+        chrome: Option<String>,
+        /// Run without a window (sign in once without this first)
+        #[arg(long)]
+        headless: bool,
+    },
+    /// Close the Chrome running on the Paperbridge profile cleanly, so its cookies are saved
+    Stop {
+        /// DevTools endpoint of the browser to close (loopback only)
+        #[arg(long, value_name = "URL", default_value = "http://127.0.0.1:9222")]
+        cdp_url: String,
+        /// Chrome profile directory; only the Chrome running on it is closed
+        #[arg(long, value_name = "DIR")]
+        profile: Option<String>,
+        /// Report what would be closed without closing it
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Report the endpoint, the profile, session restore, and gateway cookie counts (never values)
+    Status {
+        /// DevTools endpoint to inspect (loopback only)
+        #[arg(long, value_name = "URL", default_value = "http://127.0.0.1:9222")]
+        cdp_url: String,
+        /// Chrome profile directory
+        #[arg(long, value_name = "DIR")]
+        profile: Option<String>,
     },
 }
 
@@ -959,9 +1051,187 @@ mod tests {
                     doi: None,
                     url: Some(url),
                     no_open: false,
+                    browser: None,
                 }
             }) if url == "https://example.org/article"
         ));
+    }
+
+    #[test]
+    fn parse_papers_access_browser_flag() {
+        let cli = Cli::try_parse_from([
+            "paperbridge",
+            "papers",
+            "access",
+            "--doi",
+            "10.1000/example",
+            "--browser",
+            "google-chrome-stable --new-window",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Papers {
+                action: PapersAction::Access {
+                    browser: Some(browser),
+                    ..
+                }
+            }) if browser == "google-chrome-stable --new-window"
+        ));
+        let err = Cli::try_parse_from([
+            "paperbridge",
+            "papers",
+            "access",
+            "--doi",
+            "10.1000/example",
+            "--no-open",
+            "--browser",
+            "firefox",
+        ])
+        .unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn parse_papers_fetch_single_and_batch() {
+        let cli = Cli::try_parse_from([
+            "paperbridge",
+            "papers",
+            "fetch",
+            "--doi",
+            "10.1145/3460120.3484766",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Papers {
+                action: PapersAction::Fetch {
+                    doi: Some(doi),
+                    doi_file: None,
+                    cdp_url,
+                    no_ingest: false,
+                    out: None,
+                    force: false,
+                    delay_secs: 5,
+                    launch_browser: false,
+                    headless: false,
+                    keep_browser: false,
+                }
+            }) if doi == "10.1145/3460120.3484766" && cdp_url == "http://127.0.0.1:9222"
+        ));
+
+        let cli = Cli::try_parse_from([
+            "paperbridge",
+            "papers",
+            "fetch",
+            "--doi-file",
+            "dois.txt",
+            "--no-ingest",
+            "--out",
+            "pdfs",
+            "--delay-secs",
+            "9",
+            "--cdp-url",
+            "http://localhost:9333",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Papers {
+                action: PapersAction::Fetch {
+                    doi: None,
+                    doi_file: Some(file),
+                    no_ingest: true,
+                    out: Some(out),
+                    delay_secs: 9,
+                    ..
+                }
+            }) if file == "dois.txt" && out == "pdfs"
+        ));
+
+        for args in [
+            vec!["paperbridge", "papers", "fetch"],
+            vec![
+                "paperbridge",
+                "papers",
+                "fetch",
+                "--doi",
+                "10.1/x",
+                "--doi-file",
+                "f",
+            ],
+            vec![
+                "paperbridge",
+                "papers",
+                "fetch",
+                "--doi",
+                "10.1/x",
+                "--delay-secs",
+                "0",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+    }
+
+    #[test]
+    fn parse_browser_commands_and_fetch_launch_flags() {
+        let cli = Cli::try_parse_from([
+            "paperbridge",
+            "browser",
+            "start",
+            "--headless",
+            "--profile",
+            "/tmp/p",
+            "--chrome",
+            "chromium",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Browser {
+                action: BrowserAction::Start {
+                    cdp_url,
+                    profile: Some(profile),
+                    chrome: Some(chrome),
+                    headless: true,
+                }
+            }) if cdp_url == "http://127.0.0.1:9222" && profile == "/tmp/p" && chrome == "chromium"
+        ));
+        for action in ["stop", "status"] {
+            assert!(Cli::try_parse_from(["paperbridge", "browser", action]).is_ok());
+        }
+        assert!(Cli::try_parse_from(["paperbridge", "browser"]).is_err());
+
+        let cli = Cli::try_parse_from([
+            "paperbridge",
+            "papers",
+            "fetch",
+            "--doi",
+            "10.1/x",
+            "--launch-browser",
+            "--headless",
+            "--keep-browser",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Papers {
+                action: PapersAction::Fetch {
+                    launch_browser: true,
+                    headless: true,
+                    keep_browser: true,
+                    ..
+                }
+            })
+        ));
+        // --headless and --keep-browser only mean something with --launch-browser.
+        for flag in ["--headless", "--keep-browser"] {
+            assert!(
+                Cli::try_parse_from(["paperbridge", "papers", "fetch", "--doi", "10.1/x", flag])
+                    .is_err()
+            );
+        }
     }
 
     #[test]
@@ -982,6 +1252,7 @@ mod tests {
                     doi: Some(doi),
                     url: None,
                     no_open: true,
+                    browser: None,
                 }
             }) if doi == "10.1000/example"
         ));

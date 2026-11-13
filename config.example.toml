@@ -15,6 +15,9 @@ institution_access_mode = "off" # off, fallback, or prefer
 # institution_resolver_url = "https://resolver.example.edu/openurl"
 # institution_gateway_url = "https://proxy.example.edu/login?url="
 # Legacy single-endpoint configs may continue to use institution_access_url.
+# Browser that `papers access` opens routes with. Overrides $BROWSER and the
+# desktop default; `%s` marks the URL position, otherwise the URL is appended.
+# browser_command = "google-chrome-stable"
 
 # Paperseed integration: Paperbridge owns discovery; Paperseed mirrors OA files
 # into a local corpus and prepares license-gated seed manifests.

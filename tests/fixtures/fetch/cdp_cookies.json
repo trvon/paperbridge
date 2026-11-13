@@ -1,0 +1,6 @@
+{"cookies":[
+{"name":"ezproxy","value":"SECRET-EZPROXY-SESSION","domain":".uccs.idm.oclc.org","path":"/","expires":-1,"size":29,"httpOnly":true,"secure":true,"session":true},
+{"name":"ezproxyl","value":"SECRET-EZPROXY-SESSION-L","domain":"login.uccs.idm.oclc.org","path":"/","expires":-1,"size":32,"httpOnly":true,"secure":true,"session":true},
+{"name":"ezproxyn","value":"SECRET-PERSISTENT","domain":".uccs.idm.oclc.org","path":"/","expires":1800000000.5,"size":25,"httpOnly":false,"secure":true,"session":false},
+{"name":"ESTSAUTH","value":"SECRET-OTHER","domain":".login.microsoftonline.com","path":"/","expires":1900000000,"size":20,"httpOnly":true,"secure":true,"session":false}
+]}

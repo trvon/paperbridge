@@ -2,12 +2,14 @@ pub mod access;
 pub mod backend;
 pub mod backends;
 pub mod book;
+pub mod browser;
 pub mod chunking;
 pub mod cli;
 pub mod config;
 pub mod crossref;
 pub mod error;
 pub mod external;
+pub mod fetch;
 pub mod hit_enrich;
 #[doc(hidden)]
 pub mod internals;

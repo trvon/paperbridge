@@ -123,7 +123,7 @@ async fn stdio_contract_metadata_errors_pagination_and_profiles() {
     let mut client = Client::start(&config, "full");
     let manifest = client.rpc("tools/list", json!({}));
     let tools = manifest["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 23);
+    assert_eq!(tools.len(), 24);
     for tool in tools {
         assert!(tool["outputSchema"].is_object(), "{}", tool["name"]);
         assert!(tool["annotations"].is_object());

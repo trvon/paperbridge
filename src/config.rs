@@ -145,6 +145,10 @@ pub struct Config {
     pub institution_gateway_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grobid_url: Option<String>,
+    /// Browser command for `papers access`; wins over `$BROWSER` and the
+    /// desktop default. `%s` marks the URL position; otherwise it is appended.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_command: Option<String>,
     pub grobid_timeout_secs: u64,
     pub grobid_auto_spawn: bool,
     pub grobid_image: String,
@@ -180,6 +184,7 @@ impl Default for Config {
             institution_resolver_url: None,
             institution_gateway_url: None,
             grobid_url: None,
+            browser_command: None,
             grobid_timeout_secs: 120,
             grobid_auto_spawn: false,
             grobid_image: "lfoppiano/grobid:0.8.1".to_string(),
@@ -217,6 +222,7 @@ struct PartialConfig {
     institution_resolver_url: Option<String>,
     institution_gateway_url: Option<String>,
     grobid_url: Option<String>,
+    browser_command: Option<String>,
     grobid_timeout_secs: Option<u64>,
     grobid_auto_spawn: Option<bool>,
     grobid_image: Option<String>,
@@ -307,7 +313,7 @@ impl Config {
         };
         let plain = |opt: &Option<String>| opt.clone().unwrap_or_else(|| "<unset>".to_string());
         format!(
-            "backend_mode = \"{}\"\ncloud_api_base = \"{}\"\nlocal_api_base = \"{}\"\napi_key = {}\nlibrary_type = \"{}\"\nuser_id = {}\ngroup_id = {}\ntimeout_secs = {}\nlog_level = \"{}\"\nhf_token = {}\nsemantic_scholar_api_key = {}\ncore_api_key = {}\nads_api_token = {}\nncbi_api_key = {}\nscholarapi_key = {}\nunpaywall_email = {}\ninstitution_access_mode = \"{}\"\ninstitution_access_url = {}\ninstitution_resolver_url = {}\ninstitution_gateway_url = {}\ngrobid_url = {}\ngrobid_timeout_secs = {}\ngrobid_auto_spawn = {}\ngrobid_image = \"{}\"\nupdate_check_enabled = {}
+            "backend_mode = \"{}\"\ncloud_api_base = \"{}\"\nlocal_api_base = \"{}\"\napi_key = {}\nlibrary_type = \"{}\"\nuser_id = {}\ngroup_id = {}\ntimeout_secs = {}\nlog_level = \"{}\"\nhf_token = {}\nsemantic_scholar_api_key = {}\ncore_api_key = {}\nads_api_token = {}\nncbi_api_key = {}\nscholarapi_key = {}\nunpaywall_email = {}\ninstitution_access_mode = \"{}\"\ninstitution_access_url = {}\ninstitution_resolver_url = {}\ninstitution_gateway_url = {}\ngrobid_url = {}\nbrowser_command = {}\ngrobid_timeout_secs = {}\ngrobid_auto_spawn = {}\ngrobid_image = \"{}\"\nupdate_check_enabled = {}
 paperseed_enabled = {}
 paperseed_auto_download = {}
 paperseed_yams_enabled = {}
@@ -337,6 +343,7 @@ paperseed_corpus_root = {}",
             mask(&self.institution_resolver_url),
             mask(&self.institution_gateway_url),
             plain(&self.grobid_url),
+            plain(&self.browser_command),
             self.grobid_timeout_secs,
             self.grobid_auto_spawn,
             self.grobid_image,
@@ -451,6 +458,11 @@ paperseed_corpus_root = {}",
             ),
             "grobid_url" => Some(
                 self.grobid_url
+                    .clone()
+                    .unwrap_or_else(|| "<unset>".to_string()),
+            ),
+            "browser_command" => Some(
+                self.browser_command
                     .clone()
                     .unwrap_or_else(|| "<unset>".to_string()),
             ),
@@ -571,6 +583,9 @@ paperseed_corpus_root = {}",
             "grobid_url" => {
                 self.grobid_url = optional_string(v);
             }
+            "browser_command" => {
+                self.browser_command = optional_string(v);
+            }
             "grobid_timeout_secs" => {
                 self.grobid_timeout_secs = v.parse::<u64>().map_err(|_| {
                     ZoteroMcpError::InvalidInput(format!(
@@ -615,7 +630,7 @@ paperseed_corpus_root = {}",
             }
             _ => {
                 return Err(ZoteroMcpError::InvalidInput(format!(
-                    "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key, core_api_key, ads_api_token, ncbi_api_key, scholarapi_key, unpaywall_email, institution_access_mode, institution_access_url, institution_resolver_url, institution_gateway_url, grobid_url, grobid_timeout_secs, grobid_auto_spawn, grobid_image, update_check_enabled, paperseed_enabled, paperseed_auto_download, paperseed_yams_enabled, paperseed_corpus_root"
+                    "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key, core_api_key, ads_api_token, ncbi_api_key, scholarapi_key, unpaywall_email, institution_access_mode, institution_access_url, institution_resolver_url, institution_gateway_url, grobid_url, browser_command, grobid_timeout_secs, grobid_auto_spawn, grobid_image, update_check_enabled, paperseed_enabled, paperseed_auto_download, paperseed_yams_enabled, paperseed_corpus_root"
                 )));
             }
         }
@@ -688,6 +703,9 @@ paperseed_corpus_root = {}",
         }
         if let Some(v) = partial.grobid_url {
             self.grobid_url = Some(v);
+        }
+        if let Some(v) = partial.browser_command {
+            self.browser_command = Some(v);
         }
         if let Some(v) = partial.grobid_timeout_secs {
             self.grobid_timeout_secs = v;
@@ -835,6 +853,9 @@ paperseed_corpus_root = {}",
                     } else {
                         self.grobid_url = Some(value.to_string());
                     }
+                }
+                "PAPERBRIDGE_BROWSER_COMMAND" => {
+                    self.browser_command = optional_string(value);
                 }
                 "PAPERBRIDGE_GROBID_TIMEOUT_SECS" => {
                     self.grobid_timeout_secs = parse_u64_env(key, value)?;
@@ -1493,6 +1514,7 @@ mod tests {
         "scholarapi_key",
         "unpaywall_email",
         "grobid_url",
+        "browser_command",
         "paperseed_corpus_root",
     ];
     const REQUIRED_STRING_KEYS: &[&str] = &["cloud_api_base", "local_api_base", "log_level"];
