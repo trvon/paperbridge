@@ -321,6 +321,9 @@ pub struct CrossrefWork {
     pub abstract_note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// The publisher's landing page (Crossref `resource.primary.URL`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publisher: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -143,6 +143,18 @@ struct RawCrossrefMessage {
     publisher: Option<String>,
     #[serde(rename = "type")]
     work_type: Option<String>,
+    resource: Option<RawResource>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawResource {
+    primary: Option<RawResourceLink>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawResourceLink {
+    #[serde(rename = "URL")]
+    url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -197,6 +209,10 @@ fn convert_message(doi_input: &str, msg: RawCrossrefMessage) -> CrossrefWork {
         journal,
         abstract_note,
         url: msg.url,
+        resource_url: msg
+            .resource
+            .and_then(|resource| resource.primary)
+            .and_then(|link| link.url),
         publisher: msg.publisher,
         item_type: msg.work_type,
         oa_pdf_url: None,
