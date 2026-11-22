@@ -89,7 +89,8 @@ pub struct CitationConfig {
     pub store_path: PathBuf,
     pub openalex_base: String,
     pub openalex_mailto: Option<String>,
-    /// Wired when OpenAlex key configuration lands.
+    /// `openalex_api_key` / `PAPERBRIDGE_OPENALEX_API_KEY`; sent as
+    /// `api_key` and redacted from error text.
     pub openalex_api_key: Option<String>,
     pub semantic_scholar_base: String,
     pub semantic_scholar_api_key: Option<String>,
@@ -236,6 +237,7 @@ pub(crate) struct Call {
     ledger: BudgetLedger,
     diagnostics: CitationDiagnostics,
     conflicts: u32,
+    pending_splits: u32,
     /// The request's DOI in its legacy form, when that differs.
     legacy_doi: Option<ExtId>,
 }
@@ -416,6 +418,7 @@ impl CitationService {
             ledger: BudgetLedger::new(&self.inner.config.budget),
             diagnostics: CitationDiagnostics::default(),
             conflicts: 0,
+            pending_splits: 0,
             legacy_doi: legacy_doi_of(&req.id, &subject),
         };
 
@@ -449,6 +452,11 @@ impl CitationService {
         if call.conflicts > 0 {
             call.note("identity_conflicts_withheld");
         }
+        if call.pending_splits > 0 {
+            // A preprint/published split waits until the merge on top of it
+            // is undone (rule 12); the versions stay unmerged meanwhile.
+            call.note("version_split_pending");
+        }
         call.diagnostics.budget = call.ledger.report();
         Ok(build_result(
             &subject,
@@ -460,6 +468,20 @@ impl CitationService {
             coverage,
             call.diagnostics,
         ))
+    }
+
+    /// Record works in one store transaction, tallying vetoes and pending
+    /// version splits for diagnostics.
+    async fn observe(
+        &self,
+        call: &mut Call,
+        records: Vec<WorkRecord>,
+        source: &'static str,
+    ) -> Result<()> {
+        let out = self.db(move |s| s.observe_report(&records, source)).await?;
+        call.conflicts += out.conflicts;
+        call.pending_splits += out.pending_splits;
+        Ok(())
     }
 
     async fn read_page(
@@ -517,12 +539,13 @@ impl CitationService {
                     // Another writer advanced this generation: continue from
                     // its committed position.
                     let latest = s.begin_fetch(&subject, direction, source, false)?;
-                    return Ok((latest, out.identity_conflicts));
+                    return Ok((latest, out.identity_conflicts, out.pending_splits));
                 }
-                Ok((out.state, out.identity_conflicts))
+                Ok((out.state, out.identity_conflicts, out.pending_splits))
             })
             .await?;
         call.conflicts += out.1;
+        call.pending_splits += out.2;
         Ok(out.0)
     }
 
@@ -608,7 +631,7 @@ impl CitationService {
                 if ids.is_empty() {
                     call.note(&format!("openalex_{}_empty", direction.as_str()));
                     let record = work.record;
-                    self.db(move |s| s.observe(&[record], OA)).await?;
+                    self.observe(call, vec![record], OA).await?;
                     return Ok(false);
                 }
                 let page = Page {
@@ -633,7 +656,7 @@ impl CitationService {
                 return Ok(true);
             }
             let record = work.record;
-            self.db(move |s| s.observe(&[record], OA)).await?;
+            self.observe(call, vec![record], OA).await?;
         }
         let Some(work_id) = work_id else {
             return Ok(false);
@@ -743,7 +766,7 @@ impl CitationService {
                     }
                 };
                 let primary = record.primary.clone();
-                self.db(move |s| s.observe(&[record], S2)).await?;
+                self.observe(call, vec![record], S2).await?;
                 primary
             }
         };
@@ -838,7 +861,7 @@ impl CitationService {
             {
                 Ok(records) => {
                     if !records.is_empty() {
-                        self.db(move |s| s.observe(&records, OA)).await?;
+                        self.observe(call, records, OA).await?;
                         changed = true;
                     }
                 }

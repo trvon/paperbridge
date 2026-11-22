@@ -242,6 +242,53 @@ fn versions_are_order_independent_and_never_merged() {
     assert_eq!(items[0].versions, vec![arxiv]);
 }
 
+/// Rule 12: a version split whose merge is inside a later merge of the
+/// class writes nothing and is reported as pending; once the outer merge is
+/// undone the same record splits.
+#[test]
+fn version_split_inside_outer_merge_is_pending() {
+    let arxiv = ExtId::arxiv("1706.03762").unwrap();
+    let mut s = Store::open_in_memory().unwrap();
+    s.observe(
+        &[rec(s2(7), std::slice::from_ref(&arxiv))],
+        "semantic_scholar",
+    )
+    .unwrap();
+    // A later merge on top: W5 (OpenAlex preprint record) joins the class.
+    s.observe(&[rec(w(5), std::slice::from_ref(&arxiv))], "openalex")
+        .unwrap();
+    let outer = last_merge(&mut s);
+    let before = s.merges().unwrap();
+
+    let folded = rec(s2(7), &[d(7), arxiv.clone()]);
+    let out = s
+        .observe_report(std::slice::from_ref(&folded), "semantic_scholar")
+        .unwrap();
+    assert_eq!(out.pending_splits, 1);
+    assert_eq!(
+        s.merges().unwrap(),
+        before,
+        "no merge row written or undone"
+    );
+    assert_eq!(
+        s.class_ids(&arxiv).unwrap(),
+        vec![arxiv.clone(), w(5), s2(7)]
+    );
+    assert_eq!(
+        s.class_ids(&d(7)).unwrap(),
+        vec![d(7)],
+        "versions not merged"
+    );
+
+    assert!(s.undo_merge(outer).unwrap());
+    let out = s
+        .observe_report(std::slice::from_ref(&folded), "semantic_scholar")
+        .unwrap();
+    assert_eq!(out.pending_splits, 0);
+    assert_eq!(s.class_ids(&arxiv).unwrap(), vec![arxiv.clone()]);
+    assert_eq!(s.class_ids(&s2(7)).unwrap(), vec![d(7), s2(7)]);
+}
+
 #[test]
 fn refs_fetch_records_coverage_and_dedupes_sources() {
     let mut store = Store::open_in_memory().unwrap();

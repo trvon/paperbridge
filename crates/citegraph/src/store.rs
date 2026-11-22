@@ -159,6 +159,18 @@ pub struct CommitOutcome {
     pub superseded: bool,
     /// Merges vetoed by the strong-id, version or undo rules.
     pub identity_conflicts: u32,
+    /// Version splits not applied because the merge was not the outermost
+    /// of its class (rule 12).
+    pub pending_splits: u32,
+}
+
+/// Result of [`Store::observe_report`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ObserveOutcome {
+    pub conflicts: u32,
+    /// Version splits not applied because the merge was not the outermost
+    /// of its class (rule 12); reported, never forced.
+    pub pending_splits: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -285,17 +297,29 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?)
     }
 
-    /// Record works (for example hydrated metadata) in one transaction.
-    /// Returns the number of vetoed merges.
+    /// Record works (for example hydrated metadata) in one `BEGIN
+    /// IMMEDIATE` transaction. Returns the number of vetoed merges.
     pub fn observe(&mut self, records: &[WorkRecord], source: &str) -> Result<u32> {
+        Ok(self.observe_report(records, source)?.conflicts)
+    }
+
+    /// [`Store::observe`], also reporting version splits left pending.
+    pub fn observe_report(
+        &mut self,
+        records: &[WorkRecord],
+        source: &str,
+    ) -> Result<ObserveOutcome> {
         let tx = self.write()?;
         let mut w = Writer::new(&tx)?;
         for record in records {
             w.observe(record, source)?;
         }
-        let conflicts = w.conflicts;
+        let out = ObserveOutcome {
+            conflicts: w.conflicts,
+            pending_splits: w.pending_splits,
+        };
         tx.commit()?;
-        Ok(conflicts)
+        Ok(out)
     }
 
     /// Latest generation for `key`, if any.
@@ -380,6 +404,7 @@ impl Store {
                 replay: true,
                 superseded: true,
                 identity_conflicts: 0,
+                pending_splits: 0,
             });
         }
         let replay = current.pages != state.pages;
@@ -454,13 +479,14 @@ impl Store {
         }
         let state = generation(&tx, subject, key, state.generation)?
             .ok_or_else(|| no_fetch(key, state.generation))?;
-        let identity_conflicts = w.conflicts;
+        let (identity_conflicts, pending_splits) = (w.conflicts, w.pending_splits);
         tx.commit()?;
         Ok(CommitOutcome {
             state,
             replay,
             superseded: false,
             identity_conflicts,
+            pending_splits,
         })
     }
 
@@ -676,20 +702,7 @@ impl Store {
             return Ok(false);
         };
         let uf = UnionFind::load(&tx)?;
-        let root = uf.find(base_a);
-        let mut stmt = tx.prepare_cached(
-            "SELECT id, base_a FROM merge_log WHERE undone_at IS NULL ORDER BY seq DESC, id DESC",
-        )?;
-        let mut outermost = None;
-        for r in stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))? {
-            let (id, a) = r?;
-            if uf.find(a) == root {
-                outermost = Some(id);
-                break;
-            }
-        }
-        drop(stmt);
-        if let Some(blocking) = outermost.filter(|&id| id != merge_id) {
+        if let Some(blocking) = outermost_in_class(&tx, &uf, base_a)?.filter(|&id| id != merge_id) {
             return Err(Error::UndoBlocked {
                 merge: merge_id,
                 blocking,
@@ -826,6 +839,22 @@ fn set_wal(conn: &Connection) -> Result<()> {
             Err(e) => return Err(e.into()),
         }
     }
+}
+
+/// The latest active merge (by `seq`) among those joining works now in
+/// `work`'s class: the only one rules 9 and 12 allow removing.
+fn outermost_in_class(conn: &Connection, uf: &UnionFind, work: i64) -> Result<Option<i64>> {
+    let root = uf.find(work);
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, base_a FROM merge_log WHERE undone_at IS NULL ORDER BY seq DESC, id DESC",
+    )?;
+    for r in stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))? {
+        let (id, a) = r?;
+        if uf.find(a) == root {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
 }
 
 fn bump_seq(conn: &Connection) -> Result<i64> {
@@ -1160,6 +1189,7 @@ struct Writer<'t> {
     tx: &'t Transaction<'t>,
     uf: UnionFind,
     conflicts: u32,
+    pending_splits: u32,
 }
 
 impl<'t> Writer<'t> {
@@ -1168,6 +1198,7 @@ impl<'t> Writer<'t> {
             uf: UnionFind::load(tx)?,
             tx,
             conflicts: 0,
+            pending_splits: 0,
         })
     }
 
@@ -1258,17 +1289,33 @@ impl<'t> Writer<'t> {
         Ok(Some(id))
     }
 
-    /// Undo active merges that directly join `a` and `b` because a later
-    /// record shows them to be two versions of one paper. Not sticky.
+    /// Undo an active merge that directly joins `a` and `b` because a later
+    /// record shows them to be two versions of one paper (not sticky). Rule
+    /// 12: only when that merge is the outermost of its class, as for a user
+    /// undo; otherwise write nothing and count the split as pending (the
+    /// mixed-version veto then keeps the two sides from growing together).
     fn split_versions(&mut self, a: i64, b: i64) -> Result<()> {
-        let changed = self.tx.execute(
-            "UPDATE merge_log SET undone_at = ?3, undone_seq = ?4, undo_reason = 'version_split'
-             WHERE undone_at IS NULL AND ((base_a = ?1 AND base_b = ?2) OR (base_a = ?2 AND base_b = ?1))",
-            params![a, b, now_rfc3339(), bump_seq(self.tx)?],
-        )?;
-        if changed > 0 {
-            self.uf = UnionFind::load(self.tx)?;
+        let row: Option<i64> = self
+            .tx
+            .prepare_cached(
+                "SELECT id FROM merge_log WHERE undone_at IS NULL
+                 AND ((base_a = ?1 AND base_b = ?2) OR (base_a = ?2 AND base_b = ?1))",
+            )?
+            .query_row(params![a, b], |r| r.get(0))
+            .optional()?;
+        let Some(merge_id) = row else {
+            return Ok(());
+        };
+        if outermost_in_class(self.tx, &self.uf, a)? != Some(merge_id) {
+            self.pending_splits += 1;
+            return Ok(());
         }
+        self.tx.execute(
+            "UPDATE merge_log SET undone_at = ?2, undone_seq = ?3, undo_reason = 'version_split'
+             WHERE id = ?1",
+            params![merge_id, now_rfc3339(), bump_seq(self.tx)?],
+        )?;
+        self.uf = UnionFind::load(self.tx)?;
         Ok(())
     }
 
