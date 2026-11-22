@@ -110,11 +110,15 @@ fn new_ids_join_by_logged_merge_and_survive_undo() {
     let w9_d1 = last_merge(&mut store);
     assert_ne!(w1_d1, w9_d1, "W9 joined by its own merge row");
 
-    assert!(store.undo_merge(w1_d1).unwrap());
-    assert_eq!(store.class_ids(&w(1)).unwrap(), vec![w(1)]);
-    assert_eq!(store.class_ids(&w(9)).unwrap(), vec![d(1), w(9), s2(1)]);
+    assert!(matches!(
+        store.undo_merge(w1_d1),
+        Err(Error::UndoBlocked { blocking, .. }) if blocking == w9_d1
+    ));
     assert!(store.undo_merge(w9_d1).unwrap());
     assert_eq!(store.class_ids(&w(9)).unwrap(), vec![w(9)]);
+    assert_eq!(store.class_ids(&d(1)).unwrap(), vec![d(1), w(1), s2(1)]);
+    assert!(store.undo_merge(w1_d1).unwrap());
+    assert_eq!(store.class_ids(&w(1)).unwrap(), vec![w(1)]);
     assert_eq!(store.class_ids(&d(1)).unwrap(), vec![d(1), s2(1)]);
 }
 
@@ -137,13 +141,23 @@ fn undo_with_dependent_merge_keeps_later_evidence() {
         vec![d(1), w(1), w(2), s2(1)]
     );
 
+    let later = last_merge(&mut store);
+    // The W1 merge is inside the later W2 merge: undo the outermost first.
+    assert!(matches!(
+        store.undo_merge(first),
+        Err(Error::UndoBlocked { merge, blocking }) if merge == first && blocking == later
+    ));
+    assert!(store.undo_merge(later).unwrap());
     assert!(store.undo_merge(first).unwrap());
     assert_eq!(store.class_ids(&w(1)).unwrap(), vec![w(1)]);
+    assert_eq!(store.class_ids(&w(2)).unwrap(), vec![w(2)]);
+    assert_eq!(store.class_ids(&s2(1)).unwrap(), vec![d(1), s2(1)]);
+    // Undone evidence is sticky per base pair: W2+S1 again is vetoed, but
+    // other evidence (W2+d1) is not blocked by it.
+    assert_eq!(store.observe(&[rec(w(2), &[s2(1)])], "x").unwrap(), 1);
+    assert_eq!(store.observe(&[rec(w(2), &[d(1)])], "x").unwrap(), 0);
     assert_eq!(store.class_ids(&w(2)).unwrap(), vec![d(1), w(2), s2(1)]);
-    // Re-observing the never-undone evidence is a no-op, not a veto.
-    assert_eq!(store.observe(&[rec(w(2), &[s2(1)])], "x").unwrap(), 0);
-    assert_eq!(store.class_ids(&w(2)).unwrap(), vec![d(1), w(2), s2(1)]);
-    // Other evidence linking W1 to the class is not blocked by the undo.
+    // Other evidence linking W1 to the class is not blocked by its undo.
     store.observe(&[rec(w(1), &[s2(1)])], "x").unwrap();
     assert_eq!(
         store.class_ids(&w(1)).unwrap(),
@@ -615,9 +629,17 @@ fn two_connections_in_threads_keep_invariants() {
                 s.observe(&[rec(s2(1 + round % 2), &[d(1 + round % 3)])], "x")
                     .unwrap();
                 if round % 3 == 2
-                    && let Some(m) = s.merges().unwrap().iter().find(|m| m.undone_at.is_none())
+                    && let Some(m) = s
+                        .merges()
+                        .unwrap()
+                        .iter()
+                        .rev()
+                        .find(|m| m.undone_at.is_none())
                 {
-                    s.undo_merge(m.id).unwrap();
+                    match s.undo_merge(m.id) {
+                        Ok(_) | Err(Error::UndoBlocked { .. }) => {}
+                        Err(e) => panic!("{e}"),
+                    }
                 }
             }
         })
@@ -1003,7 +1025,15 @@ proptest! {
                 }
                 Op::Undo(i) => {
                     if let Some(m) = store.merges().unwrap().get(i) {
-                        store.undo_merge(m.id).unwrap();
+                        let before = snapshot(&store);
+                        match store.undo_merge(m.id) {
+                            Ok(_) => {}
+                            Err(Error::UndoBlocked { blocking, .. }) => {
+                                prop_assert_ne!(blocking, m.id);
+                                prop_assert_eq!(&before, &snapshot(&store));
+                            }
+                            Err(e) => return Err(TestCaseError::fail(e.to_string())),
+                        }
                     }
                 }
                 Op::Redo(i) => {

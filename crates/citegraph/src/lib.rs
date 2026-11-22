@@ -36,6 +36,8 @@ pub enum Error {
     NewerSchema { found: u32, supported: u32 },
     #[error("citation store is inconsistent: {0}")]
     Corrupt(String),
+    #[error("merge {merge} is inside merge {blocking}; undo merge {blocking} first")]
+    UndoBlocked { merge: i64, blocking: i64 },
     #[error("no fetch generation {generation} for {subject} {direction}/{origin}")]
     NoFetch {
         subject: String,

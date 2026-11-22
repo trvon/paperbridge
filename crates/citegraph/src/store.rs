@@ -648,23 +648,66 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Undo an active merge (sets `undone_at`). Returns false if the merge
-    /// does not exist or is already undone. Classes are recomputed from the
-    /// merges that remain active (design rule 9), so later merges keep their
-    /// own evidence and nothing cascades. Active rows form a forest, so the
-    /// row's two evidence works always end up in different classes. Undo is
+    /// Undo an active merge (sets `undone_at`) in one `BEGIN IMMEDIATE`
+    /// transaction. Returns false if the merge does not exist or is already
+    /// undone.
+    ///
+    /// Only the outermost merge of a class may be undone: the latest active
+    /// merge (by `seq`) among those joining works now in its class. Its
+    /// winner is necessarily the current class root (design rule 9), and
+    /// undoing in this order restores exactly the classes that existed
+    /// before it, so review state logged per merge can be restored without a
+    /// spurious `needs_decision`. An inner merge fails with
+    /// [`Error::UndoBlocked`] naming the merge to undo first.
+    ///
+    /// Classes are recomputed from the merges that remain active. Undo is
     /// sticky for this evidence pair: observing the same two works together
     /// again does not redo it; [`Store::redo_merge`] does.
     pub fn undo_merge(&mut self, merge_id: i64) -> Result<bool> {
         let tx = self.write()?;
+        let row: Option<(i64, i64)> = tx
+            .query_row(
+                "SELECT base_a, winner FROM merge_log WHERE id = ?1 AND undone_at IS NULL",
+                [merge_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((base_a, winner)) = row else {
+            return Ok(false);
+        };
+        let uf = UnionFind::load(&tx)?;
+        let root = uf.find(base_a);
+        let mut stmt = tx.prepare_cached(
+            "SELECT id, base_a FROM merge_log WHERE undone_at IS NULL ORDER BY seq DESC, id DESC",
+        )?;
+        let mut outermost = None;
+        for r in stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))? {
+            let (id, a) = r?;
+            if uf.find(a) == root {
+                outermost = Some(id);
+                break;
+            }
+        }
+        drop(stmt);
+        if let Some(blocking) = outermost.filter(|&id| id != merge_id) {
+            return Err(Error::UndoBlocked {
+                merge: merge_id,
+                blocking,
+            });
+        }
+        if uf.find(winner) != winner {
+            return Err(Error::Corrupt(format!(
+                "outermost merge {merge_id} has a winner that is not its class root"
+            )));
+        }
         let seq = bump_seq(&tx)?;
-        let changed = tx.execute(
+        tx.execute(
             "UPDATE merge_log SET undone_at = ?2, undone_seq = ?3, undo_reason = 'user'
              WHERE id = ?1 AND undone_at IS NULL",
             params![merge_id, now_rfc3339(), seq],
         )?;
         tx.commit()?;
-        Ok(changed == 1)
+        Ok(true)
     }
 
     /// Re-apply an undone merge as a new row (append-only). Returns the new
