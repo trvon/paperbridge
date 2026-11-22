@@ -33,15 +33,32 @@ impl CrossrefClient {
         }
     }
 
+    /// Resolve a DOI. Tries the canonical form first, then (on 404 only)
+    /// the legacy form, so a DOI that really ends in punctuation or holds
+    /// `%2F`, and `doi:` hit_ids minted before the shared normalizer, still
+    /// resolve.
     pub async fn resolve_doi(&self, doi: &str) -> Result<CrossrefWork> {
-        let Some(canonical) = normalize_doi_str(doi) else {
+        let forms = crate::hit_enrich::doi_lookup_forms(doi);
+        if forms.is_empty() || normalize_doi_str(doi).is_none() {
             return Err(ZoteroMcpError::InvalidInput(format!(
                 "'{}' does not look like a valid DOI",
                 doi.trim()
             )));
-        };
-        let trimmed = canonical.as_str();
+        }
+        let last = forms.len() - 1;
+        for (index, form) in forms.iter().enumerate() {
+            match self.resolve_form(form).await {
+                Err(ZoteroMcpError::Api { status: 404, .. }) if index < last => continue,
+                other => return other,
+            }
+        }
+        Err(ZoteroMcpError::Api {
+            status: 404,
+            message: format!("DOI '{}' not found in Crossref", doi.trim()),
+        })
+    }
 
+    async fn resolve_form(&self, trimmed: &str) -> Result<CrossrefWork> {
         let encoded = urlencoding::encode(trimmed);
         let url = format!("{}/works/{encoded}", self.base_url);
 
@@ -610,6 +627,35 @@ mod tests {
         assert_eq!(hits[0].doi.as_deref(), Some("10.1/a"));
         assert_eq!(hits[0].venue.as_deref(), Some("Venue A"));
         assert_eq!(hits[1].title, "Paper B");
+    }
+
+    #[tokio::test]
+    async fn resolve_doi_retries_legacy_form_on_not_found() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/works/10.5555%2Fseed"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/works/10.5555%2Fseed."))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "message": {"DOI": "10.5555/seed.", "title": ["Seed"]}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = CrossrefClient::new(Some(&server.uri()));
+        let work = client.resolve_doi("doi:10.5555/seed.").await.unwrap();
+        assert_eq!(work.title.as_deref(), Some("Seed"));
+        // A DOI with no legacy variant still reports not-found once.
+        let err = client.resolve_doi("10.5555/other").await.unwrap_err();
+        assert!(matches!(err, ZoteroMcpError::Api { status: 404, .. }));
     }
 
     #[tokio::test]
