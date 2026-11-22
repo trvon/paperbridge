@@ -36,7 +36,8 @@ impl OpenAlexClient {
         }
     }
 
-    /// Send `api_key` on every request (OpenAlex requires a key since 2026-02).
+    /// Send `api_key` on every request. Optional; a key raises the OpenAlex
+    /// daily budget over unkeyed (`mailto`-only) traffic.
     pub fn with_api_key(mut self, api_key: Option<String>) -> Self {
         self.api_key = api_key.filter(|k| k.trim().is_empty().not());
         self
@@ -86,7 +87,10 @@ impl OpenAlexClient {
         let mut url = format!("{}/works/doi:{encoded}?select=is_retracted", self.base_url);
         self.push_auth_params(&mut url);
 
-        let response = send_with_retry("openalex", self.client.get(&url)).await?;
+        // Single attempt outside the request router: this is a best-effort
+        // side check on resolve/open, so it must not retry or set the shared
+        // OpenAlex cooldown that `search_papers` also waits on.
+        let response = self.client.get(&url).send().await?;
         let status = response.status();
         if status == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
@@ -538,6 +542,81 @@ mod tests {
         }
         assert!(!format!("{client:?}").contains(KEY));
         assert!(format!("{client:?}").contains("has_api_key: true"));
+    }
+
+    /// Keys that need percent-encoding must be redacted in both spellings.
+    const ODD_KEY: &str = "k+y/=&secret";
+
+    #[tokio::test]
+    async fn status_errors_are_built_without_the_key() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500).set_body_string(KEY))
+            .mount(&server)
+            .await;
+        let client = OpenAlexClient::new(Some(&server.uri()), None).with_api_key(Some(KEY.into()));
+        // Unredacted inner errors: the message itself must not carry the URL query.
+        for err in [
+            client.search_inner("q", 1).await.unwrap_err(),
+            client.is_retracted_inner("10.1/x").await.unwrap_err(),
+        ] {
+            assert!(matches!(err, ZoteroMcpError::Api { status: 500, .. }));
+            assert!(!format!("{err} {err:?}").contains(KEY));
+        }
+    }
+
+    #[tokio::test]
+    async fn decode_errors_redact_the_key_on_both_paths() {
+        use wiremock::matchers::{method, path_regex, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/works"))
+            .and(query_param("api_key", ODD_KEY))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{not json"))
+            .expect(4)
+            .mount(&server)
+            .await;
+        let client =
+            OpenAlexClient::new(Some(&server.uri()), None).with_api_key(Some(ODD_KEY.into()));
+        let encoded = urlencoding::encode(ODD_KEY).into_owned();
+
+        // reqwest decode errors embed the request URL, so redaction is load-bearing.
+        let raw = client.is_retracted_inner("10.1/x").await.unwrap_err();
+        assert!(raw.to_string().contains(&encoded), "{raw}");
+
+        for err in [
+            client.search("q", 1).await.unwrap_err(),
+            client.is_retracted("10.1/x").await.unwrap_err(),
+            client.search("q", 1).await.unwrap_err(),
+        ] {
+            let text = format!("{err} {err:?}");
+            assert!(!text.contains(ODD_KEY), "{text}");
+            assert!(!text.contains(&encoded), "{text}");
+        }
+    }
+
+    #[test]
+    fn redact_covers_every_message_variant() {
+        let client = OpenAlexClient::new(None, None).with_api_key(Some(ODD_KEY.into()));
+        let encoded = urlencoding::encode(ODD_KEY).into_owned();
+        let msg = format!("raw {ODD_KEY} enc {encoded} q ?api_key={encoded}");
+        for err in [
+            ZoteroMcpError::Http(msg.clone()),
+            ZoteroMcpError::Serde(msg.clone()),
+            ZoteroMcpError::Api {
+                status: 500,
+                message: msg.clone(),
+            },
+        ] {
+            let text = format!("{:?}", client.redact(err));
+            assert!(!text.contains(ODD_KEY), "{text}");
+            assert!(!text.contains(&encoded), "{text}");
+        }
     }
 
     #[test]

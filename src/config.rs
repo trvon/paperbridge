@@ -1212,6 +1212,24 @@ mod tests {
     }
 
     #[test]
+    fn openalex_prefixed_env_beats_bare_alias_in_either_order() {
+        for pairs in [
+            [
+                ("OPENALEX_API_KEY", "bare"),
+                ("PAPERBRIDGE_OPENALEX_API_KEY", "prefixed"),
+            ],
+            [
+                ("PAPERBRIDGE_OPENALEX_API_KEY", "prefixed"),
+                ("OPENALEX_API_KEY", "bare"),
+            ],
+        ] {
+            let mut cfg = Config::default();
+            cfg.apply_env_overrides(pairs).unwrap();
+            assert_eq!(cfg.openalex_api_key.as_deref(), Some("prefixed"));
+        }
+    }
+
+    #[test]
     fn invalid_env_type_fails() {
         let mut cfg = Config {
             user_id: Some(1),

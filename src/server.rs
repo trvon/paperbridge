@@ -893,7 +893,7 @@ impl PaperbridgeServer {
         name = "resolve_doi",
         output_schema = schema_for_type::<crate::models::CrossrefWork>(),
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true),
-        description = "Resolve a DOI via Crossref and return structured citation metadata (title, authors, year, journal, abstract)"
+        description = "Resolve a DOI via Crossref and return structured citation metadata (title, authors, year, journal, abstract) plus retraction/correction notices from Crossref updated-by. When Crossref lists no retraction, also checks OpenAlex is_retracted (bounded, best-effort); notices_checked/notices_failed report which checks ran."
     )]
     async fn resolve_doi(
         &self,

@@ -1222,6 +1222,8 @@ mod tests {
             oa_pdf_url: None,
             notices: Vec::new(),
             openalex_only_retracted: None,
+            notices_checked: Vec::new(),
+            notices_failed: Vec::new(),
         }
     }
 

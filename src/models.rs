@@ -337,6 +337,14 @@ pub struct CrossrefWork {
     /// retraction notice; an unconfirmed secondary signal. Omitted otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openalex_only_retracted: Option<bool>,
+    /// Sources whose notice check succeeded for this response (`crossref`,
+    /// `openalex`). Present on `resolve_doi`/`open_paper`; an absent source was
+    /// skipped or failed, so empty `notices` is not proof of a clean record.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices_checked: Vec<String>,
+    /// Sources whose notice check failed or timed out. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices_failed: Vec<String>,
 }
 
 /// One editorial notice attached to a work (Crossref `updated-by` entry).

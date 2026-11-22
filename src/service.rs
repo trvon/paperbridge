@@ -78,6 +78,9 @@ pub struct OpenPaperRequest {
 
 pub const DEFAULT_FULLTEXT_MAX_CHARS: usize = 8000;
 
+/// Budget for the best-effort OpenAlex retraction check on resolve/open.
+const OPENALEX_NOTICE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2500);
+
 #[derive(Debug, Clone)]
 pub struct PaperseedMirrorConfig {
     pub corpus_root: Option<String>,
@@ -102,7 +105,8 @@ pub struct PaperbridgeService {
     crossref: CrossrefClient,
     paper_search: PaperSearch,
     unpaywall: Option<UnpaywallClient>,
-    /// Secondary retraction signal for `resolve_doi`/`open_paper`; off unless attached.
+    /// Secondary retraction signal for `resolve_doi`/`open_paper`. `None` by
+    /// default; the CLI and MCP server attach it in `build_service`.
     openalex: Option<OpenAlexClient>,
     paper_config: Option<PaperConfig>,
     paper_cache: Arc<Mutex<HashMap<PaperCacheKey, PaperStructure>>>,
@@ -150,8 +154,8 @@ impl PaperbridgeService {
     }
 
     /// Point the OpenAlex retraction check at another endpoint.
-    #[doc(hidden)]
-    pub fn with_openalex_base(mut self, base_url: &str, api_key: Option<String>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_openalex_base(mut self, base_url: &str, api_key: Option<String>) -> Self {
         self.openalex = Some(OpenAlexClient::new(Some(base_url), None).with_api_key(api_key));
         self
     }
@@ -1428,34 +1432,69 @@ impl PaperbridgeService {
 
     pub async fn resolve_doi(&self, doi: &str) -> Result<CrossrefWork> {
         let mut work = self.crossref.resolve_doi(doi).await?;
-        if let Some(unpaywall) = self.unpaywall.as_ref() {
-            match unpaywall.lookup(&work.doi).await {
-                Ok(pdf) => work.oa_pdf_url = pdf,
-                Err(e) => {
-                    let _enrichment_failure = (&work.doi, e);
-                }
+        work.oa_pdf_url = self.unpaywall_pdf(&work.doi).await;
+        Ok(work)
+    }
+
+    async fn unpaywall_pdf(&self, doi: &str) -> Option<String> {
+        let unpaywall = self.unpaywall.as_ref()?;
+        match unpaywall.lookup(doi).await {
+            Ok(pdf) => pdf,
+            Err(e) => {
+                let _enrichment_failure = (doi, e);
+                None
             }
         }
-        Ok(work)
+    }
+
+    /// OpenAlex `is_retracted`, bounded by `OPENALEX_NOTICE_TIMEOUT`.
+    /// `Err(())` means the check failed or timed out.
+    async fn openalex_retracted(&self, doi: &str) -> Option<std::result::Result<bool, ()>> {
+        let openalex = self.openalex.as_ref()?;
+        let outcome =
+            tokio::time::timeout(OPENALEX_NOTICE_TIMEOUT, openalex.is_retracted(doi)).await;
+        Some(match outcome {
+            Ok(Ok(flag)) => Ok(flag == Some(true)),
+            Ok(Err(error)) => {
+                debug!(%error, "OpenAlex retraction check failed");
+                Err(())
+            }
+            Err(_) => {
+                debug!("OpenAlex retraction check timed out");
+                Err(())
+            }
+        })
     }
 
     /// `resolve_doi` plus the OpenAlex retraction signal. Crossref notices come
     /// from the same Crossref record; OpenAlex is consulted only when Crossref
     /// lists no retraction, and its failure never fails the resolve.
+    /// Unpaywall and OpenAlex run concurrently after Crossref.
     pub async fn resolve_doi_with_notices(&self, doi: &str) -> Result<CrossrefWork> {
-        let mut work = self.resolve_doi(doi).await?;
+        let mut work = self.crossref.resolve_doi(doi).await?;
+        work.notices_checked.push("crossref".into());
         let crossref_retracted = work
             .notices
             .iter()
-            .any(|notice| notice.notice_type == "retraction");
-        if crossref_retracted.not()
-            && let Some(openalex) = self.openalex.as_ref()
-        {
-            match openalex.is_retracted(&work.doi).await {
-                Ok(Some(true)) => work.openalex_only_retracted = Some(true),
-                Ok(_) => {}
-                Err(error) => debug!(%error, "OpenAlex retraction check failed"),
+            .any(|notice| crate::crossref::is_retraction_class(&notice.notice_type));
+        let openalex_check = async {
+            if crossref_retracted {
+                None
+            } else {
+                self.openalex_retracted(&work.doi).await
             }
+        };
+        let (oa_pdf_url, openalex) = tokio::join!(self.unpaywall_pdf(&work.doi), openalex_check);
+        work.oa_pdf_url = oa_pdf_url;
+        match openalex {
+            Some(Ok(retracted)) => {
+                work.notices_checked.push("openalex".into());
+                if retracted {
+                    work.openalex_only_retracted = Some(true);
+                }
+            }
+            Some(Err(())) => work.notices_failed.push("openalex".into()),
+            None => {}
         }
         Ok(work)
     }
@@ -2348,6 +2387,8 @@ fn bound_open_metadata(metadata: &mut serde_json::Value, max_chars: usize) -> se
             "ids",
             "notices",
             "openalex_only_retracted",
+            "notices_checked",
+            "notices_failed",
         ] {
             if let Some(value) = map.remove(key) {
                 identity.insert(key.into(), value);
@@ -4875,6 +4916,15 @@ mod tests {
         openalex: Option<wiremock::ResponseTemplate>,
         openalex_calls: u64,
     ) -> (wiremock::MockServer, PaperbridgeService) {
+        notice_mocks_with_key(crossref_updated_by, openalex, openalex_calls, None).await
+    }
+
+    async fn notice_mocks_with_key(
+        crossref_updated_by: serde_json::Value,
+        openalex: Option<wiremock::ResponseTemplate>,
+        openalex_calls: u64,
+        api_key: Option<&str>,
+    ) -> (wiremock::MockServer, PaperbridgeService) {
         use wiremock::matchers::{method, path_regex};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -4899,7 +4949,10 @@ mod tests {
             .await;
         let service = PaperbridgeService::new(Arc::new(StubLocalReadOnlyBackend))
             .with_crossref_base(&format!("{}/crossref", server.uri()))
-            .with_openalex_base(&format!("{}/openalex", server.uri()), None);
+            .with_openalex_base(
+                &format!("{}/openalex", server.uri()),
+                api_key.map(str::to_string),
+            );
         (server, service)
     }
 
@@ -4928,6 +4981,79 @@ mod tests {
         assert_eq!(work.notices.len(), 1);
         assert_eq!(work.notices[0].notice_type, "retraction");
         assert!(work.openalex_only_retracted.is_none());
+        assert_eq!(work.notices_checked, ["crossref"]);
+        assert!(work.notices_failed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn retraction_class_types_skip_openalex() {
+        for notice_type in ["Partial-Retraction", "withdrawal", "removal"] {
+            let (_server, service) = notice_mocks(
+                serde_json::json!([{"DOI": "10.1/n", "type": notice_type, "source": "publisher"}]),
+                retracted_flag(),
+                0,
+            )
+            .await;
+            let work = service
+                .resolve_doi_with_notices("10.1/target")
+                .await
+                .unwrap();
+            assert!(work.openalex_only_retracted.is_none(), "{notice_type}");
+        }
+    }
+
+    #[tokio::test]
+    async fn openalex_check_is_single_attempt_and_time_bounded() {
+        // 429 must not retry (and so not set the shared search cooldown).
+        let (_server, service) = notice_mocks(
+            serde_json::Value::Null,
+            Some(wiremock::ResponseTemplate::new(429).insert_header("Retry-After", "0")),
+            1,
+        )
+        .await;
+        let work = service
+            .resolve_doi_with_notices("10.1/target")
+            .await
+            .unwrap();
+        assert_eq!(work.notices_failed, ["openalex"]);
+
+        let slow = wiremock::ResponseTemplate::new(200)
+            .set_body_json(serde_json::json!({"is_retracted": true}))
+            .set_delay(std::time::Duration::from_secs(8));
+        let (_server, service) = notice_mocks(serde_json::Value::Null, Some(slow), 1).await;
+        let started = std::time::Instant::now();
+        let work = service
+            .resolve_doi_with_notices("10.1/target")
+            .await
+            .unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert!(work.openalex_only_retracted.is_none());
+        assert_eq!(work.notices_checked, ["crossref"]);
+        assert_eq!(work.notices_failed, ["openalex"]);
+    }
+
+    #[tokio::test]
+    async fn openalex_key_never_reaches_output_on_failure() {
+        const KEY: &str = "svc-secret-k+y/=&";
+        for response in [
+            wiremock::ResponseTemplate::new(500).set_body_string(KEY),
+            wiremock::ResponseTemplate::new(200).set_body_string("{not json"),
+        ] {
+            let (_server, service) =
+                notice_mocks_with_key(serde_json::Value::Null, Some(response), 1, Some(KEY)).await;
+            let value = service
+                .open_paper(OpenPaperRequest {
+                    doi: Some("10.1/target".into()),
+                    want: vec!["metadata".into()],
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            let text = value.to_string();
+            assert!(!text.contains(KEY), "{text}");
+            assert!(!text.contains(urlencoding::encode(KEY).as_ref()), "{text}");
+            assert_eq!(value["metadata"]["notices_failed"][0], "openalex");
+        }
     }
 
     #[tokio::test]
@@ -4947,17 +5073,21 @@ mod tests {
             .unwrap();
         assert_eq!(work.notices[0].notice_type, "correction");
         assert_eq!(work.openalex_only_retracted, Some(true));
+        assert_eq!(work.notices_checked, ["crossref", "openalex"]);
     }
 
     #[tokio::test]
     async fn openalex_failure_or_false_never_fails_resolve() {
-        for response in [
-            Some(wiremock::ResponseTemplate::new(500)),
-            Some(
-                wiremock::ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"is_retracted": false})),
+        for (response, failed) in [
+            (Some(wiremock::ResponseTemplate::new(500)), true),
+            (
+                Some(
+                    wiremock::ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"is_retracted": false})),
+                ),
+                false,
             ),
-            None,
+            (None, false),
         ] {
             let (_server, service) = notice_mocks(serde_json::Value::Null, response, 1).await;
             let work = service
@@ -4966,6 +5096,13 @@ mod tests {
                 .unwrap();
             assert!(work.notices.is_empty());
             assert!(work.openalex_only_retracted.is_none());
+            if failed {
+                assert_eq!(work.notices_checked, ["crossref"]);
+                assert_eq!(work.notices_failed, ["openalex"]);
+            } else {
+                assert_eq!(work.notices_checked, ["crossref", "openalex"]);
+                assert!(work.notices_failed.is_empty());
+            }
         }
     }
 
@@ -5002,6 +5139,7 @@ mod tests {
         assert_eq!(notice["source"], "retraction-watch");
         assert_eq!(notice["notice_doi"], "10.1/notice");
         assert_eq!(notice["date"], "2010-02-06");
+        assert_eq!(value["metadata"]["notices_checked"][0], "crossref");
     }
 
     #[tokio::test]

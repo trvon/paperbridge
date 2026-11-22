@@ -145,20 +145,10 @@ struct RawCrossrefMessage {
     work_type: Option<String>,
     resource: Option<RawResource>,
     /// Notices that update this work. `update-to` sits on the notice itself.
+    /// Kept as raw JSON and read field by field: this struct is shared with
+    /// search, so a malformed entry must not fail the whole message.
     #[serde(rename = "updated-by", default)]
-    updated_by: Option<Vec<RawWorkUpdate>>,
-}
-
-/// Crossref `WorkUpdate`. All fields optional so one odd record cannot fail a
-/// whole response.
-#[derive(Debug, Deserialize)]
-struct RawWorkUpdate {
-    #[serde(rename = "DOI")]
-    doi: Option<String>,
-    #[serde(rename = "type")]
-    update_type: Option<String>,
-    source: Option<String>,
-    updated: Option<RawDateField>,
+    updated_by: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -233,27 +223,34 @@ fn convert_message(doi_input: &str, msg: RawCrossrefMessage) -> CrossrefWork {
         oa_pdf_url: None,
         notices: convert_notices(msg.updated_by),
         openalex_only_retracted: None,
+        notices_checked: Vec::new(),
+        notices_failed: Vec::new(),
     }
 }
 
-fn convert_notices(raw: Option<Vec<RawWorkUpdate>>) -> Vec<WorkNotice> {
+/// Upper bound on notices per work; they bypass the `open_paper` metadata budget.
+const MAX_NOTICES: usize = 32;
+/// Upper bound on each notice string, in chars.
+const MAX_NOTICE_FIELD_CHARS: usize = 256;
+
+fn convert_notices(raw: Option<serde_json::Value>) -> Vec<WorkNotice> {
+    let entries = match raw {
+        Some(serde_json::Value::Array(entries)) => entries,
+        _ => return Vec::new(),
+    };
     let mut notices: Vec<WorkNotice> = Vec::new();
-    for update in raw.unwrap_or_default() {
-        let Some(notice_type) = update
-            .update_type
-            .map(|t| t.trim().to_ascii_lowercase())
-            .filter(|t| t.is_empty().not())
-        else {
+    for entry in &entries {
+        if notices.len() >= MAX_NOTICES {
+            break;
+        }
+        let Some(notice_type) = notice_str(entry, "type").map(|t| normalize_notice_type(&t)) else {
             continue;
         };
         let notice = WorkNotice {
             notice_type,
-            source: update.source.filter(|s| s.trim().is_empty().not()),
-            notice_doi: update
-                .doi
-                .and_then(|d| normalize_doi_str(&d).or(Some(d)))
-                .filter(|d| d.trim().is_empty().not()),
-            date: format_date(update.updated.as_ref()),
+            source: notice_str(entry, "source"),
+            notice_doi: notice_str(entry, "DOI").map(|d| normalize_doi_str(&d).unwrap_or(d)),
+            date: format_date(entry.get("updated")),
         };
         if notices.contains(&notice).not() {
             notices.push(notice);
@@ -262,12 +259,41 @@ fn convert_notices(raw: Option<Vec<RawWorkUpdate>>) -> Vec<WorkNotice> {
     notices
 }
 
-fn format_date(field: Option<&RawDateField>) -> Option<String> {
-    let parts = field?.date_parts.as_ref()?.first()?;
-    let mut iter = parts.iter().map_while(|p| *p);
-    let year = iter.next()?;
+/// Lowercase and use `_` separators: `Partial-Retraction` -> `partial_retraction`.
+pub(crate) fn normalize_notice_type(raw: &str) -> String {
+    raw.trim().to_ascii_lowercase().replace(['-', ' '], "_")
+}
+
+/// Notice types that mean the work's findings were withdrawn.
+pub(crate) fn is_retraction_class(notice_type: &str) -> bool {
+    matches!(
+        normalize_notice_type(notice_type).as_str(),
+        "retraction" | "partial_retraction" | "withdrawal" | "removal"
+    )
+}
+
+fn notice_str(entry: &serde_json::Value, key: &str) -> Option<String> {
+    let value = entry.get(key)?.as_str()?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(value.chars().take(MAX_NOTICE_FIELD_CHARS).collect())
+}
+
+fn format_date(updated: Option<&serde_json::Value>) -> Option<String> {
+    let parts = updated?
+        .get("date-parts")?
+        .as_array()?
+        .first()?
+        .as_array()?;
+    let mut iter = parts.iter().map_while(serde_json::Value::as_u64);
+    let year = iter.next().filter(|y| *y <= 9999)?;
     let mut out = format!("{year:04}");
-    for part in iter.take(2) {
+    // Month then day; stop at the first out-of-range part.
+    for (part, max) in iter.zip([12, 31]) {
+        if (1..=max).contains(&part).not() {
+            break;
+        }
         out.push_str(&format!("-{part:02}"));
     }
     Some(out)
@@ -738,15 +764,14 @@ mod tests {
 
     #[test]
     fn convert_notices_is_lenient_and_dedupes() {
-        let raw: Vec<RawWorkUpdate> = serde_json::from_value(serde_json::json!([
+        let raw = serde_json::json!([
             {"type": "Expression_of_Concern", "source": "publisher", "updated": {"date-parts": [[2021, 7]]}},
             {"type": "expression_of_concern", "source": "publisher", "updated": {"date-parts": [[2021, 7]]}},
             {"DOI": "10.1/no-type", "source": "publisher"},
             {"type": "  "},
             {"type": "retraction", "updated": {"date-parts": [[2019]]}},
             {"type": "withdrawal", "updated": {"date-parts": [[]]}}
-        ]))
-        .unwrap();
+        ]);
         let notices = convert_notices(Some(raw));
         assert_eq!(notices.len(), 3);
         assert_eq!(notices[0].notice_type, "expression_of_concern");
@@ -757,6 +782,94 @@ mod tests {
         assert!(notices[1].source.is_none());
         assert_eq!(notices[2].notice_type, "withdrawal");
         assert!(notices[2].date.is_none());
+    }
+
+    #[test]
+    fn malformed_updated_by_never_fails_the_message() {
+        for updated_by in [
+            serde_json::json!("not-an-array"),
+            serde_json::json!({"type": "retraction"}),
+            serde_json::json!(42),
+            serde_json::json!([
+                "string-entry",
+                {"type": 7, "source": ["x"], "DOI": {"a": 1}},
+                {"type": "retraction", "updated": {"date-parts": "2020"}},
+                {"type": "correction", "updated": {"date-parts": [["2020", 1]]}},
+                {"type": "removal", "updated": {"date-parts": [[2020, 13, 40]]}}
+            ]),
+        ] {
+            let json = serde_json::json!({
+                "message": {"DOI": "10.1/odd", "title": ["Odd"], "updated-by": updated_by}
+            });
+            let raw: RawCrossrefResponse = serde_json::from_value(json).unwrap();
+            let work = convert_message("10.1/odd", raw.message);
+            assert_eq!(work.title.as_deref(), Some("Odd"));
+            for notice in &work.notices {
+                assert!(!notice.notice_type.is_empty());
+            }
+        }
+        let raw = serde_json::json!([
+            {"type": 7},
+            {"type": "retraction", "updated": {"date-parts": "2020"}},
+            {"type": "correction", "updated": {"date-parts": [["2020", 1]]}},
+            {"type": "removal", "updated": {"date-parts": [[2020, 13, 40]]}}
+        ]);
+        let notices = convert_notices(Some(raw));
+        let types: Vec<_> = notices.iter().map(|n| n.notice_type.as_str()).collect();
+        assert_eq!(types, ["retraction", "correction", "removal"]);
+        assert!(notices[0].date.is_none());
+        assert!(notices[1].date.is_none());
+        assert_eq!(notices[2].date.as_deref(), Some("2020"));
+    }
+
+    #[test]
+    fn search_survives_malformed_updated_by() {
+        let json = serde_json::json!({
+            "message": {"items": [
+                {"DOI": "10.1/a", "title": ["A"], "updated-by": "garbage"},
+                {"DOI": "10.1/b", "title": ["B"], "updated-by": [{"type": false}]}
+            ]}
+        });
+        let raw: RawCrossrefSearchResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(raw.message.items.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn notice_types_normalize_and_classify() {
+        assert_eq!(
+            normalize_notice_type(" Partial-Retraction "),
+            "partial_retraction"
+        );
+        assert_eq!(
+            normalize_notice_type("Expression of Concern"),
+            "expression_of_concern"
+        );
+        for t in ["retraction", "Partial-Retraction", "withdrawal", "REMOVAL"] {
+            assert!(is_retraction_class(t), "{t}");
+        }
+        for t in [
+            "correction",
+            "erratum",
+            "expression_of_concern",
+            "new_version",
+        ] {
+            assert!(!is_retraction_class(t), "{t}");
+        }
+    }
+
+    #[test]
+    fn notices_are_capped_in_count_and_length() {
+        let long = "x".repeat(10_000);
+        let entries: Vec<_> = (0..100)
+            .map(|i| serde_json::json!({"type": format!("correction{i}"), "source": long}))
+            .collect();
+        let notices = convert_notices(Some(serde_json::Value::Array(entries)));
+        assert_eq!(notices.len(), MAX_NOTICES);
+        assert!(
+            notices
+                .iter()
+                .all(|n| n.source.as_ref().unwrap().chars().count() == MAX_NOTICE_FIELD_CHARS)
+        );
     }
 
     #[test]

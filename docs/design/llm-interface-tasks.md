@@ -243,6 +243,15 @@ per-provider recovery remains a follow-up; suggested actions never execute.
 
 ---
 
+## Phase G — Citation graph, stage 1 (notices)
+
+- [x] **T-G1** Crossref `updated-by` → `notices` on `resolve_doi` and DOI `open_paper` metadata (lenient parse, retraction-class set, count/length caps, outside `max_chars`)
+- [x] **T-G2** OpenAlex `is_retracted` as `openalex_only_retracted` when Crossref has no retraction-class notice; single attempt, 2.5 s bound, concurrent with Unpaywall, `notices_checked` / `notices_failed`
+- [x] **T-G3** `openalex_api_key` / `PAPERBRIDGE_OPENALEX_API_KEY` sent as `api_key=`; masked and redacted from errors
+- [ ] **T-G4** Batch notices for `search_papers` hits (deferred: avoid N+1)
+
+---
+
 ## Suggested implementation PR slices
 
 | PR | GitHub | Tasks | Risk |
