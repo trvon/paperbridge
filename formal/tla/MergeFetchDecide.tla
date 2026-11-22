@@ -19,7 +19,8 @@
 (* Measured with TLC 2.19 (tla2tools v1.7.4), Java 25, M4 Max, 10 workers *)
 (*   MergeFetchDecide.cfg  903,600 distinct, depth 27, 14 s               *)
 (*   _Gen 1,029,960 / 31 / 16 s; _Split 4,854,312 / 30 / 94 s;            *)
-(*   _Undo2 6,663,624 / 30 / 98 s; _Rec3 2,159,976 / 28 / 36 s.          *)
+(*   _Undo2 6,663,624 / 30 / 89 s; _Rec3 2,159,976 / 28 / 35 s;          *)
+(*   _RedoCycle 18,440,757 / 29 / 259 s.                                  *)
 (*   All configs: README.md, "Results".                                   *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets, TLC
@@ -457,12 +458,23 @@ UndoMerge ==
                    decidedAt, pc, page, pgen, snapshot, rawEdges, evid, known,
                    skipEv>>
 
-\* redo_merge: re-apply an undone row as a NEW row; this lifts the veto.
+\* redo_merge(m), one transaction (PR #70 02cdd40): lift m's own pair
+\* (undo_reason = 'redone'); if m's two works are then in different
+\* classes, insert a new row for the pair. The join is exempt only from
+\* m's own pair: any other separation refuses it, and a refused redo
+\* writes nothing (RedoRefused). redo_unchecked: skip that check.
+RedoOK(m) ==
+    LET V2 == vetoed \ ({m.ev} \cup Extras(m.id))
+        a  == CHOOSE a \in m.ev : TRUE
+        b  == CHOOSE b \in m.ev : b # a
+    IN \/ Find(a) = Find(b)
+       \/ /\ Bug = "redo_unchecked" \/ ~VetoedIn(V2, root, a, b)
+          /\ ~(VersionVeto /\ Mixed(UNION {ClassIDs(Find(x)) : x \in m.ev}))
+
 Redo ==
     \E m \in undone :
         /\ m.ev \in vetoed
-        /\ \E a, b \in m.ev : Find(a) # Find(b)
-        /\ ~(VersionVeto /\ Mixed(UNION {ClassIDs(Find(a)) : a \in m.ev}))
+        /\ RedoOK(m)
         /\ LET a == CHOOSE a \in m.ev : TRUE
                b == CHOOSE b \in m.ev : b # a
                fresh == NewRow(a, b, m.why)
@@ -470,6 +482,9 @@ Redo ==
                row == IF Bug = "redo_old_row" THEN [fresh EXCEPT !.id = m.id] ELSE fresh
                st == Combine(row.pw, row.pl)
            IN
+           IF Find(a) = Find(b)
+           THEN UNCHANGED <<merges, root, mseq, decision, reviewLog>>
+           ELSE
            /\ merges' = merges \cup {row}
            /\ root' = RootsOf(merges')
            /\ mseq' = IF Bug = "redo_old_row" THEN mseq ELSE row.id
@@ -480,14 +495,23 @@ Redo ==
                              ELSE reviewLog
         /\ vetoed' = vetoed \ ({m.ev} \cup Extras(m.id))
         /\ undone' = undone \ {m}
-        \* an explicit redo may reunite classes; drop the pairs it reunites
-        /\ splitG' = {v \in splitG : \E v1, v2 \in v : root'[v1] # root'[v2]}
+        \* only m's own separation is lifted
+        /\ splitG' = splitG \ {m.ev}
         /\ seen' = seen \cup {"redo"}
     /\ UNCHANGED <<idMap, nworks, edgeSeen, cursor, curGen, decidedAt, local,
                    rawEdges, evid, known, everUndone, post, ok, skipEv>>
 
-\* One join of observe's loop, over an in-transaction state st.
-JoinStep(st, a, b) ==
+\* A redo refused by another separation writes nothing (marker only).
+RedoRefused ==
+    /\ "redo_refused" \notin seen
+    /\ \E m \in undone : m.ev \in vetoed /\ ~RedoOK(m)
+    /\ seen' = seen \cup {"redo_refused"}
+    /\ UNCHANGED <<store, local, rawEdges, evid, known, everUndone, splitG,
+                   post, ok>>
+
+\* One join of observe's loop over an in-transaction state st, refused
+\* (vetoHit) if it would reunite a separation in V or mix versions.
+JoinStepV(V, st, a, b) ==
     LET ra == st.rt[a]
         rb == st.rt[b]
         w  == IF ra < rb THEN ra ELSE rb
@@ -499,15 +523,17 @@ JoinStep(st, a, b) ==
     IN
     IF a = b THEN st
     ELSE IF ra = rb THEN [st EXCEPT !.skips = @ \cup {{a, b}}]
-    ELSE IF VetoedIn(vetoed, st.rt, a, b) THEN [st EXCEPT !.vetoHit = TRUE]
+    ELSE IF VetoedIn(V, st.rt, a, b) THEN [st EXCEPT !.vetoHit = TRUE]
     ELSE IF VersionVeto /\ Mixed({i \in IDs : idMap[i] # NoWork /\ st.rt[idMap[i]] \in {ra, rb}})
-      THEN st
+      THEN [st EXCEPT !.vetoHit = TRUE]
     ELSE [st EXCEPT !.ms = ms2, !.rt = RootsOf(ms2),
                     !.dec = [st.dec EXCEPT ![w] = cst],
                     !.log = IF cst = "needs_decision" /\ row.pw # row.pl
                               THEN @ \cup {<<row.id, w, row.pw>>, <<row.id, l, row.pl>>}
                               ELSE @,
                     !.seq = row.id, !.made = @ \cup {row.id}]
+
+JoinStep(st, a, b) == JoinStepV(vetoed, st, a, b)
 
 \* observe of a three-ID record <<p, x, y>> (all IDs known), one
 \* transaction: join the primary's base to each other base in order,
@@ -542,6 +568,36 @@ ObserveRecord ==
     /\ UNCHANGED <<idMap, nworks, vetoed, undone, edgeSeen, cursor, curGen,
                    decidedAt, local, rawEdges, evid, known, everUndone, splitG,
                    post, ok>>
+
+\* redo_merges({m1, m2}), one transaction: lift both pairs, then join each
+\* pair (in id order) whose works are in different classes, each exempt
+\* from every pair in the set; all-or-nothing.
+RedoMany ==
+    \E m1, m2 \in undone :
+        /\ m1.id < m2.id
+        /\ m1.ev \in vetoed /\ m2.ev \in vetoed
+        /\ LET V2  == vetoed \ ({m1.ev, m2.ev} \cup Extras(m1.id) \cup Extras(m2.id))
+               a1  == CHOOSE x \in m1.ev : TRUE
+               b1  == CHOOSE x \in m1.ev : x # a1
+               a2  == CHOOSE x \in m2.ev : TRUE
+               b2  == CHOOSE x \in m2.ev : x # a2
+               st0 == [ms |-> merges, rt |-> root, dec |-> decision, log |-> reviewLog,
+                       seq |-> mseq, made |-> {}, skips |-> {}, vetoHit |-> FALSE]
+               st  == JoinStepV(V2, JoinStepV(V2, st0, a1, b1), a2, b2)
+           IN
+           /\ ~st.vetoHit
+           /\ ~RedoOK(m1) \/ ~RedoOK(m2)  \* only needed when single redos fail
+           /\ merges' = st.ms
+           /\ root' = st.rt
+           /\ decision' = st.dec
+           /\ reviewLog' = st.log
+           /\ mseq' = st.seq
+           /\ vetoed' = V2
+           /\ undone' = undone \ {m1, m2}
+           /\ splitG' = splitG \ {m1.ev, m2.ev}
+           /\ seen' = seen \cup {"redo_many"}
+    /\ UNCHANGED <<idMap, nworks, edgeSeen, cursor, curGen, decidedAt, local,
+                   rawEdges, evid, known, everUndone, post, ok, skipEv>>
 
 \* "skippath": a two-ID record whose IDs are already one class logs the
 \* pair against the rows joining them.
@@ -637,7 +693,7 @@ Next ==
                           \/ CommitCursor(p) \/ CommitEdges(p)
                           \/ Crash(p) \/ Restart(p)
     \/ Merge \/ Attach \/ UndoMerge \/ Redo \/ SkipVetoed \/ VersionSplit
-    \/ ObserveRecord \/ SkipSame
+    \/ ObserveRecord \/ SkipSame \/ RedoRefused \/ RedoMany
     \/ Decide \/ Refresh
 
 Spec == Init /\ [][Next]_vars
@@ -727,7 +783,10 @@ UndoCarriesDecision == ok.carry
 UndoRestoresPrior   == ok.restore
 SupersededNoWrite   == ok.gen
 
-VetoHolds      == \A m \in merges : m.ev \notin vetoed
+\* PR #70 VetoHolds: every pair whose latest row is a user undo lies in
+\* two different classes.
+VetoHolds      == \A v \in vetoed : \E v1, v2 \in v : root[v1] # root[v2]
+NoActiveVetoedRow == \A m \in merges : m.ev \notin vetoed
 NoSpuriousVeto == vetoed \subseteq everUndone /\ ok.veto
 
 \* The two classes a user undo split are never reunited except by Redo.
@@ -758,4 +817,6 @@ NeverSplitBlocked   == "split_blocked" \notin seen
 NeverInnerRemoved   == "inner_removed" \notin seen
 NeverRec3Veto       == "rec3_veto" \notin seen
 NeverRec3Skip       == "rec3_skip" \notin seen
+NeverRedoRefused    == "redo_refused" \notin seen
+NeverRedoMany       == "redo_many" \notin seen
 =============================================================================

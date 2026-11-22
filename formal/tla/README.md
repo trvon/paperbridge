@@ -9,7 +9,7 @@ review decisions. Design:
 
 ```sh
 formal/tla/run.sh              # pull-request set
-TLA_FULL=1 formal/tla/run.sh   # also _Split, _Undo2, _PairVeto2 (nightly in CI)
+TLA_FULL=1 formal/tla/run.sh   # also _Split, _Undo2, _PairVeto2, _RedoCycle (nightly in CI)
 ```
 
 Needs Java 11+ (CI: Temurin 25) and `curl`. Downloads `tla2tools.jar`
@@ -28,7 +28,7 @@ witness config exits 12 with `Invariant <expected> is violated`.
 
 CI: job `formal` in `.github/workflows/ci.yml` (pull requests, pushes to
 main, weekly); `.github/workflows/formal-full.yml` (nightly and
-`workflow_dispatch`) adds `_Split`, `_Undo2` and `_PairVeto2`.
+`workflow_dispatch`) adds `_Split`, `_Undo2`, `_PairVeto2` and `_RedoCycle`.
 
 ## Model
 
@@ -61,7 +61,9 @@ already in one class.
 | `Attach` | `observe` with a known and a new ID: mint a base work for the new ID and join it to the known ID's base |
 | `ObserveRecord` | `observe` of a three-ID record, all joins in one transaction |
 | `UndoMerge` | `undo_merge`: latest active row of its class only; vetoes the pair |
-| `Redo` | `redo_merge`: re-apply as a new row; lifts the veto |
+| `Redo` | `redo_merge(m)`: lift m's pair; if its works are in different classes, insert a new row, refused (writes nothing) if any other separation would be reunited |
+| `RedoMany` | `redo_merges({m1, m2})`: lift both pairs, join each exempt from both, all-or-nothing |
+| `RedoRefused` | marker: a single redo is refused by another separation |
 | `SkipSame` | `VetoMode = "skippath"` only: a two-ID record already in one class logs its pair |
 | `SkipVetoed` | a record for a vetoed pair is skipped |
 | `VersionSplit` | `split_versions`, see verdicts |
@@ -98,7 +100,8 @@ evidence pair, which differs from `ev` only in the `attach_root` bug).
 | `ReplayIdempotent` | a replayed page changes no IDs, works or edges; it may only add a `candidate` row to a root with none |
 | `SupersededNoWrite` | a commit to a finished or superseded generation writes nothing |
 | `FreshIsNewest` | edges with `last_seen >=` the newest complete generation are exactly that generation's edges |
-| `VetoHolds` | no active row has a vetoed evidence pair |
+| `VetoHolds` | PR #70's: every pair whose latest row is a user undo lies in two different classes |
+| `NoActiveVetoedRow` | no active row has a vetoed evidence pair |
 | `NoSpuriousVeto` | only pairs that were undone are vetoed, and a skipped record's pair was undone |
 | `NoReunionWithoutRedo` | the two classes a user undo split are never one class again unless a `Redo` joins them |
 
@@ -117,6 +120,7 @@ Passing configs (all `NW = 4`, 2 workers, 1 crash, 1 review):
 | `_Split` (nightly) | `B` arXiv, no version veto, 1 undo, 1 split | version split on legacy rows |
 | `_Undo2` (nightly) | 2 undos | undo, redo, undo |
 | `_Rec3` | main + three-ID record, class-level veto | sticky undo with multi-ID records |
+| `_RedoCycle` (nightly) | records `{A, A2}`, `{A2, C}`, `{B, C}`, `{A, B}`, 2 undos, no crash | two undone pairs separating the same classes; redo and `redo_merges` |
 | `_PairVeto2` (nightly) | main with the pair-level veto (PR #70), two-ID records only | pair-level is enough without three-ID records |
 
 `VetoMode` is `"class"` (the design) in every config except the veto
@@ -148,9 +152,13 @@ Seeded bugs (one per obligation; the invariant TLC reports):
 | `_BugGenNoGuard` | superseded commits write (`_Gen`) | `SupersededNoWrite` only |
 | `_BugSplitBypass` | PR #70 `split_versions`: undo regardless of the guard (`_Split`) | `NoDecisionLost` |
 | `_BugSplitMarkNd` | blocked split marks the root `needs_decision` (`_Split`) | `UndoCarriesDecision` |
-| `_BugRec3PairVeto` | PR #70 pair-level veto with a three-ID record | `NoReunionWithoutRedo` |
-| `_BugRec3SkipLog` | option (b): skipped pairs logged against the rows the same record created | `NoReunionWithoutRedo` |
-| `_BugRec3SkipPath` | option (b'): skipped pairs logged against every row on their path | `NoReunionWithoutRedo` |
+| `_BugRec3PairVeto` | pair-level veto with a three-ID record | `VetoHolds` |
+| `_BugRec3SkipLog` | option (b): skipped pairs logged against the rows the same record created | `VetoHolds` |
+| `_BugRec3SkipPath` | option (b'): skipped pairs logged against every row on their path | `VetoHolds` |
+| `_BugRedoUnchecked` | redo not checked against other separations (`_RedoCycle`) | `VetoHolds` |
+
+The last four also violate `NoReunionWithoutRedo` in the same state when
+`VetoHolds` is left out.
 
 Witnesses (each `Never*` must be violated): `NeedsDecision`,
 `ResolvedSelfLoop`, `SeedCandidateConflict`, `CursorFull`, `Replay`,
@@ -159,7 +167,9 @@ roots), `AttachNonRoot`, `NoStateMerge`, `Redo`, `Superseded`,
 `StaleEdge`, `Split`, `SplitBlocked`, `Rec3Veto` (a three-ID record hits
 the veto), `Rec3Skip` (a three-ID record joins one pair and skips the
 other), and `Rec3Redo` (redo with the class-level veto and a three-ID
-record).
+record), `RedoRefused` (two undone pairs separate the same classes, so
+each single redo is refused) and `RedoMany` (`redo_merges` of both
+succeeds).
 
 ## Verdicts
 
@@ -198,10 +208,14 @@ path" (`_BugRec3SkipPath`): a record observed for the first time after the
 undo has no logged skips, yet it still asserts the undone equivalence.
 Option (a), a class-level veto, passes (`_Rec3`): refuse any join, from
 any record or group, that would put the two sides of an undone evidence
-pair back into one class. Redo still works: it is exempt, lifts the veto
-for its own pair and re-applies as a new row (witness `Rec3Redo`; `_Undo2`
-passes). The pair-level veto is sufficient while records carry at most
-two IDs (`_PairVeto2`).
+pair back into one class. This is the rule PR #70 implements (02cdd40)
+and the model follows it exactly. Redo still works: `redo_merge(m)` is
+exempt only from m's own pair, so when two undone pairs separate the same
+classes each single redo is refused (witness `RedoRefused`) and
+`redo_merges` of both succeeds (witness `RedoMany`); `_RedoCycle`,
+`_Undo2` and `_Rec3` pass, and skipping the check fails
+(`_BugRedoUnchecked`). The pair-level veto is sufficient while records
+carry at most two IDs (`_PairVeto2`).
 
 **Generation guard.** With `last_seen = MAX(last_seen, started_seq)`, the
 superseded-generation guard is defence in depth: without it
@@ -215,63 +229,69 @@ TLC 2.19 (tla2tools v1.7.4), Java 25, Apple M4 Max.
 
 | Config | Result | Generated | Distinct | Depth | Wall (10 workers / 1 for bugs) |
 |---|---|---|---|---|---|
-| `(main)` | pass | 4,792,153 | 903,600 | 27 | 30 s |
-| `_Gen` | pass | 4,803,737 | 1,029,960 | 31 | 17 s |
-| `_GenNoGuard` | pass | 3,039,973 | 652,088 | 28 | 14 s |
-| `_SplitVeto` | pass | 631,249 | 120,384 | 24 | 6 s |
-| `_Split` | pass | 26,386,279 | 4,854,312 | 30 | 65 s |
-| `_Undo2` | pass | 38,200,657 | 6,663,624 | 30 | 98 s |
-| `_Rec3` | pass | 11,690,233 | 2,159,976 | 28 | 36 s |
-| `_PairVeto2` | pass | 4,792,153 | 903,600 | 27 | 16 s |
-| `_BugStaleSnapshotRoot` | `EdgeFaithful` | 6,019 | 2,685 | 8 | 2 s |
-| `_BugStaleSnapshotNoReadBack` | `EdgeFaithful` | 1,091 | 522 | 7 | 2 s |
-| `_BugStaleSnapshotOrphan` | `NoOrphanWork` | 1,091 | 522 | 7 | 2 s |
-| `_BugMergeOverwrite` | `NoDecisionLost` | 2,813 | 1,176 | 8 | 3 s |
-| `_BugMergeNoFind` | `Forest` | 27 | 17 | 3 | 1 s |
-| `_BugStoreRoot` | `CursorImpliesEdges` | 1,179 | 520 | 7 | 3 s |
-| `_BugStoreRootUndo` | `EdgeFaithful` | 4,063 | 1,608 | 8 | 2 s |
+| `(main)` | pass | 4,587,769 | 903,600 | 27 | 15 s |
+| `_Gen` | pass | 4,803,737 | 1,029,960 | 31 | 16 s |
+| `_GenNoGuard` | pass | 3,039,973 | 652,088 | 28 | 13 s |
+| `_SplitVeto` | pass | 598,489 | 120,384 | 24 | 5 s |
+| `_Rec3` | pass | 11,133,841 | 2,159,976 | 28 | 35 s |
+| `_Split` | pass | 25,381,255 | 4,854,312 | 30 | 64 s |
+| `_Undo2` | pass | 35,590,873 | 6,663,624 | 30 | 89 s |
+| `_PairVeto2` | pass | 4,587,769 | 903,600 | 27 | 15 s |
+| `_RedoCycle` | pass | 102,302,881 | 18,440,757 | 29 | 259 s |
+| `_BugStaleSnapshotRoot` | `EdgeFaithful` | 5,850 | 2,685 | 8 | 2 s |
+| `_BugStaleSnapshotNoReadBack` | `EdgeFaithful` | 1,065 | 522 | 7 | 3 s |
+| `_BugStaleSnapshotOrphan` | `NoOrphanWork` | 1,065 | 522 | 7 | 2 s |
+| `_BugMergeOverwrite` | `NoDecisionLost` | 2,743 | 1,176 | 8 | 2 s |
+| `_BugMergeNoFind` | `Forest` | 27 | 17 | 3 | 2 s |
+| `_BugStoreRoot` | `CursorImpliesEdges` | 1,150 | 520 | 7 | 2 s |
+| `_BugStoreRootUndo` | `EdgeFaithful` | 3,957 | 1,608 | 8 | 2 s |
 | `_BugSplitCommit` | `CursorImpliesEdges` | 29 | 19 | 4 | 2 s |
-| `_BugCursorRegress` | `CursorMonotonic` | 7,311 | 2,634 | 10 | 3 s |
-| `_BugCandUnconditional` | `NoDecisionLost` | 649 | 271 | 7 | 2 s |
-| `_BugDecideRootOnly` | `UndoCarriesDecision` | 972 | 420 | 7 | 2 s |
-| `_BugUndoRestoresLoser` | `UndoCarriesDecision` | 972 | 420 | 7 | 2 s |
-| `_BugUndoNotLifo` | `WinnerIsRoot` | 4,222 | 1,679 | 8 | 3 s |
-| `_BugUndoInner` | `NoDecisionLost` | 9,544 | 3,566 | 9 | 2 s |
+| `_BugCursorRegress` | `CursorMonotonic` | 7,311 | 2,634 | 10 | 2 s |
+| `_BugCandUnconditional` | `NoDecisionLost` | 625 | 271 | 7 | 2 s |
+| `_BugDecideRootOnly` | `UndoCarriesDecision` | 946 | 420 | 7 | 2 s |
+| `_BugUndoRestoresLoser` | `UndoCarriesDecision` | 946 | 420 | 7 | 2 s |
+| `_BugUndoNotLifo` | `WinnerIsRoot` | 4,091 | 1,679 | 8 | 2 s |
+| `_BugUndoInner` | `NoDecisionLost` | 9,263 | 3,566 | 9 | 3 s |
 | `_BugVetoRoots` | `NoSpuriousVeto` | 78 | 41 | 4 | 2 s |
-| `_BugVetoIgnored` | `VetoHolds` | 83 | 42 | 4 | 2 s |
-| `_BugAttachRoot` | `EvidenceHolds` | 588 | 250 | 6 | 2 s |
-| `_BugRedoOldRow` | `WinnerIsRoot` | 223 | 99 | 5 | 2 s |
+| `_BugVetoIgnored` | `VetoHolds` | 83 | 42 | 4 | 1 s |
+| `_BugAttachRoot` | `EvidenceHolds` | 564 | 250 | 6 | 2 s |
+| `_BugRedoOldRow` | `WinnerIsRoot` | 217 | 99 | 5 | 2 s |
 | `_BugStampOverwrite` | `FreshIsNewest` | 75,047 | 24,207 | 11 | 5 s |
-| `_BugGenNoGuard` | `SupersededNoWrite` | 371,386 | 101,417 | 14 | 12 s |
-| `_BugSplitBypass` | `NoDecisionLost` | 11,266 | 4,412 | 9 | 2 s |
-| `_BugSplitMarkNd` | `UndoCarriesDecision` | 12,005 | 4,595 | 9 | 3 s |
-| `_BugRec3PairVeto` | `NoReunionWithoutRedo` | 553 | 229 | 6 | 2 s |
-| `_BugRec3SkipLog` | `NoReunionWithoutRedo` | 553 | 229 | 6 | 2 s |
-| `_BugRec3SkipPath` | `NoReunionWithoutRedo` | 871 | 337 | 6 | 3 s |
-| `_WitnessNeedsDecision` | `NeverNeedsDecision` | 878 | 388 | 7 | 3 s |
-| `_WitnessResolvedSelfLoop` | `NeverResolvedSelfLoop` | 878 | 388 | 7 | 2 s |
-| `_WitnessSeedCandidateConflict` | `NeverSeedCandidateConflict` | 878 | 388 | 7 | 2 s |
-| `_WitnessCursorFull` | `NeverCursorFull` | 649 | 271 | 7 | 2 s |
-| `_WitnessReplay` | `NeverReplay` | 584 | 234 | 7 | 2 s |
-| `_WitnessUndoCarried` | `NeverUndoCarried` | 972 | 420 | 7 | 2 s |
-| `_WitnessDependentMerge` | `NeverDependentMerge` | 878 | 388 | 7 | 2 s |
+| `_BugGenNoGuard` | `SupersededNoWrite` | 371,386 | 101,417 | 14 | 11 s |
+| `_BugSplitBypass` | `NoDecisionLost` | 10,972 | 4,412 | 9 | 3 s |
+| `_BugSplitMarkNd` | `UndoCarriesDecision` | 11,681 | 4,595 | 9 | 2 s |
+| `_BugRec3PairVeto` | `VetoHolds` | 531 | 229 | 6 | 2 s |
+| `_BugRec3SkipLog` | `VetoHolds` | 531 | 229 | 6 | 3 s |
+| `_BugRec3SkipPath` | `VetoHolds` | 844 | 337 | 6 | 2 s |
+| `_BugRedoUnchecked` | `VetoHolds` | 9,849 | 3,979 | 8 | 2 s |
+| `_WitnessNeedsDecision` | `NeverNeedsDecision` | 854 | 388 | 7 | 2 s |
+| `_WitnessResolvedSelfLoop` | `NeverResolvedSelfLoop` | 854 | 388 | 7 | 2 s |
+| `_WitnessSeedCandidateConflict` | `NeverSeedCandidateConflict` | 854 | 388 | 7 | 2 s |
+| `_WitnessCursorFull` | `NeverCursorFull` | 625 | 271 | 7 | 2 s |
+| `_WitnessReplay` | `NeverReplay` | 560 | 234 | 7 | 2 s |
+| `_WitnessUndoCarried` | `NeverUndoCarried` | 946 | 420 | 7 | 2 s |
+| `_WitnessDependentMerge` | `NeverDependentMerge` | 854 | 388 | 7 | 2 s |
 | `_WitnessAttachNonRoot` | `NeverAttachNonRoot` | 27 | 17 | 3 | 2 s |
-| `_WitnessNoStateMerge` | `NeverNoStateMerge` | 6 | 6 | 2 | 4 s |
-| `_WitnessRedo` | `NeverRedo` | 84 | 43 | 4 | 4 s |
-| `_WitnessSuperseded` | `NeverSuperseded` | 17,390 | 6,688 | 10 | 6 s |
-| `_WitnessStaleEdge` | `NeverStaleEdge` | 364,771 | 100,754 | 14 | 10 s |
-| `_WitnessSplit` | `NeverSplit` | 207 | 94 | 5 | 3 s |
-| `_WitnessSplitBlocked` | `NeverSplitBlocked` | 971 | 429 | 7 | 2 s |
-| `_WitnessRec3Veto` | `NeverRec3Veto` | 553 | 229 | 6 | 2 s |
-| `_WitnessRec3Skip` | `NeverRec3Skip` | 883 | 392 | 7 | 3 s |
+| `_WitnessNoStateMerge` | `NeverNoStateMerge` | 6 | 6 | 2 | 2 s |
+| `_WitnessRedo` | `NeverRedo` | 84 | 43 | 4 | 2 s |
+| `_WitnessSuperseded` | `NeverSuperseded` | 17,390 | 6,688 | 10 | 2 s |
+| `_WitnessStaleEdge` | `NeverStaleEdge` | 364,771 | 100,754 | 14 | 8 s |
+| `_WitnessSplit` | `NeverSplit` | 202 | 94 | 5 | 2 s |
+| `_WitnessSplitBlocked` | `NeverSplitBlocked` | 946 | 429 | 7 | 2 s |
+| `_WitnessRec3Veto` | `NeverRec3Veto` | 531 | 229 | 6 | 2 s |
+| `_WitnessRec3Skip` | `NeverRec3Skip` | 859 | 392 | 7 | 2 s |
+| `_WitnessRedoRefused` | `NeverRedoRefused` | 9,187 | 3,979 | 8 | 3 s |
+| `_WitnessRedoMany` | `NeverRedoMany` | 9,189 | 3,980 | 8 | 2 s |
 | `_WitnessRec3Redo` | `NeverRedo` | 84 | 43 | 4 | 2 s |
 
-CI (`ubuntu-latest`, `TLC_WORKERS=auto`), pull-request set: job 2 min 50 s;
-main 39 s, `_Gen` 37 s, `_GenNoGuard` 29 s, `_SplitVeto` 6 s, each bug or
-witness 1-3 s. `_Split` and `_Undo2` (94 s and 99 s on the M4 Max) run
-only in the nightly workflow; it can be dispatched only once
-`formal-full.yml` is on the default branch, so its runner time is not yet
-measured.
+Full suite (`TLA_FULL=1`, `TLC_WORKERS=10`): 10 min 24 s.
+
+CI (`ubuntu-latest`, `TLC_WORKERS=auto`), pull-request set (main, `_Gen`,
+`_GenNoGuard`, `_SplitVeto`, `_Rec3`, all bugs and witnesses): job 4 min
+35 s at 0198a06. `_Split`, `_Undo2`, `_PairVeto2` and `_RedoCycle` (64 s,
+89 s, 15 s, 259 s on the M4 Max) run only in the nightly workflow; it can
+be dispatched only once `formal-full.yml` is on the default branch, so its
+runner time is not yet measured.
 
 ## Obligations on the Rust store
 
@@ -301,14 +321,20 @@ measured.
    earlier one (witness `DependentMerge`).
 10. Merge rows record the evidence bases; a new ID joins the matched ID's
     base, not its root (`_BugAttachRoot`).
-11. A user undo is sticky at class level: until that row is redone, no
-    join from any record (including later joins in the same record's
-    group) may put the two sides of its evidence pair back into one class.
-    The veto is keyed on the undone evidence base pair and checked against
-    current classes, never against roots stored at undo time
-    (`_BugRec3PairVeto`, `_BugRec3SkipLog`, `_BugRec3SkipPath`,
-    `_BugVetoRoots`, `_BugVetoIgnored`). Redo is exempt, lifts the veto for
-    its pair and inserts a new row (`_BugRedoOldRow`).
+11. A user undo is sticky at class level. A join of classes X and Y is
+    refused when some evidence pair {a, b} whose latest `merge_log` row
+    (highest id for the unordered pair) is undone with `undo_reason =
+    'user'` has a in X and b in Y, with classes taken inside the
+    transaction just before that join; a refused join writes nothing and
+    counts as an identity conflict, and the record's IDs still get their
+    own base works. `version_split` undos create no separation.
+    `redo_merge(m)` sets `undo_reason = 'redone'` and, if m's works are in
+    different classes, inserts a new row; it is exempt only from m's own
+    pair and writes nothing if refused. `redo_merges` redoes several in one
+    transaction, each exempt from every pair in the set, all-or-nothing
+    (`VetoHolds`, `NoReunionWithoutRedo`; `_BugRec3PairVeto`,
+    `_BugRec3SkipLog`, `_BugRec3SkipPath`, `_BugRedoUnchecked`,
+    `_BugVetoRoots`, `_BugVetoIgnored`, `_BugRedoOldRow`).
 12. `version_split` undoes a row only if it is the outermost row of its
     class; otherwise it leaves the store unchanged and reports the split
     as pending (`_BugSplitBypass`, `_BugSplitMarkNd`).
