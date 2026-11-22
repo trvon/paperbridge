@@ -110,9 +110,9 @@ When `unpaywall_email` is configured, the response includes `oa_pdf_url`.
 `updated-by` when the work has retraction, correction, or
 expression-of-concern notices. `openalex_only_retracted: true` means OpenAlex
 marks the work retracted but Crossref has no retraction notice; treat it as
-unconfirmed. `notices_checked` lists the sources that answered
+unconfirmed. `notices_checked` lists the sources that returned a record
 (`crossref`, `openalex`); `notices_failed` lists checks that failed or timed
-out. Empty `notices` is only clean for the sources in `notices_checked`.
+out. OpenAlex is absent from both when it was skipped or has no record. Empty `notices` is only clean for the sources in `notices_checked`.
 Check them before citing a paper. `search_papers` hits do not carry notices.
 
 ### Resolve optional institutional access

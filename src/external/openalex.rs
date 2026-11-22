@@ -87,10 +87,11 @@ impl OpenAlexClient {
         let mut url = format!("{}/works/doi:{encoded}?select=is_retracted", self.base_url);
         self.push_auth_params(&mut url);
 
-        // Single attempt outside the request router: this is a best-effort
-        // side check on resolve/open, so it must not retry or set the shared
-        // OpenAlex cooldown that `search_papers` also waits on.
-        let response = self.client.get(&url).send().await?;
+        // Best-effort side check: one attempt that respects router permits and
+        // any active cooldown, but never retries or sets the shared OpenAlex
+        // cooldown that `search_papers` waits on. The caller bounds the wait.
+        let response =
+            crate::external::send_once("openalex_notices", self.client.get(&url)).await?;
         let status = response.status();
         if status == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);

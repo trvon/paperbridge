@@ -529,6 +529,15 @@ pub(crate) async fn send_with_retry(
     global_request_router().send(component, req).await
 }
 
+/// Single attempt through the router: shares permits and waits out an active
+/// cooldown, but never retries or sets a cooldown itself.
+pub(crate) async fn send_once(
+    component: &'static str,
+    req: reqwest::RequestBuilder,
+) -> Result<RoutedResponse> {
+    global_request_router().send_once(component, req).await
+}
+
 pub(crate) fn dedupe(hits: Vec<PaperHit>) -> Vec<PaperHit> {
     // Identity keys are normalized strings; computing them once per record
     // (and again only after a merge) keeps this from re-normalizing every

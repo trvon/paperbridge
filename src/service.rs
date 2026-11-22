@@ -147,6 +147,12 @@ impl PaperbridgeService {
         self
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_unpaywall_base(mut self, base_url: &str, email: &str) -> Self {
+        self.unpaywall = Some(UnpaywallClient::new(Some(base_url), email.to_string()));
+        self
+    }
+
     /// Enable the OpenAlex `is_retracted` check on resolved DOIs.
     pub fn with_openalex(mut self, mailto: Option<String>, api_key: Option<String>) -> Self {
         self.openalex = Some(OpenAlexClient::new(None, mailto).with_api_key(api_key));
@@ -1448,13 +1454,13 @@ impl PaperbridgeService {
     }
 
     /// OpenAlex `is_retracted`, bounded by `OPENALEX_NOTICE_TIMEOUT`.
-    /// `Err(())` means the check failed or timed out.
-    async fn openalex_retracted(&self, doi: &str) -> Option<std::result::Result<bool, ()>> {
+    /// `Ok(None)`: OpenAlex has no record (404). `Err(())`: failed or timed out.
+    async fn openalex_retracted(&self, doi: &str) -> Option<std::result::Result<Option<bool>, ()>> {
         let openalex = self.openalex.as_ref()?;
         let outcome =
             tokio::time::timeout(OPENALEX_NOTICE_TIMEOUT, openalex.is_retracted(doi)).await;
         Some(match outcome {
-            Ok(Ok(flag)) => Ok(flag == Some(true)),
+            Ok(Ok(flag)) => Ok(flag),
             Ok(Err(error)) => {
                 debug!(%error, "OpenAlex retraction check failed");
                 Err(())
@@ -1487,14 +1493,16 @@ impl PaperbridgeService {
         let (oa_pdf_url, openalex) = tokio::join!(self.unpaywall_pdf(&work.doi), openalex_check);
         work.oa_pdf_url = oa_pdf_url;
         match openalex {
-            Some(Ok(retracted)) => {
+            Some(Ok(Some(retracted))) => {
                 work.notices_checked.push("openalex".into());
                 if retracted {
                     work.openalex_only_retracted = Some(true);
                 }
             }
             Some(Err(())) => work.notices_failed.push("openalex".into()),
-            None => {}
+            // Not attached, skipped after a Crossref retraction, or no OpenAlex
+            // record (404): nothing was checked, so list it nowhere.
+            Some(Ok(None)) | None => {}
         }
         Ok(work)
     }
@@ -5078,17 +5086,25 @@ mod tests {
 
     #[tokio::test]
     async fn openalex_failure_or_false_never_fails_resolve() {
-        for (response, failed) in [
-            (Some(wiremock::ResponseTemplate::new(500)), true),
+        // (response, expected notices_checked, expected notices_failed)
+        let cases: [(Option<wiremock::ResponseTemplate>, &[&str], &[&str]); 3] = [
+            (
+                Some(wiremock::ResponseTemplate::new(500)),
+                &["crossref"],
+                &["openalex"],
+            ),
             (
                 Some(
                     wiremock::ResponseTemplate::new(200)
                         .set_body_json(serde_json::json!({"is_retracted": false})),
                 ),
-                false,
+                &["crossref", "openalex"],
+                &[],
             ),
-            (None, false),
-        ] {
+            // 404: OpenAlex has no record, so it is neither checked nor failed.
+            (None, &["crossref"], &[]),
+        ];
+        for (response, checked, failed) in cases {
             let (_server, service) = notice_mocks(serde_json::Value::Null, response, 1).await;
             let work = service
                 .resolve_doi_with_notices("10.1/target")
@@ -5096,14 +5112,65 @@ mod tests {
                 .unwrap();
             assert!(work.notices.is_empty());
             assert!(work.openalex_only_retracted.is_none());
-            if failed {
-                assert_eq!(work.notices_checked, ["crossref"]);
-                assert_eq!(work.notices_failed, ["openalex"]);
-            } else {
-                assert_eq!(work.notices_checked, ["crossref", "openalex"]);
-                assert!(work.notices_failed.is_empty());
-            }
+            assert_eq!(work.notices_checked, checked);
+            assert_eq!(work.notices_failed, failed);
         }
+    }
+
+    #[tokio::test]
+    async fn unpaywall_runs_on_the_notices_path() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let (server, service) = notice_mocks(serde_json::Value::Null, retracted_flag(), 1).await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/unpaywall/10\.1/target"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "best_oa_location": {"url_for_pdf": "https://oa.example/target.pdf"}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let service =
+            service.with_unpaywall_base(&format!("{}/unpaywall", server.uri()), "t@example.com");
+        let work = service
+            .resolve_doi_with_notices("10.1/target")
+            .await
+            .unwrap();
+        assert_eq!(
+            work.oa_pdf_url.as_deref(),
+            Some("https://oa.example/target.pdf")
+        );
+        assert_eq!(work.openalex_only_retracted, Some(true));
+    }
+
+    #[tokio::test]
+    async fn openalex_check_waits_out_search_cooldown_within_timeout() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let (server, service) = notice_mocks(serde_json::Value::Null, retracted_flag(), 1).await;
+        Mock::given(method("GET"))
+            .and(path("/openalex/works"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "1"))
+            .mount(&server)
+            .await;
+        // A search 429 (retried once) leaves a ~1 s cooldown on this origin.
+        let search =
+            crate::external::OpenAlexClient::new(Some(&format!("{}/openalex", server.uri())), None);
+        assert!(search.search("q", 1).await.is_err());
+        let started = std::time::Instant::now();
+        let work = service
+            .resolve_doi_with_notices("10.1/target")
+            .await
+            .unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= std::time::Duration::from_millis(500),
+            "{elapsed:?}"
+        );
+        assert!(elapsed < std::time::Duration::from_secs(4), "{elapsed:?}");
+        assert_eq!(work.openalex_only_retracted, Some(true));
     }
 
     #[tokio::test]

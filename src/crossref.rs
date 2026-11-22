@@ -233,16 +233,16 @@ const MAX_NOTICES: usize = 32;
 /// Upper bound on each notice string, in chars.
 const MAX_NOTICE_FIELD_CHARS: usize = 256;
 
+/// Raw `updated-by` entries inspected per work, before dedupe and the cap.
+const MAX_RAW_NOTICE_ENTRIES: usize = 1024;
+
 fn convert_notices(raw: Option<serde_json::Value>) -> Vec<WorkNotice> {
     let entries = match raw {
         Some(serde_json::Value::Array(entries)) => entries,
         _ => return Vec::new(),
     };
     let mut notices: Vec<WorkNotice> = Vec::new();
-    for entry in &entries {
-        if notices.len() >= MAX_NOTICES {
-            break;
-        }
+    for entry in entries.iter().take(MAX_RAW_NOTICE_ENTRIES) {
         let Some(notice_type) = notice_str(entry, "type").map(|t| normalize_notice_type(&t)) else {
             continue;
         };
@@ -255,6 +255,12 @@ fn convert_notices(raw: Option<serde_json::Value>) -> Vec<WorkNotice> {
         if notices.contains(&notice).not() {
             notices.push(notice);
         }
+    }
+    // Over the cap, move retraction-class first (stable) so truncation never
+    // drops a retraction; otherwise keep Crossref's order.
+    if notices.len() > MAX_NOTICES {
+        notices.sort_by_key(|n| is_retraction_class(&n.notice_type).not());
+        notices.truncate(MAX_NOTICES);
     }
     notices
 }
@@ -870,6 +876,20 @@ mod tests {
                 .iter()
                 .all(|n| n.source.as_ref().unwrap().chars().count() == MAX_NOTICE_FIELD_CHARS)
         );
+    }
+
+    #[test]
+    fn cap_keeps_retraction_listed_last() {
+        let mut entries: Vec<_> = (0..40)
+            .map(|i| serde_json::json!({"type": "correction", "DOI": format!("10.1/c{i}")}))
+            .collect();
+        entries.push(serde_json::json!({"type": "Retraction", "DOI": "10.1/r"}));
+        let notices = convert_notices(Some(serde_json::Value::Array(entries)));
+        assert_eq!(notices.len(), MAX_NOTICES);
+        assert_eq!(notices[0].notice_type, "retraction");
+        assert_eq!(notices[0].notice_doi.as_deref(), Some("10.1/r"));
+        // Remaining order is preserved.
+        assert_eq!(notices[1].notice_doi.as_deref(), Some("10.1/c0"));
     }
 
     #[test]
