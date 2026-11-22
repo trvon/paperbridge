@@ -96,9 +96,12 @@ run_tlc MergeFetchDecide_BugMergeOverwrite.cfg NoDecisionLost
 run_tlc MergeFetchDecide_BugStoreRoot.cfg ReplayIdempotent
 run_tlc MergeFetchDecide_BugStoreRootUndo.cfg EdgeFaithful
 run_tlc MergeFetchDecide_BugSplitCommit.cfg CursorImpliesEdges
+run_tlc MergeFetchDecide_BugUndoRestoresLoser.cfg UndoCarriesDecision
+run_tlc MergeFetchDecide_BugUndoNotLifo.cfg NoDecisionLost
 # Witnesses: the scenarios the invariants guard are reachable.
 run_tlc MergeFetchDecide_WitnessNeedsDecision.cfg NeverNeedsDecision
 run_tlc MergeFetchDecide_WitnessSelfLoop.cfg NeverResolvedSelfLoop
+run_tlc MergeFetchDecide_WitnessSeedCandidate.cfg NeverSeedCandidateConflict
 
 if [[ $failures -ne 0 ]]; then
   echo "run.sh: $failures check(s) failed" >&2

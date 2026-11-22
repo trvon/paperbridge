@@ -20,13 +20,17 @@
 (*   "merge_overwrite" Merge keeps one side's state, no needs_decision    *)
 (*   "store_root"      CommitPage stores resolved roots, not base works   *)
 (*   "split_commit"    cursor and edges written in two transactions       *)
+(*   "undo_restores_loser" undo gives the loser its pre-merge state even  *)
+(*                     after a post-merge decision                        *)
+(*   "undo_not_lifo"   undo of a merge that has a later merge with the    *)
+(*                     same winner                                        *)
 (*                                                                         *)
 (* Bound: 3 works (symmetric), 4 IDs, 2 workers, 1 review, 2 pages,     *)
 (* 1 crash, 1 undo.                                                       *)
 (* Measured with TLC 2.19 (tla2tools v1.7.4), Java 25, -workers 1, Apple  *)
 (* M4 Max, via run.sh (all configs in README.md):                        *)
-(*   MergeFetchDecide.cfg: 3,480,539 states generated, 728,304 distinct,  *)
-(*   depth 22, 73-81 s wall.                                              *)
+(*   MergeFetchDecide.cfg: 2,212,523 states generated, 488,124 distinct,  *)
+(*   depth 22, 75 s wall (16 s with -workers auto).                       *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets, TLC
 
@@ -60,7 +64,9 @@ Decisions == {"seed", "included", "excluded"}
 VARIABLES
     idMap,     \* work_ids: external ID -> base work (NoWork if absent)
     works,     \* allocated work_ids
-    merges,    \* active merge_log rows <<winner, loser>> (undone_at IS NULL)
+    merges,    \* active merge_log rows (undone_at IS NULL):
+               \* <<winner, loser, id, winner prior state, loser prior state>>
+               \* (prior states live in review_log in Rust)
     edges,     \* edge_sources: <<citing base work, cited base work>>
     decision,  \* review_works.state per work row (one review)
     reviewLog, \* review_log entries <<work, prior state>> kept on conflict
@@ -73,10 +79,16 @@ VARIABLES
     \* ghosts (not stored by Rust)
     rawEdges,  \* raw ID pairs of every committed page
     known,     \* <<work, state>> decisions not superseded by a later Decide
-    replayOK   \* FALSE once a replayed page changed the store
+    replayOK,  \* FALSE once a replayed page changed the store
+    mseq,      \* merge_log.id of the last merge (logical clock)
+    decidedAt, \* review_works.decided_at, as the mseq at decision time
+    post,      \* ghost: <<merge id, state>> decided on the class after it
+    undoCarryOK,   \* ghost: FALSE once an undo dropped a post-merge decision
+    undoRestoreOK  \* ghost: FALSE once an undo failed to restore prior states
 
 vars == <<idMap, works, merges, edges, decision, reviewLog, cursor,
-          pc, page, snapshot, crashes, undos, rawEdges, known, replayOK>>
+          pc, page, snapshot, crashes, undos, rawEdges, known, replayOK,
+                   mseq, decidedAt, post, undoCarryOK, undoRestoreOK>>
 
 -----------------------------------------------------------------------------
 (* Union-find over active merges. *)
@@ -104,12 +116,18 @@ ReadEdges == {e \in Resolved : e[1] # e[2]}
 Faithful == {e \in {<<Resolve1(r[1]), Resolve1(r[2])>> : r \in rawEdges} :
                 e[1] # e[2]}
 
+\* Review state after a merge. Any two different states conflict,
+\* including seed vs candidate and included vs candidate: the caller
+\* resolves every conflict, paperbridge never picks a side.
 Combine(sw, sl) ==
     IF sl = NoState THEN sw
     ELSE IF sw = NoState THEN sl
     ELSE IF sw = sl THEN sw
     ELSE IF Bug = "merge_overwrite" THEN sw
     ELSE "needs_decision"
+
+\* Works resolving to root r.
+Class(r) == {v \in works : Find(v) = r}
 
 -----------------------------------------------------------------------------
 Init ==
@@ -129,6 +147,11 @@ Init ==
     /\ undos = 0
     /\ rawEdges = {}
     /\ replayOK = TRUE
+    /\ mseq = 0
+    /\ decidedAt = [w \in Works |-> 0]
+    /\ post = {}
+    /\ undoCarryOK = TRUE
+    /\ undoRestoreOK = TRUE
 
 \* Read the committed cursor and resolve the page's IDs before the await.
 \* A worker may pick an already committed page (stale cursor read, retry).
@@ -145,14 +168,16 @@ Resolve(p) ==
                          ELSE snapshot
     /\ pc' = [pc EXCEPT ![p] = "resolved"]
     /\ UNCHANGED <<idMap, works, merges, edges, decision, reviewLog, cursor,
-                   crashes, undos, rawEdges, known, replayOK>>
+                   crashes, undos, rawEdges, known, replayOK,
+                   mseq, decidedAt, post, undoCarryOK, undoRestoreOK>>
 
 \* The HTTP await. No transaction is held; other actions interleave.
 FetchPage(p) ==
     /\ pc[p] = "resolved"
     /\ pc' = [pc EXCEPT ![p] = "fetched"]
     /\ UNCHANGED <<idMap, works, merges, edges, decision, reviewLog, cursor,
-                   page, snapshot, crashes, undos, rawEdges, known, replayOK>>
+                   page, snapshot, crashes, undos, rawEdges, known, replayOK,
+                   mseq, decidedAt, post, undoCarryOK, undoRestoreOK>>
 
 \* One transaction: resolve the page's IDs (minting works for unknown
 \* IDs), insert edges by base work, mark new cited works candidate, and
@@ -200,7 +225,8 @@ CommitPage(p) ==
       /\ pc' = [pc EXCEPT ![p] = "idle"]
       /\ page' = [page EXCEPT ![p] = 0]
       /\ snapshot' = [snapshot EXCEPT ![p] = [i \in IDs |-> NoWork]]
-      /\ UNCHANGED <<merges, reviewLog, crashes, undos, known>>
+      /\ UNCHANGED <<merges, reviewLog, crashes, undos, known,
+                     mseq, decidedAt, post, undoCarryOK, undoRestoreOK>>
 
 \* Split-commit bug, first transaction: cursor only.
 CommitCursor(p) ==
@@ -209,7 +235,8 @@ CommitCursor(p) ==
     /\ cursor' = IF page[p] > cursor THEN page[p] ELSE cursor
     /\ pc' = [pc EXCEPT ![p] = "half"]
     /\ UNCHANGED <<idMap, works, merges, edges, decision, reviewLog,
-                   page, snapshot, crashes, undos, rawEdges, known, replayOK>>
+                   page, snapshot, crashes, undos, rawEdges, known, replayOK,
+                   mseq, decidedAt, post, undoCarryOK, undoRestoreOK>>
 
 \* Split-commit bug, second transaction: edges (minting as needed).
 CommitEdges(p) ==
@@ -229,13 +256,14 @@ CommitEdges(p) ==
     /\ pc' = [pc EXCEPT ![p] = "idle"]
     /\ page' = [page EXCEPT ![p] = 0]
     /\ snapshot' = [snapshot EXCEPT ![p] = [i \in IDs |-> NoWork]]
-    /\ UNCHANGED <<merges, reviewLog, cursor, crashes, undos, known, replayOK>>
+    /\ UNCHANGED <<merges, reviewLog, cursor, crashes, undos, known, replayOK,
+                   mseq, decidedAt, post, undoCarryOK, undoRestoreOK>>
 
 \* DiscoverEqual + Merge in one transaction: a fetch reports the same
 \* strong ID for two works. Roots are computed inside the transaction and
-\* the merge row links two distinct roots. On a state conflict the winner
-\* becomes needs_decision and both prior states go to review_log; the
-\* loser's own row is kept so UndoMerge restores it.
+\* the merge row links two distinct roots. Differing states make the
+\* winner needs_decision and both prior states go to review_log. Only the
+\* winner's row is written; the loser's row is kept.
 Merge ==
     \E pair \in EqualPairs : \E x, y \in pair :
         /\ x # y
@@ -245,34 +273,65 @@ Merge ==
                st == Combine(decision[w], decision[l])
            IN
            /\ w # l
-           /\ merges' = merges \cup {<<w, l>>}
+           /\ merges' = merges \cup {<<w, l, mseq + 1, decision[w], decision[l]>>}
+           /\ mseq' = mseq + 1
            /\ decision' = [decision EXCEPT ![w] = st]
            /\ reviewLog' = IF st = "needs_decision" /\ decision[w] # decision[l]
                              THEN reviewLog \cup {<<w, decision[w]>>,
                                                   <<l, decision[l]>>}
                              ELSE reviewLog
     /\ UNCHANGED <<idMap, works, edges, cursor, pc, page, snapshot, crashes, undos,
-                   rawEdges, known, replayOK>>
+                   rawEdges, known, replayOK, decidedAt, post, undoCarryOK,
+                   undoRestoreOK>>
 
-\* Set undone_at on an active merge row.
+\* Set undone_at on an active merge row. Only the latest active merge with
+\* that winner may be undone (LIFO per winner), so the restored prior
+\* state is not missing a later merge's contribution.
+\* If the class was decided after the merge (decided_at >= merge id), both
+\* works keep that decision: Decide wrote every row in the class, so both
+\* rows already hold it. Otherwise each work gets its own prior state.
 UndoMerge ==
     /\ undos < MaxUndo
-    /\ \E m \in merges : merges' = merges \ {m}
+    /\ \E m \in merges :
+        LET w == m[1]
+            l == m[2]
+            decided == decidedAt[w] >= m[3]
+            newW == IF decided THEN decision[w] ELSE m[4]
+            newL == IF Bug = "undo_restores_loser" THEN m[5] ELSE decision[l]
+            postSt == IF \E e \in post : e[1] = m[3]
+                        THEN (CHOOSE e \in post : e[1] = m[3])[2]
+                        ELSE NoState
+        IN
+        /\ Bug = "undo_not_lifo" \/ ~\E m2 \in merges : m2[1] = w /\ m2[3] > m[3]
+        /\ merges' = merges \ {m}
+        /\ decision' = [decision EXCEPT ![w] = newW, ![l] = newL]
+        /\ undoCarryOK' = (undoCarryOK /\
+                              (postSt # NoState => newW = postSt /\ newL = postSt))
+        /\ undoRestoreOK' = (undoRestoreOK /\
+                                (postSt = NoState => newW = m[4] /\ newL = m[5]))
+        /\ post' = {e \in post : e[1] # m[3]}
     /\ undos' = undos + 1
-    /\ UNCHANGED <<idMap, works, edges, decision, reviewLog, cursor, pc,
-                   page, snapshot, crashes, rawEdges, known, replayOK>>
+    /\ UNCHANGED <<idMap, works, edges, reviewLog, cursor, pc, page, snapshot,
+                   crashes, rawEdges, known, replayOK, mseq, decidedAt>>
 
-\* review decide: on the resolved (root) row only. Re-deciding an already
-\* included/excluded work is left out to bound the state space; it is the
-\* same transition as deciding a needs_decision row.
+\* review decide on a resolved (root) row writes every row in its class
+\* and stamps decided_at, so the decision survives a later undo.
+\* Re-deciding an already included/excluded work is left out to bound the
+\* state space; it is the same transition as deciding a needs_decision row.
 Decide ==
     \E w \in works, s \in {"included", "excluded"} :
+        LET cls  == Class(w)
+            mids == {m[3] : m \in {m2 \in merges : m2[1] \in cls}}
+        IN
         /\ IsRoot(w)
         /\ decision[w] \in {"candidate", "needs_decision"}
-        /\ decision' = [decision EXCEPT ![w] = s]
-        /\ known' = {k \in known : Find(k[1]) # w} \cup {<<w, s>>}
+        /\ decision' = [v \in Works |-> IF v \in cls THEN s ELSE decision[v]]
+        /\ decidedAt' = [v \in Works |-> IF v \in cls THEN mseq ELSE decidedAt[v]]
+        /\ post' = {e \in post : e[1] \notin mids} \cup {<<i, s>> : i \in mids}
+        /\ known' = {k \in known : Find(k[1]) # w} \cup {<<v, s>> : v \in cls}
         /\ UNCHANGED <<idMap, works, merges, edges, reviewLog, cursor, pc,
-                       page, snapshot, crashes, undos, rawEdges, replayOK>>
+                       page, snapshot, crashes, undos, rawEdges, replayOK, mseq,
+                       undoCarryOK, undoRestoreOK>>
 
 \* A worker dies; uncommitted work is lost, committed rows stay.
 Crash(p) ==
@@ -283,14 +342,16 @@ Crash(p) ==
     /\ snapshot' = [snapshot EXCEPT ![p] = [i \in IDs |-> NoWork]]
     /\ crashes' = crashes + 1
     /\ UNCHANGED <<idMap, works, merges, edges, decision, reviewLog, cursor,
-                   undos, rawEdges, known, replayOK>>
+                   undos, rawEdges, known, replayOK,
+                   mseq, decidedAt, post, undoCarryOK, undoRestoreOK>>
 
 \* Restart resumes from the committed cursor (Resolve reads it).
 Restart(p) ==
     /\ pc[p] = "down"
     /\ pc' = [pc EXCEPT ![p] = "idle"]
     /\ UNCHANGED <<idMap, works, merges, edges, decision, reviewLog, cursor,
-                   page, snapshot, crashes, undos, rawEdges, known, replayOK>>
+                   page, snapshot, crashes, undos, rawEdges, known, replayOK,
+                   mseq, decidedAt, post, undoCarryOK, undoRestoreOK>>
 
 Next ==
     \/ \E p \in Workers : Resolve(p) \/ FetchPage(p) \/ CommitPage(p)
@@ -307,7 +368,7 @@ Spec == Init /\ [][Next]_vars
 TypeOK ==
     /\ idMap \in [IDs -> Works \cup {NoWork}]
     /\ works \subseteq Works
-    /\ merges \subseteq works \X works
+    /\ \A m \in merges : m[1] \in works /\ m[2] \in works
     /\ edges \subseteq works \X works
     /\ decision \in [Works -> States \cup {NoState}]
     /\ cursor \in 0..NPages
@@ -361,10 +422,23 @@ CursorImpliesEdges ==
 \* Replaying a committed page changes nothing.
 ReplayIdempotent == replayOK
 
+\* Undo after a post-merge decision: both works hold that decision.
+UndoCarriesDecision == undoCarryOK
+
+\* Undo with no post-merge decision: each work gets its own prior state.
+UndoRestoresPrior == undoRestoreOK
+
 -----------------------------------------------------------------------------
 (* Witnesses: each must be violated, showing the scenario is reachable. *)
 
 NeverNeedsDecision == \A w \in Works : decision[w] # "needs_decision"
 NeverResolvedSelfLoop == \A e \in Resolved : e[1] # e[2]
+\* A seed merged with a candidate becomes needs_decision.
+NeverSeedCandidateConflict ==
+    ~\E w \in works :
+        /\ decision[w] = "needs_decision"
+        /\ \E a, b \in reviewLog :
+              /\ a[2] = "seed" /\ b[2] = "candidate"
+              /\ Find(a[1]) = w /\ Find(b[1]) = w
 Sym == Permutations(Works)
 =============================================================================

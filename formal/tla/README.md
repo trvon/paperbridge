@@ -58,9 +58,9 @@ the seed's reference to `C` into a self-citation).
 | `Resolve` | read cursor, resolve page IDs before the HTTP call |
 | `FetchPage` | the await; no transaction held |
 | `CommitPage` | one transaction: re-resolve IDs, insert missing `work_ids` (`ON CONFLICT DO NOTHING`), insert edges by base work, mark new cited works `candidate`, `cursor = max(cursor, page)` |
-| `Merge` | DiscoverEqual + merge in one transaction: roots computed inside, row links two distinct roots; differing states give `needs_decision` with both prior states logged; loser's row kept |
-| `UndoMerge` | set `undone_at` |
-| `Decide` | `review decide` on the resolved (root) row |
+| `Merge` | DiscoverEqual + merge in one transaction: roots computed inside, row links two distinct roots; any two different states (seed vs candidate included) give `needs_decision` with both prior states logged; only the winner's row is written |
+| `UndoMerge` | set `undone_at` on the latest active merge with that winner; if the class was decided after the merge (`decided_at` later than the merge), both works keep that decision, otherwise each gets its own prior state |
+| `Decide` | `review decide` on a resolved (root) row: writes every row in the class and stamps `decided_at` |
 | `Crash` / `Restart` | worker dies between transactions; restart resumes from the committed cursor |
 
 ## Invariants
@@ -78,6 +78,8 @@ the seed's reference to `C` into a self-citation).
 | `NoDecisionLost` | each live decision is the resolved state, or the resolved row is `needs_decision` and `review_log` holds that state for a work in the class |
 | `CursorImpliesEdges` | every page up to the cursor has its edges stored |
 | `ReplayIdempotent` | committing an already committed page changes nothing |
+| `UndoCarriesDecision` | after undoing a merge whose class was decided after the merge, winner and loser both hold that decision |
+| `UndoRestoresPrior` | after undoing a merge with no later decision, winner and loser each hold their own pre-merge state |
 
 ## Seeded bugs and witnesses
 
@@ -90,8 +92,11 @@ Each must be rejected. `run.sh` checks the invariant named.
 | `_BugStoreRoot` | edges stored by root | `ReplayIdempotent` (replay after a merge adds a root edge) |
 | `_BugStoreRootUndo` | same, without `ReplayIdempotent` | `EdgeFaithful` (after undo, `C`'s work appears to cite `B`) |
 | `_BugSplitCommit` | cursor and edges in two transactions | `CursorImpliesEdges` |
+| `_BugUndoRestoresLoser` | undo gives the loser its pre-merge state despite a post-merge decision | `UndoCarriesDecision` (seed+candidate merged, decided included, undo puts the seed back to `seed`) |
+| `_BugUndoNotLifo` | undo a merge that has a later merge with the same winner | `NoDecisionLost` (winner restored to a state that predates the later merge; the seed's decision is gone) |
 | `_WitnessNeedsDecision` | design | `NeverNeedsDecision`: a conflict is reachable |
 | `_WitnessSelfLoop` | design | `NeverResolvedSelfLoop`: an unfiltered resolved self-loop is reachable |
+| `_WitnessSeedCandidate` | design | `NeverSeedCandidateConflict`: seed merged with candidate becomes `needs_decision` |
 
 ## Results
 
@@ -101,15 +106,21 @@ counterexample length (BFS, so shortest).
 
 | Config | Result | Generated | Distinct | Depth | Wall |
 |---|---|---|---|---|---|
-| `MergeFetchDecide` (`-workers 1`) | pass | 3,480,539 | 728,304 | 22 | 73-81 s |
-| `MergeFetchDecide` (`-workers auto`) | pass | 3,480,539 | 728,304 | 22 | 14 s (14 cores) |
-| `_BugStaleSnapshot` | `EdgeFaithful` | 291 | 127 | 7 | 2-3 s |
-| `_BugMergeOverwrite` | `NoDecisionLost` | 333 | 125 | 8 | 2 s |
-| `_BugStoreRoot` | `ReplayIdempotent` | 2,010 | 852 | 11 | 3 s |
-| `_BugStoreRootUndo` | `EdgeFaithful` | 7,333 | 3,158 | 12 | 3 s |
-| `_BugSplitCommit` | `CursorImpliesEdges` | 20 | 12 | 4 | 2 s |
-| `_WitnessNeedsDecision` | `NeverNeedsDecision` | 333 | 125 | 8 | 2 s |
-| `_WitnessSelfLoop` | `NeverResolvedSelfLoop` | 333 | 125 | 8 | 2 s |
+| `MergeFetchDecide` (`-workers 1`) | pass | 2,212,523 | 488,124 | 22 | 75 s |
+| `MergeFetchDecide` (`-workers auto`) | pass | 2,212,523 | 488,124 | 22 | 16 s (14 cores) |
+| `_BugStaleSnapshot` | `EdgeFaithful` | 291 | 127 | 7 | 4 s |
+| `_BugMergeOverwrite` | `NoDecisionLost` | 333 | 125 | 8 | 5 s |
+| `_BugStoreRoot` | `ReplayIdempotent` | 2,034 | 883 | 11 | 4 s |
+| `_BugStoreRootUndo` | `EdgeFaithful` | 7,461 | 3,247 | 12 | 5 s |
+| `_BugSplitCommit` | `CursorImpliesEdges` | 20 | 12 | 4 | 3 s |
+| `_BugUndoRestoresLoser` | `UndoCarriesDecision` | 1,542 | 697 | 10 | 5 s |
+| `_BugUndoNotLifo` | `NoDecisionLost` | 1,682 | 726 | 10 | 4 s |
+| `_WitnessNeedsDecision` | `NeverNeedsDecision` | 333 | 125 | 8 | 3 s |
+| `_WitnessSelfLoop` | `NeverResolvedSelfLoop` | 333 | 125 | 8 | 4 s |
+| `_WitnessSeedCandidate` | `NeverSeedCandidateConflict` | 333 | 125 | 8 | 4 s |
+
+Wall times include JVM start; full `run.sh` takes about 2 min with one
+worker.
 
 ## Changes from the design's spec outline
 
@@ -150,11 +161,25 @@ counterexample length (BFS, so shortest).
    reads the mapping back in the same transaction; it must never use a
    `work_id` minted before reading the row.
 4. `cursor = max(cursor, page)`; a replayed page never moves it back.
-5. A merge writes only the winner's review row; the loser's row is kept so
-   undo restores it.
+5. A merge writes only the winner's review row and logs both prior states;
+   the loser's row is kept.
 6. `candidate` is written only where the resolved root has no state.
+7. `review decide` on a merged row writes the decision to every work row in
+   the class and sets `decided_at`.
+8. Undo restores per merge: if `decided_at` is later than the merge, both
+   works keep the current decision; otherwise the winner gets its logged
+   prior state and the loser keeps its own row.
+9. Undo only the latest active merge with a given winner (LIFO), or
+   recompute the winner's state from the merges that stay active. Undoing
+   an earlier one first and restoring its logged prior state loses later
+   merges' decisions (`_BugUndoNotLifo`).
 
-Open: the design says any differing states give `needs_decision`, so
-`seed` + `candidate` or `included` + `candidate` also conflict. After
-`Decide` on a merged row and then undo, the loser's pre-merge state comes
-back. Both are allowed by the model; the design should choose.
+## Resolved design decisions
+
+- Any two different states conflict on merge, including `seed` vs
+  `candidate` and `included` vs `candidate`; the result is
+  `needs_decision` (`Combine`, `_WitnessSeedCandidate`).
+- A decision made on a merged row after the merge carries to both works
+  when the merge is undone; with no such decision, undo restores each
+  work's own prior state (`UndoCarriesDecision`, `UndoRestoresPrior`,
+  `_BugUndoRestoresLoser`).
