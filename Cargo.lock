@@ -442,6 +442,7 @@ dependencies = [
 name = "citegraph"
 version = "2.3.0"
 dependencies = [
+ "criterion",
  "proptest",
  "rusqlite",
  "serde",

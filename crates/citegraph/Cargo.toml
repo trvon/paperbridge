@@ -15,8 +15,13 @@ thiserror.workspace = true
 urlencoding.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
+
+[[bench]]
+name = "joins"
+harness = false
 
 [lints]
 workspace = true
