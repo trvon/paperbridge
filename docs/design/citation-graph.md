@@ -294,28 +294,38 @@ fetches and review decisions.
   on works. Target under 1M states and about a minute in CI; measure and
   record in the spec header.
 
-TLC findings that bind the implementation (PR #69):
+TLC findings that bind the implementation (PR #69, final; details in
+`formal/tla/README.md`):
 
-1. A merge joins the two current roots, computed inside the merge
-   transaction.
-2. Edges store the work an external ID first mapped to and resolve through
-   active merges at read time; self-loops that appear after resolution are
-   dropped. Rewriting edges to roots breaks replay and undo.
-3. New external IDs insert with `ON CONFLICT DO NOTHING` and the mapping is
-   read back in the same transaction.
-4. `cursor = max(cursor, page)`; a replayed page never moves it back.
-5. A merge during a fetch's await is harmless under (2). The races that
-   matter are another worker creating a work for the same ID, and an undo
-   landing during the await.
-6. `candidate` is written only where the resolved root has no state.
-7. `review decide` on a merged row writes every work row in the class and
-   sets `decided_at`.
-8. Undo is per merge: if `decided_at` is later than the merge, both works
-   keep the current decision; otherwise the winner gets its logged prior
-   state and the loser keeps its own row.
-9. Undo is LIFO per winner, or the winner's state is recomputed from the
-   merges that remain active. Restoring an earlier merge's logged state
-   while a later merge is active loses decisions.
+1. Merge two current classes, computed inside the transaction.
+2. Store base works in `edge_sources` and `work_ids`, never roots; reads
+   resolve through active merges and drop self-loops that appear.
+3. Inside commit, insert IDs with `ON CONFLICT DO NOTHING` and read back;
+   never mint a work for an ID resolved before the await.
+4. The cursor never moves back; edges and cursor commit in one transaction.
+5. A merge writes only the winner root's review row and logs both prior
+   states keyed by merge id.
+6. Write `candidate` only where the root has no review row.
+7. `decide` writes every row in the class and sets `decided_seq`.
+8. On undo: if `decided_seq` is at or after the merge's seq, both works keep
+   the decision; otherwise each gets its prior state. Compare sequence
+   numbers, never timestamps.
+9. Undo only the latest active merge in the class (IsRoot alone and
+   same-winner LIFO alone are both unsafe).
+10. Merges record evidence bases; a new ID joins the matched ID's base,
+    never its root.
+11. The undo veto is keyed on the evidence pair; redo inserts a new row.
+12. `version_split` only when that merge is the outermost in its class;
+    otherwise write nothing and report the split as pending.
+13. `last_seen = MAX(last_seen, started_seq)`; superseded generations write
+    nothing.
+14. Commit, observe, undo, redo, split and decide are each one
+    `BEGIN IMMEDIATE` transaction.
+
+Decision (gap found by TLC): when an undo detaches a work that committed
+pages already cite from in-review works, the undo transaction writes a
+`candidate` row for it from stored edges (rule 6 applies), so it does not
+wait for a refetch.
 
 Rust mirrors the same invariants with proptest. Fetch-log resume and
 sequential review state are covered by proptest only, not TLA+.
