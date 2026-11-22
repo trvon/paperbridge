@@ -314,7 +314,14 @@ TLC findings that bind the implementation (PR #69, final; details in
    same-winner LIFO alone are both unsafe).
 10. Merges record evidence bases; a new ID joins the matched ID's base,
     never its root.
-11. The undo veto is keyed on the evidence pair; redo inserts a new row.
+11. A user undo is sticky at class level: a join of classes X and Y is
+    refused when some evidence pair {a, b} whose latest `merge_log` row is
+    a user undo has a in X and b in Y (classes taken inside the transaction
+    just before the join). A refused join writes nothing and counts as an
+    identity conflict; the record's IDs still get base works. `version_split`
+    undos create no separation. `redo_merge(m)` lifts only m's pair and
+    inserts a new row; `redo_merges` redoes several at once, all-or-nothing.
+    Pair-level vetoes and logging skipped pairs both fail under TLC.
 12. `version_split` only when that merge is the outermost in its class;
     otherwise write nothing and report the split as pending.
 13. `last_seen = MAX(last_seen, started_seq)`; superseded generations write
