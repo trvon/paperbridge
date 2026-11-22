@@ -134,9 +134,11 @@ limit?, offset?, refresh?, include?: ["contexts"] }`.
 - Lists are cached in `$XDG_DATA_HOME/paperbridge/citegraph.sqlite`.
   References are fetched once; `--refresh` refetches. Cited-by pages are
   fetched on demand and resume across calls.
-- Each call has a request budget per source. When `truncated` is true or
-  `diagnostics.budget[].exhausted` is set, repeat the call (or follow
-  `next_offset`) to fetch more. `coverage` shows `fetched` vs
+- Each call has a request budget per source, and each source a rate and
+  daily limit shared by every paperbridge process on the machine. When
+  `truncated` is true or `diagnostics.budget[].exhausted` is set, repeat
+  the call (or follow `next_offset`) to fetch more; a
+  `*_daily_budget_exhausted` note means wait until the next UTC day. `coverage` shows `fetched` vs
   `total_reported` per source.
 - Contexts and intents need `semantic_scholar_api_key`. Semantic Scholar
   cannot page cited-by past 10,000 (`coverage[].capped`).
