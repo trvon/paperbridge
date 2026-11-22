@@ -3,7 +3,9 @@ use crate::backend::{BackendCapabilities, BackendMode, LibraryBackend};
 use crate::config::InstitutionAccessMode;
 use crate::crossref::CrossrefClient;
 use crate::error::{Result, ZoteroMcpError};
-use crate::external::{PaperSearch, PaperSearchOutcome, SearchOptions, UnpaywallClient};
+use crate::external::{
+    OpenAlexClient, PaperSearch, PaperSearchOutcome, SearchOptions, UnpaywallClient,
+};
 use crate::hit_enrich::{apply_detail, enrich_hit_identity};
 use crate::models::{
     BackendInfo, CachedPaperDetail, CachedPaperSummary, CollectionListResult, CollectionSummary,
@@ -100,6 +102,8 @@ pub struct PaperbridgeService {
     crossref: CrossrefClient,
     paper_search: PaperSearch,
     unpaywall: Option<UnpaywallClient>,
+    /// Secondary retraction signal for `resolve_doi`/`open_paper`; off unless attached.
+    openalex: Option<OpenAlexClient>,
     paper_config: Option<PaperConfig>,
     paper_cache: Arc<Mutex<HashMap<PaperCacheKey, PaperStructure>>>,
     paperseed: Option<PaperseedApi>,
@@ -118,6 +122,7 @@ impl PaperbridgeService {
             crossref: CrossrefClient::new(None),
             paper_search,
             unpaywall: None,
+            openalex: None,
             paper_config: None,
             paper_cache: Arc::new(Mutex::new(HashMap::new())),
             paperseed: None,
@@ -135,6 +140,19 @@ impl PaperbridgeService {
 
     pub fn with_unpaywall(mut self, email: Option<String>) -> Self {
         self.unpaywall = email.map(|e| UnpaywallClient::new(None, e));
+        self
+    }
+
+    /// Enable the OpenAlex `is_retracted` check on resolved DOIs.
+    pub fn with_openalex(mut self, mailto: Option<String>, api_key: Option<String>) -> Self {
+        self.openalex = Some(OpenAlexClient::new(None, mailto).with_api_key(api_key));
+        self
+    }
+
+    /// Point the OpenAlex retraction check at another endpoint.
+    #[doc(hidden)]
+    pub fn with_openalex_base(mut self, base_url: &str, api_key: Option<String>) -> Self {
+        self.openalex = Some(OpenAlexClient::new(Some(base_url), None).with_api_key(api_key));
         self
     }
 
@@ -399,7 +417,7 @@ impl PaperbridgeService {
 
         if wants.iter().any(|w| w == "metadata") {
             if let Some(doi) = resolved.doi.as_deref() {
-                match self.resolve_doi(doi).await {
+                match self.resolve_doi_with_notices(doi).await {
                     Ok(work) => {
                         out.insert("metadata".into(), serde_json::to_value(work)?);
                     }
@@ -1421,6 +1439,27 @@ impl PaperbridgeService {
         Ok(work)
     }
 
+    /// `resolve_doi` plus the OpenAlex retraction signal. Crossref notices come
+    /// from the same Crossref record; OpenAlex is consulted only when Crossref
+    /// lists no retraction, and its failure never fails the resolve.
+    pub async fn resolve_doi_with_notices(&self, doi: &str) -> Result<CrossrefWork> {
+        let mut work = self.resolve_doi(doi).await?;
+        let crossref_retracted = work
+            .notices
+            .iter()
+            .any(|notice| notice.notice_type == "retraction");
+        if crossref_retracted.not()
+            && let Some(openalex) = self.openalex.as_ref()
+        {
+            match openalex.is_retracted(&work.doi).await {
+                Ok(Some(true)) => work.openalex_only_retracted = Some(true),
+                Ok(_) => {}
+                Err(error) => debug!(%error, "OpenAlex retraction check failed"),
+            }
+        }
+        Ok(work)
+    }
+
     pub async fn resolve_source_access(
         &self,
         url: Option<&str>,
@@ -2300,7 +2339,16 @@ fn missing_cached_paper(id: &str) -> ZoteroMcpError {
 fn bound_open_metadata(metadata: &mut serde_json::Value, max_chars: usize) -> serde_json::Value {
     let mut identity = serde_json::Map::new();
     if let Some(map) = metadata.as_object_mut() {
-        for key in ["key", "doi", "paper_id", "arxiv_id", "research_hash", "ids"] {
+        for key in [
+            "key",
+            "doi",
+            "paper_id",
+            "arxiv_id",
+            "research_hash",
+            "ids",
+            "notices",
+            "openalex_only_retracted",
+        ] {
             if let Some(value) = map.remove(key) {
                 identity.insert(key.into(), value);
             }
@@ -4820,6 +4868,155 @@ mod tests {
         assert_eq!(second.next_offset, Some(4));
 
         assert!(paginate_fulltext(&full, 1, 1).is_err());
+    }
+
+    async fn notice_mocks(
+        crossref_updated_by: serde_json::Value,
+        openalex: Option<wiremock::ResponseTemplate>,
+        openalex_calls: u64,
+    ) -> (wiremock::MockServer, PaperbridgeService) {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/crossref/works/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "message": {
+                    "DOI": "10.1/target",
+                    "title": ["Target"],
+                    "abstract": "x".repeat(5000),
+                    "updated-by": crossref_updated_by
+                }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/openalex/works/doi:"))
+            .respond_with(openalex.unwrap_or_else(|| ResponseTemplate::new(404)))
+            .expect(openalex_calls)
+            .mount(&server)
+            .await;
+        let service = PaperbridgeService::new(Arc::new(StubLocalReadOnlyBackend))
+            .with_crossref_base(&format!("{}/crossref", server.uri()))
+            .with_openalex_base(&format!("{}/openalex", server.uri()), None);
+        (server, service)
+    }
+
+    fn retracted_flag() -> Option<wiremock::ResponseTemplate> {
+        Some(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"is_retracted": true})),
+        )
+    }
+
+    #[tokio::test]
+    async fn crossref_retraction_skips_openalex() {
+        let (_server, service) = notice_mocks(
+            serde_json::json!([{
+                "DOI": "10.1/notice", "type": "retraction", "source": "publisher",
+                "label": "Retraction", "updated": {"date-parts": [[2020, 1, 2]]}
+            }]),
+            retracted_flag(),
+            0,
+        )
+        .await;
+        let work = service
+            .resolve_doi_with_notices("10.1/target")
+            .await
+            .unwrap();
+        assert_eq!(work.notices.len(), 1);
+        assert_eq!(work.notices[0].notice_type, "retraction");
+        assert!(work.openalex_only_retracted.is_none());
+    }
+
+    #[tokio::test]
+    async fn openalex_only_retraction_is_flagged_separately() {
+        let (_server, service) = notice_mocks(
+            serde_json::json!([{
+                "DOI": "10.1/erratum", "type": "correction", "source": "publisher",
+                "label": "Correction", "updated": {"date-parts": [[2020]]}
+            }]),
+            retracted_flag(),
+            1,
+        )
+        .await;
+        let work = service
+            .resolve_doi_with_notices("10.1/target")
+            .await
+            .unwrap();
+        assert_eq!(work.notices[0].notice_type, "correction");
+        assert_eq!(work.openalex_only_retracted, Some(true));
+    }
+
+    #[tokio::test]
+    async fn openalex_failure_or_false_never_fails_resolve() {
+        for response in [
+            Some(wiremock::ResponseTemplate::new(500)),
+            Some(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"is_retracted": false})),
+            ),
+            None,
+        ] {
+            let (_server, service) = notice_mocks(serde_json::Value::Null, response, 1).await;
+            let work = service
+                .resolve_doi_with_notices("10.1/target")
+                .await
+                .unwrap();
+            assert!(work.notices.is_empty());
+            assert!(work.openalex_only_retracted.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn plain_resolve_doi_does_not_call_openalex() {
+        let (_server, service) = notice_mocks(serde_json::Value::Null, retracted_flag(), 0).await;
+        let work = service.resolve_doi("10.1/target").await.unwrap();
+        assert!(work.openalex_only_retracted.is_none());
+    }
+
+    #[tokio::test]
+    async fn open_paper_metadata_keeps_notices_under_small_budget() {
+        let (_server, service) = notice_mocks(
+            serde_json::json!([{
+                "DOI": "10.1/notice", "type": "retraction", "source": "retraction-watch",
+                "label": "Retraction", "updated": {"date-parts": [[2010, 2, 6]]}
+            }]),
+            None,
+            0,
+        )
+        .await;
+        let value = service
+            .open_paper(OpenPaperRequest {
+                doi: Some("10.1/target".into()),
+                want: vec!["metadata".into()],
+                max_chars: Some(50),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(value["metadata_page"]["truncated"], true);
+        let notice = &value["metadata"]["notices"][0];
+        assert_eq!(notice["type"], "retraction");
+        assert_eq!(notice["source"], "retraction-watch");
+        assert_eq!(notice["notice_doi"], "10.1/notice");
+        assert_eq!(notice["date"], "2010-02-06");
+    }
+
+    #[tokio::test]
+    async fn open_paper_metadata_carries_openalex_only_flag() {
+        let (_server, service) = notice_mocks(serde_json::Value::Null, retracted_flag(), 1).await;
+        let value = service
+            .open_paper(OpenPaperRequest {
+                doi: Some("10.1/target".into()),
+                want: vec!["metadata".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(value["metadata"].get("notices").is_none());
+        assert_eq!(value["metadata"]["openalex_only_retracted"], true);
     }
 
     #[tokio::test]

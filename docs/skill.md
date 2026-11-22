@@ -105,6 +105,14 @@ paperbridge papers resolve-doi --doi "10.1038/nature12373"
 
 When `unpaywall_email` is configured, the response includes `oa_pdf_url`.
 
+`resolve-doi` and `papers open --want metadata` (MCP `resolve_doi`,
+`open_paper`) add `notices: [{type, source, notice_doi, date}]` from Crossref
+`updated-by` when the work has retraction, correction, or
+expression-of-concern notices. `openalex_only_retracted: true` means OpenAlex
+marks the work retracted but Crossref has no retraction notice; treat it as
+unconfirmed. Both fields are absent when there is nothing to report. Check
+them before citing a paper. `search_papers` hits do not carry notices.
+
 ### Resolve optional institutional access
 
 Institutional access is disabled by default. Configure it through the existing
@@ -349,6 +357,7 @@ paperbridge config snippet --target opencode
 | `paperseed_corpus_root` | override corpus path |
 | `hf_token`, `semantic_scholar_api_key`, `core_api_key`, `ads_api_token`, `scholarapi_key` | gate external sources |
 | `ncbi_api_key` | optional PubMed rate-limit upgrade |
+| `openalex_api_key` | sent as `api_key` on OpenAlex requests; masked in config output |
 | `unpaywall_email` | enables OA-PDF enrichment |
 | `institution_access_mode` | institutional routing: `off` (default), `fallback`, `prefer` |
 | `institution_resolver_url` | OpenURL holdings resolver; masked in config output |

@@ -3,6 +3,7 @@ use crate::external::send_with_retry;
 use crate::models::{PaperHit, PaperSource};
 use reqwest::Client;
 use serde::Deserialize;
+use std::ops::Not;
 use std::time::Duration;
 
 const DEFAULT_BASE_URL: &str = "https://api.openalex.org";
@@ -13,6 +14,7 @@ pub struct OpenAlexClient {
     client: Client,
     base_url: String,
     mailto: Option<String>,
+    api_key: Option<String>,
 }
 
 impl OpenAlexClient {
@@ -30,10 +32,82 @@ impl OpenAlexClient {
                 .trim_end_matches('/')
                 .to_string(),
             mailto,
+            api_key: None,
         }
     }
 
+    /// Send `api_key` on every request (OpenAlex requires a key since 2026-02).
+    pub fn with_api_key(mut self, api_key: Option<String>) -> Self {
+        self.api_key = api_key.filter(|k| k.trim().is_empty().not());
+        self
+    }
+
+    /// Append `mailto` and `api_key` query parameters to a URL that already has a `?`.
+    fn push_auth_params(&self, url: &mut String) {
+        if let Some(email) = self.mailto.as_deref() {
+            url.push_str(&format!("&mailto={}", urlencoding::encode(email)));
+        }
+        if let Some(key) = self.api_key.as_deref() {
+            url.push_str(&format!("&api_key={}", urlencoding::encode(key)));
+        }
+    }
+
+    /// Strip the API key from error text; reqwest errors embed the full URL.
+    fn redact(&self, error: ZoteroMcpError) -> ZoteroMcpError {
+        let Some(key) = self.api_key.as_deref() else {
+            return error;
+        };
+        let encoded = urlencoding::encode(key).into_owned();
+        let secrets = [key, encoded.as_str()];
+        match error {
+            ZoteroMcpError::Http(message) => {
+                ZoteroMcpError::Http(crate::error::sanitize_message(&message, &secrets))
+            }
+            ZoteroMcpError::Serde(message) => {
+                ZoteroMcpError::Serde(crate::error::sanitize_message(&message, &secrets))
+            }
+            ZoteroMcpError::Api { status, message } => ZoteroMcpError::Api {
+                status,
+                message: crate::error::sanitize_message(&message, &secrets),
+            },
+            other => other,
+        }
+    }
+
+    /// OpenAlex `is_retracted` for a DOI. `Ok(None)` when OpenAlex has no such work.
+    pub async fn is_retracted(&self, doi: &str) -> Result<Option<bool>> {
+        self.is_retracted_inner(doi)
+            .await
+            .map_err(|error| self.redact(error))
+    }
+
+    async fn is_retracted_inner(&self, doi: &str) -> Result<Option<bool>> {
+        let encoded = urlencoding::encode(doi.trim());
+        let mut url = format!("{}/works/doi:{encoded}?select=is_retracted", self.base_url);
+        self.push_auth_params(&mut url);
+
+        let response = send_with_retry("openalex", self.client.get(&url)).await?;
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            return Err(ZoteroMcpError::Api {
+                status: status.as_u16(),
+                message: format!("OpenAlex work lookup failed for DOI '{}'", doi.trim()),
+            });
+        }
+        let raw: RawRetractionFlag = response.json().await?;
+        Ok(raw.is_retracted)
+    }
+
     pub async fn search(&self, query: &str, limit: u32) -> Result<Vec<PaperHit>> {
+        self.search_inner(query, limit)
+            .await
+            .map_err(|error| self.redact(error))
+    }
+
+    async fn search_inner(&self, query: &str, limit: u32) -> Result<Vec<PaperHit>> {
         let trimmed = query.trim();
         if trimmed.is_empty() {
             return Err(ZoteroMcpError::InvalidInput(
@@ -43,16 +117,14 @@ impl OpenAlexClient {
 
         let encoded = urlencoding::encode(trimmed);
         let mut url = format!("{}/works?search={encoded}&per_page={limit}", self.base_url);
-        if let Some(email) = self.mailto.as_deref() {
-            url.push_str(&format!("&mailto={}", urlencoding::encode(email)));
-        }
+        self.push_auth_params(&mut url);
 
         let response = send_with_retry("openalex", self.client.get(&url)).await?;
         let status = response.status();
         if !status.is_success() {
             return Err(ZoteroMcpError::Api {
                 status: status.as_u16(),
-                message: format!("OpenAlex API error at {url}"),
+                message: format!("OpenAlex API error at {}/works", self.base_url),
             });
         }
 
@@ -66,8 +138,14 @@ impl std::fmt::Debug for OpenAlexClient {
         f.debug_struct("OpenAlexClient")
             .field("base_url", &self.base_url)
             .field("has_mailto", &self.mailto.is_some())
+            .field("has_api_key", &self.api_key.is_some())
             .finish()
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct RawRetractionFlag {
+    is_retracted: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -370,5 +448,101 @@ mod tests {
             matches!(err, ZoteroMcpError::Http(_) | ZoteroMcpError::Serde(_)),
             "expected decode/serde error, got {err:?}"
         );
+    }
+
+    const KEY: &str = "oa-secret-key-123";
+
+    #[tokio::test]
+    async fn is_retracted_sends_api_key_and_mailto() {
+        use wiremock::matchers::{method, path_regex, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/works/doi:10\.1016(/|%2F)s0140-6736"))
+            .and(query_param("select", "is_retracted"))
+            .and(query_param("api_key", KEY))
+            .and(query_param("mailto", "me@example.com"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"is_retracted": true})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = OpenAlexClient::new(Some(&server.uri()), Some("me@example.com".into()))
+            .with_api_key(Some(KEY.into()));
+        let flag = client
+            .is_retracted("10.1016/s0140-6736(97)11096-0")
+            .await
+            .unwrap();
+        assert_eq!(flag, Some(true));
+    }
+
+    #[tokio::test]
+    async fn is_retracted_returns_none_for_unknown_doi() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let client = OpenAlexClient::new(Some(&server.uri()), None);
+        assert_eq!(client.is_retracted("10.9/none").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn search_sends_api_key_when_configured() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/works"))
+            .and(query_param("api_key", KEY))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"results": []})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = OpenAlexClient::new(Some(&server.uri()), None).with_api_key(Some(KEY.into()));
+        assert!(client.search("q", 1).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn errors_never_contain_the_api_key() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let client = OpenAlexClient::new(Some(&server.uri()), None).with_api_key(Some(KEY.into()));
+        let http_err = client.search("q", 1).await.unwrap_err();
+        let lookup_err = client.is_retracted("10.1/x").await.unwrap_err();
+
+        // Connection refused: reqwest's error text embeds the full request URL.
+        let offline =
+            OpenAlexClient::new(Some("http://127.0.0.1:9"), None).with_api_key(Some(KEY.into()));
+        let transport_err = offline.is_retracted("10.1/x").await.unwrap_err();
+        assert!(transport_err.to_string().contains("api_key=<redacted>"));
+
+        for err in [http_err, lookup_err, transport_err] {
+            let text = format!("{err} {err:?}");
+            assert!(!text.contains(KEY), "key leaked: {text}");
+        }
+        assert!(!format!("{client:?}").contains(KEY));
+        assert!(format!("{client:?}").contains("has_api_key: true"));
+    }
+
+    #[test]
+    fn blank_api_key_is_ignored() {
+        let client = OpenAlexClient::new(None, None).with_api_key(Some("  ".into()));
+        assert!(client.api_key.is_none());
     }
 }

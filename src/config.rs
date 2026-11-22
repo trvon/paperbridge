@@ -133,6 +133,8 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scholarapi_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub openalex_api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub unpaywall_email: Option<String>,
     pub institution_access_mode: InstitutionAccessMode,
     /// Backward-compatible single endpoint. New configurations should use the
@@ -178,6 +180,7 @@ impl Default for Config {
             ads_api_token: None,
             ncbi_api_key: None,
             scholarapi_key: None,
+            openalex_api_key: None,
             unpaywall_email: None,
             institution_access_mode: InstitutionAccessMode::Off,
             institution_access_url: None,
@@ -216,6 +219,7 @@ struct PartialConfig {
     ads_api_token: Option<String>,
     ncbi_api_key: Option<String>,
     scholarapi_key: Option<String>,
+    openalex_api_key: Option<String>,
     unpaywall_email: Option<String>,
     institution_access_mode: Option<InstitutionAccessMode>,
     institution_access_url: Option<String>,
@@ -313,7 +317,7 @@ impl Config {
         };
         let plain = |opt: &Option<String>| opt.clone().unwrap_or_else(|| "<unset>".to_string());
         format!(
-            "backend_mode = \"{}\"\ncloud_api_base = \"{}\"\nlocal_api_base = \"{}\"\napi_key = {}\nlibrary_type = \"{}\"\nuser_id = {}\ngroup_id = {}\ntimeout_secs = {}\nlog_level = \"{}\"\nhf_token = {}\nsemantic_scholar_api_key = {}\ncore_api_key = {}\nads_api_token = {}\nncbi_api_key = {}\nscholarapi_key = {}\nunpaywall_email = {}\ninstitution_access_mode = \"{}\"\ninstitution_access_url = {}\ninstitution_resolver_url = {}\ninstitution_gateway_url = {}\ngrobid_url = {}\nbrowser_command = {}\ngrobid_timeout_secs = {}\ngrobid_auto_spawn = {}\ngrobid_image = \"{}\"\nupdate_check_enabled = {}
+            "backend_mode = \"{}\"\ncloud_api_base = \"{}\"\nlocal_api_base = \"{}\"\napi_key = {}\nlibrary_type = \"{}\"\nuser_id = {}\ngroup_id = {}\ntimeout_secs = {}\nlog_level = \"{}\"\nhf_token = {}\nsemantic_scholar_api_key = {}\ncore_api_key = {}\nads_api_token = {}\nncbi_api_key = {}\nscholarapi_key = {}\nopenalex_api_key = {}\nunpaywall_email = {}\ninstitution_access_mode = \"{}\"\ninstitution_access_url = {}\ninstitution_resolver_url = {}\ninstitution_gateway_url = {}\ngrobid_url = {}\nbrowser_command = {}\ngrobid_timeout_secs = {}\ngrobid_auto_spawn = {}\ngrobid_image = \"{}\"\nupdate_check_enabled = {}
 paperseed_enabled = {}
 paperseed_auto_download = {}
 paperseed_yams_enabled = {}
@@ -337,6 +341,7 @@ paperseed_corpus_root = {}",
             mask(&self.ads_api_token),
             mask(&self.ncbi_api_key),
             mask(&self.scholarapi_key),
+            mask(&self.openalex_api_key),
             plain(&self.unpaywall_email),
             self.institution_access_mode.as_str(),
             mask(&self.institution_access_url),
@@ -432,6 +437,11 @@ paperseed_corpus_root = {}",
             ),
             "scholarapi_key" => Some(
                 self.scholarapi_key
+                    .clone()
+                    .unwrap_or_else(|| "<unset>".to_string()),
+            ),
+            "openalex_api_key" => Some(
+                self.openalex_api_key
                     .clone()
                     .unwrap_or_else(|| "<unset>".to_string()),
             ),
@@ -549,6 +559,9 @@ paperseed_corpus_root = {}",
             "scholarapi_key" => {
                 self.scholarapi_key = optional_string(v);
             }
+            "openalex_api_key" => {
+                self.openalex_api_key = optional_string(v);
+            }
             "unpaywall_email" => {
                 self.unpaywall_email = optional_string(v);
             }
@@ -630,7 +643,7 @@ paperseed_corpus_root = {}",
             }
             _ => {
                 return Err(ZoteroMcpError::InvalidInput(format!(
-                    "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key, core_api_key, ads_api_token, ncbi_api_key, scholarapi_key, unpaywall_email, institution_access_mode, institution_access_url, institution_resolver_url, institution_gateway_url, grobid_url, browser_command, grobid_timeout_secs, grobid_auto_spawn, grobid_image, update_check_enabled, paperseed_enabled, paperseed_auto_download, paperseed_yams_enabled, paperseed_corpus_root"
+                    "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key, core_api_key, ads_api_token, ncbi_api_key, scholarapi_key, openalex_api_key, unpaywall_email, institution_access_mode, institution_access_url, institution_resolver_url, institution_gateway_url, grobid_url, browser_command, grobid_timeout_secs, grobid_auto_spawn, grobid_image, update_check_enabled, paperseed_enabled, paperseed_auto_download, paperseed_yams_enabled, paperseed_corpus_root"
                 )));
             }
         }
@@ -685,6 +698,9 @@ paperseed_corpus_root = {}",
         }
         if let Some(v) = partial.scholarapi_key {
             self.scholarapi_key = Some(v);
+        }
+        if let Some(v) = partial.openalex_api_key {
+            self.openalex_api_key = Some(v);
         }
         if let Some(v) = partial.unpaywall_email {
             self.unpaywall_email = Some(v);
@@ -826,6 +842,13 @@ paperseed_corpus_root = {}",
                         self.scholarapi_key = None;
                     } else {
                         self.scholarapi_key = Some(value.to_string());
+                    }
+                }
+                "PAPERBRIDGE_OPENALEX_API_KEY" | "OPENALEX_API_KEY" => {
+                    if value.trim().is_empty() {
+                        self.openalex_api_key = None;
+                    } else {
+                        self.openalex_api_key = Some(value.to_string());
                     }
                 }
                 "PAPERBRIDGE_UNPAYWALL_EMAIL" | "UNPAYWALL_EMAIL" => {
@@ -1172,6 +1195,23 @@ mod tests {
     }
 
     #[test]
+    fn openalex_api_key_from_toml_env_and_masked() {
+        let mut cfg = Config::default();
+        let partial: PartialConfig = toml::from_str("openalex_api_key = \"from-toml\"").unwrap();
+        cfg.apply_partial(partial);
+        assert_eq!(cfg.openalex_api_key.as_deref(), Some("from-toml"));
+        cfg.apply_env_overrides([("PAPERBRIDGE_OPENALEX_API_KEY", "from-env")])
+            .unwrap();
+        assert_eq!(cfg.openalex_api_key.as_deref(), Some("from-env"));
+        let shown = cfg.display_safe();
+        assert!(shown.contains("openalex_api_key = <set>"));
+        assert!(!shown.contains("from-env"));
+        cfg.apply_env_overrides([("OPENALEX_API_KEY", " ")])
+            .unwrap();
+        assert!(cfg.openalex_api_key.is_none());
+    }
+
+    #[test]
     fn invalid_env_type_fails() {
         let mut cfg = Config {
             user_id: Some(1),
@@ -1512,6 +1552,7 @@ mod tests {
         "ads_api_token",
         "ncbi_api_key",
         "scholarapi_key",
+        "openalex_api_key",
         "unpaywall_email",
         "grobid_url",
         "browser_command",

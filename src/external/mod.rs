@@ -159,6 +159,7 @@ pub struct PaperSearchKeys {
     pub ncbi_api_key: Option<String>,
     pub scholarapi_key: Option<String>,
     pub unpaywall_email: Option<String>,
+    pub openalex_api_key: Option<String>,
 }
 
 impl PaperSearch {
@@ -182,7 +183,8 @@ impl PaperSearch {
                 .s2_api_key
                 .map(|k| SemanticScholarClient::new(None, Some(k))),
             crossref: CrossrefClient::new(None),
-            openalex: OpenAlexClient::new(None, keys.unpaywall_email.clone()),
+            openalex: OpenAlexClient::new(None, keys.unpaywall_email.clone())
+                .with_api_key(keys.openalex_api_key),
             europe_pmc: EuropePmcClient::new(None),
             dblp: DblpClient::new(None),
             openreview: OpenReviewClient::new(None),

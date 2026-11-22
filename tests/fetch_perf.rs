@@ -661,6 +661,8 @@ async fn perf_corpus_scaling() {
             publisher: None,
             item_type: None,
             oa_pdf_url: None,
+            notices: Vec::new(),
+            openalex_only_retracted: None,
         };
         let started = Instant::now();
         let report = ingest_pdf(&api, &work, Path::new(&fixture), "pdftotext")
@@ -772,6 +774,8 @@ async fn perf_ingest_wall_time() {
             publisher: None,
             item_type: None,
             oa_pdf_url: None,
+            notices: Vec::new(),
+            openalex_only_retracted: None,
         };
         let started = Instant::now();
         if ingest_pdf(&api, &work, file, "pdftotext").await.is_ok() {

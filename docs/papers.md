@@ -294,7 +294,7 @@ Results are deduplicated by DOI → arXiv ID → PMID → normalized title+first
 
 ## API keys and source gating
 
-**Always on (no key required):** arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed. Setting `ncbi_api_key` upgrades PubMed rate limits (3→10 req/s); setting `unpaywall_email` supplies OpenAlex's polite-pool `mailto=` hint.
+**Always on (no key required):** arXiv, Crossref, OpenAlex, Europe PMC, DBLP, OpenReview, PubMed. Setting `ncbi_api_key` upgrades PubMed rate limits (3→10 req/s); setting `unpaywall_email` supplies OpenAlex's polite-pool `mailto=` hint; setting `openalex_api_key` sends OpenAlex's `api_key=` (OpenAlex budgets unkeyed traffic).
 
 **Key-gated (silently skipped when unconfigured):** HuggingFace, Semantic Scholar, CORE, NASA ADS, ScholarAPI. Skipped sources log at `debug` level so unauthenticated runs don't spam warnings.
 
@@ -307,6 +307,7 @@ paperbridge config set core_api_key <key>
 paperbridge config set ads_api_token <token>
 paperbridge config set scholarapi_key <key>
 paperbridge config set ncbi_api_key <key>         # optional PubMed rate-limit upgrade
+paperbridge config set openalex_api_key <key>     # OpenAlex search and retraction check
 paperbridge config set unpaywall_email <email>    # enables OA-PDF enrichment on resolve-doi
 
 # or, at runtime
@@ -316,6 +317,7 @@ export CORE_API_KEY=...
 export ADS_API_TOKEN=...
 export SCHOLARAPI_KEY=...
 export NCBI_API_KEY=...
+export OPENALEX_API_KEY=...
 export UNPAYWALL_EMAIL=you@example.com
 ```
 

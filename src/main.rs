@@ -1242,7 +1242,7 @@ async fn handle_papers_resolve_doi(
     output: OutputFormat,
 ) -> paperbridge::Result<()> {
     let service = build_service(config)?;
-    let work = service.resolve_doi(&doi).await?;
+    let work = service.resolve_doi_with_notices(&doi).await?;
     print_output(&work, output)
 }
 
@@ -1713,8 +1713,11 @@ fn build_service(config: Config) -> paperbridge::Result<PaperbridgeService> {
         ncbi_api_key: config.ncbi_api_key.clone(),
         scholarapi_key: config.scholarapi_key.clone(),
         unpaywall_email: config.unpaywall_email.clone(),
+        openalex_api_key: config.openalex_api_key.clone(),
     };
     let unpaywall_email = config.unpaywall_email.clone();
+    let openalex_mailto = config.unpaywall_email.clone();
+    let openalex_api_key = config.openalex_api_key.clone();
     let institution_access_mode = config.institution_access_mode;
     let institution_access_url = config.institution_access_url.clone();
     let institution_resolver_url = config.institution_resolver_url.clone();
@@ -1736,6 +1739,7 @@ fn build_service(config: Config) -> paperbridge::Result<PaperbridgeService> {
     let backend = build_backend(config)?;
     let service = PaperbridgeService::with_paper_search(backend, paper_search)
         .with_unpaywall(unpaywall_email)
+        .with_openalex(openalex_mailto, openalex_api_key)
         .with_institution_profile(
             institution_access_mode,
             institution_access_url,
@@ -2124,10 +2128,11 @@ async fn handle_config_init(force: bool, interactive: bool) -> paperbridge::Resu
     Ok(())
 }
 
-const SENSITIVE_CONFIG_KEYS: [&str; 10] = [
+const SENSITIVE_CONFIG_KEYS: [&str; 11] = [
     "api_key",
     "hf_token",
     "semantic_scholar_api_key",
+    "openalex_api_key",
     "core_api_key",
     "ads_api_token",
     "ncbi_api_key",
@@ -2163,7 +2168,7 @@ fn handle_config_get(
     if let Some(key) = key {
         let value = cfg.get_value(key).ok_or_else(|| {
             paperbridge::ZoteroMcpError::InvalidInput(format!(
-                "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key, core_api_key, ads_api_token, ncbi_api_key, scholarapi_key, unpaywall_email, institution_access_mode, institution_access_url, institution_resolver_url, institution_gateway_url, grobid_url, browser_command, grobid_timeout_secs, grobid_auto_spawn, grobid_image, update_check_enabled, paperseed_enabled, paperseed_auto_download, paperseed_yams_enabled, paperseed_corpus_root"
+                "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key, core_api_key, ads_api_token, ncbi_api_key, scholarapi_key, openalex_api_key, unpaywall_email, institution_access_mode, institution_access_url, institution_resolver_url, institution_gateway_url, grobid_url, browser_command, grobid_timeout_secs, grobid_auto_spawn, grobid_image, update_check_enabled, paperseed_enabled, paperseed_auto_download, paperseed_yams_enabled, paperseed_corpus_root"
             ))
         })?;
         if SENSITIVE_CONFIG_KEYS.contains(&key) && !show_secret {

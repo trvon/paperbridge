@@ -899,7 +899,7 @@ impl PaperbridgeServer {
         &self,
         Parameters(params): Parameters<ResolveDoiParams>,
     ) -> std::result::Result<CallToolResult, McpError> {
-        Self::result_json(self.service.resolve_doi(&params.doi).await)
+        Self::result_json(self.service.resolve_doi_with_notices(&params.doi).await)
     }
 
     #[tool(

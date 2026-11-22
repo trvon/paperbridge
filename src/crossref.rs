@@ -1,7 +1,7 @@
 use crate::error::{Result, ZoteroMcpError};
 use crate::external::send_with_retry;
 use crate::hit_enrich::normalize_doi_str;
-use crate::models::{CrossrefWork, PaperHit, PaperSource};
+use crate::models::{CrossrefWork, PaperHit, PaperSource, WorkNotice};
 use reqwest::Client;
 use serde::Deserialize;
 use std::ops::Not;
@@ -144,6 +144,21 @@ struct RawCrossrefMessage {
     #[serde(rename = "type")]
     work_type: Option<String>,
     resource: Option<RawResource>,
+    /// Notices that update this work. `update-to` sits on the notice itself.
+    #[serde(rename = "updated-by", default)]
+    updated_by: Option<Vec<RawWorkUpdate>>,
+}
+
+/// Crossref `WorkUpdate`. All fields optional so one odd record cannot fail a
+/// whole response.
+#[derive(Debug, Deserialize)]
+struct RawWorkUpdate {
+    #[serde(rename = "DOI")]
+    doi: Option<String>,
+    #[serde(rename = "type")]
+    update_type: Option<String>,
+    source: Option<String>,
+    updated: Option<RawDateField>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -216,7 +231,46 @@ fn convert_message(doi_input: &str, msg: RawCrossrefMessage) -> CrossrefWork {
         publisher: msg.publisher,
         item_type: msg.work_type,
         oa_pdf_url: None,
+        notices: convert_notices(msg.updated_by),
+        openalex_only_retracted: None,
     }
+}
+
+fn convert_notices(raw: Option<Vec<RawWorkUpdate>>) -> Vec<WorkNotice> {
+    let mut notices: Vec<WorkNotice> = Vec::new();
+    for update in raw.unwrap_or_default() {
+        let Some(notice_type) = update
+            .update_type
+            .map(|t| t.trim().to_ascii_lowercase())
+            .filter(|t| t.is_empty().not())
+        else {
+            continue;
+        };
+        let notice = WorkNotice {
+            notice_type,
+            source: update.source.filter(|s| s.trim().is_empty().not()),
+            notice_doi: update
+                .doi
+                .and_then(|d| normalize_doi_str(&d).or(Some(d)))
+                .filter(|d| d.trim().is_empty().not()),
+            date: format_date(update.updated.as_ref()),
+        };
+        if notices.contains(&notice).not() {
+            notices.push(notice);
+        }
+    }
+    notices
+}
+
+fn format_date(field: Option<&RawDateField>) -> Option<String> {
+    let parts = field?.date_parts.as_ref()?.first()?;
+    let mut iter = parts.iter().map_while(|p| *p);
+    let year = iter.next()?;
+    let mut out = format!("{year:04}");
+    for part in iter.take(2) {
+        out.push_str(&format!("-{part:02}"));
+    }
+    Some(out)
 }
 
 fn convert_message_to_hit(msg: RawCrossrefMessage) -> PaperHit {
@@ -623,6 +677,127 @@ mod tests {
             });
             assert_eq!(work.doi, "10.1234/abc", "{raw}");
         }
+    }
+
+    /// Shape copied from the live record for 10.1016/S0140-6736(97)11096-0.
+    fn retracted_work_json() -> serde_json::Value {
+        serde_json::json!({
+            "status": "ok",
+            "message": {
+                "DOI": "10.1016/s0140-6736(97)11096-0",
+                "title": ["Ileal-lymphoid-nodular hyperplasia"],
+                "updated-by": [
+                    {
+                        "DOI": "10.1016/s0140-6736(04)15715-2",
+                        "type": "correction",
+                        "label": "Correction",
+                        "source": "retraction-watch",
+                        "updated": {
+                            "date-parts": [[2004, 3, 6]],
+                            "date-time": "2004-03-06T00:00:00Z",
+                            "timestamp": 1078531200000_i64
+                        },
+                        "record-id": "17269"
+                    },
+                    {
+                        "DOI": "10.1016/S0140-6736(10)60175-4",
+                        "type": "retraction",
+                        "label": "Retraction",
+                        "source": "retraction-watch",
+                        "updated": {"date-parts": [[2010, 2, 6]]},
+                        "record-id": "4036"
+                    }
+                ]
+            }
+        })
+    }
+
+    #[test]
+    fn convert_message_maps_updated_by_to_notices() {
+        let raw: RawCrossrefResponse = serde_json::from_value(retracted_work_json()).unwrap();
+        let work = convert_message("10.1016/s0140-6736(97)11096-0", raw.message);
+        assert_eq!(
+            work.notices,
+            vec![
+                WorkNotice {
+                    notice_type: "correction".into(),
+                    source: Some("retraction-watch".into()),
+                    notice_doi: Some("10.1016/s0140-6736(04)15715-2".into()),
+                    date: Some("2004-03-06".into()),
+                },
+                WorkNotice {
+                    notice_type: "retraction".into(),
+                    source: Some("retraction-watch".into()),
+                    notice_doi: Some("10.1016/s0140-6736(10)60175-4".into()),
+                    date: Some("2010-02-06".into()),
+                },
+            ]
+        );
+        assert!(work.openalex_only_retracted.is_none());
+    }
+
+    #[test]
+    fn convert_notices_is_lenient_and_dedupes() {
+        let raw: Vec<RawWorkUpdate> = serde_json::from_value(serde_json::json!([
+            {"type": "Expression_of_Concern", "source": "publisher", "updated": {"date-parts": [[2021, 7]]}},
+            {"type": "expression_of_concern", "source": "publisher", "updated": {"date-parts": [[2021, 7]]}},
+            {"DOI": "10.1/no-type", "source": "publisher"},
+            {"type": "  "},
+            {"type": "retraction", "updated": {"date-parts": [[2019]]}},
+            {"type": "withdrawal", "updated": {"date-parts": [[]]}}
+        ]))
+        .unwrap();
+        let notices = convert_notices(Some(raw));
+        assert_eq!(notices.len(), 3);
+        assert_eq!(notices[0].notice_type, "expression_of_concern");
+        assert_eq!(notices[0].date.as_deref(), Some("2021-07"));
+        assert!(notices[0].notice_doi.is_none());
+        assert_eq!(notices[1].notice_type, "retraction");
+        assert_eq!(notices[1].date.as_deref(), Some("2019"));
+        assert!(notices[1].source.is_none());
+        assert_eq!(notices[2].notice_type, "withdrawal");
+        assert!(notices[2].date.is_none());
+    }
+
+    #[test]
+    fn work_without_updated_by_omits_notices_on_the_wire() {
+        let raw: RawCrossrefResponse = serde_json::from_value(serde_json::json!({
+            "message": {"DOI": "10.1/clean", "updated-by": null}
+        }))
+        .unwrap();
+        let work = convert_message("10.1/clean", raw.message);
+        assert!(work.notices.is_empty());
+        let value = serde_json::to_value(&work).unwrap();
+        assert!(value.get("notices").is_none());
+        assert!(value.get("openalex_only_retracted").is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_doi_returns_notices_from_mocked_crossref() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/works/10\.1016"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(retracted_work_json()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = CrossrefClient::new(Some(&server.uri()));
+        let work = client
+            .resolve_doi("10.1016/S0140-6736(97)11096-0")
+            .await
+            .unwrap();
+        let value = serde_json::to_value(&work).unwrap();
+        assert_eq!(value["notices"][1]["type"], "retraction");
+        assert_eq!(value["notices"][1]["source"], "retraction-watch");
+        assert_eq!(
+            value["notices"][1]["notice_doi"],
+            "10.1016/s0140-6736(10)60175-4"
+        );
+        assert_eq!(value["notices"][1]["date"], "2010-02-06");
     }
 
     #[tokio::test]

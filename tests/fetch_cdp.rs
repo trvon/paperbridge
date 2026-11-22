@@ -348,6 +348,8 @@ fn work(url: &str) -> CrossrefWork {
         publisher: None,
         item_type: Some("proceedings-article".to_string()),
         oa_pdf_url: None,
+        notices: Vec::new(),
+        openalex_only_retracted: None,
     }
 }
 

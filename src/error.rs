@@ -122,6 +122,7 @@ pub fn sanitize_message(message: &str, secrets: &[&str]) -> String {
         "PAPERBRIDGE_ADS_API_TOKEN",
         "PAPERBRIDGE_NCBI_API_KEY",
         "PAPERBRIDGE_SCHOLARAPI_KEY",
+        "PAPERBRIDGE_OPENALEX_API_KEY",
         "ZOTERO_MCP_API_KEY",
         "HF_TOKEN",
         "SEMANTIC_SCHOLAR_API_KEY",
@@ -129,6 +130,7 @@ pub fn sanitize_message(message: &str, secrets: &[&str]) -> String {
         "ADS_API_TOKEN",
         "NCBI_API_KEY",
         "SCHOLARAPI_KEY",
+        "OPENALEX_API_KEY",
     ];
     let environment: Vec<String> = SECRET_KEYS
         .iter()
