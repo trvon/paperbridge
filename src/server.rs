@@ -287,7 +287,7 @@ pub struct GetCitationsParams {
     )]
     pub direction: crate::citations::CitationDirection,
 
-    #[schemars(description = "Page size (default 10, max 50)")]
+    #[schemars(description = "Page size (default 10, max 25)")]
     pub limit: Option<u32>,
 
     #[schemars(description = "Zero-based offset; pass next_offset to continue (default 0)")]
@@ -953,7 +953,12 @@ impl PaperbridgeServer {
         &self,
         Parameters(params): Parameters<GetCitationsParams>,
     ) -> std::result::Result<CallToolResult, McpError> {
-        validate_range("limit", params.limit.map(u64::from), 1, 50)?;
+        validate_range(
+            "limit",
+            params.limit.map(u64::from),
+            1,
+            u64::from(crate::citations::MAX_LIMIT),
+        )?;
         let result = self
             .service
             .get_citations(crate::citations::CitationsRequest {
@@ -1333,6 +1338,19 @@ mod tests {
         let result = PaperbridgeServer::ok_json(&oversized).unwrap();
         assert_eq!(result.is_error, Some(true));
         assert!(serde_json::to_string(&result).unwrap().len() < 8192);
+    }
+
+    #[test]
+    fn worst_case_citations_fit_the_mcp_budget() {
+        let value = crate::citations::worst_case_result();
+        assert!(value.hits.iter().any(|h| !h.contexts.is_empty()));
+        let result = PaperbridgeServer::ok_json(&value).unwrap();
+        assert_ne!(
+            result.is_error,
+            Some(true),
+            "get_citations result exceeds the budget"
+        );
+        assert!(serde_json::to_vec(&result).unwrap().len() <= MAX_MCP_RESULT_BYTES);
     }
 
     #[test]

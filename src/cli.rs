@@ -598,8 +598,8 @@ pub struct CitationArgs {
     /// hit_id (doi:…, arxiv:…, pmid:…, url:https://openalex.org/W…) or a bare DOI / arXiv id
     #[arg(value_name = "ID")]
     pub id: String,
-    /// Page size (default 10, max 50)
-    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=50))]
+    /// Page size (default 10, max 25)
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=25))]
     pub limit: Option<u32>,
     /// Zero-based offset into the list (default 0); use next_offset to continue
     #[arg(long)]

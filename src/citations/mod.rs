@@ -33,14 +33,16 @@ use std::time::Duration;
 const OA: &str = openalex::SOURCE;
 const S2: &str = semantic_scholar::SOURCE;
 pub const DEFAULT_LIMIT: u32 = 10;
-pub const MAX_LIMIT: u32 = 50;
+/// Lower than search's 50: a citation hit carries edge evidence, and 50
+/// heavy hits do not fit the 64 KiB MCP budget twice over.
+pub const MAX_LIMIT: u32 = 25;
 const MAX_OFFSET: u32 = 100_000;
 const CONTEXT_MAX_CHARS: usize = 400;
 const CONTEXTS_PER_HIT: usize = 4;
-/// Serialized result bytes before contexts are dropped. The MCP budget
-/// (64 KiB) counts the text and structured copies, and the text copy is
-/// JSON-escaped, so usable payload is well under half.
-const RESULT_SOFT_BYTES: usize = 26_000;
+/// Wire bytes for the hits before contexts are dropped, measured as the MCP
+/// budget (64 KiB) counts them: the structured copy plus the JSON-escaped
+/// text copy. The rest of the envelope gets the remainder.
+const RESULT_SOFT_BYTES: usize = 56_000;
 
 pub(crate) enum UpstreamError {
     NotFound,
@@ -450,9 +452,11 @@ impl CitationService {
         self.db(move |s| s.neighbors(&id, direction, query)).await
     }
 
+    /// The subject's ids, then its versions' ids (so a preprint subject
+    /// finds the source id recorded on its published version).
     async fn class_ids(&self, id: &ExtId) -> Result<Vec<ExtId>> {
         let id = id.clone();
-        self.db(move |s| s.class_ids(&id)).await
+        self.db(move |s| s.linked_ids(&id)).await
     }
 
     async fn fetch_state(&self, key: FetchKey) -> Result<Option<FetchState>> {
@@ -886,6 +890,10 @@ fn mint_hit(ids: &[ExtId], meta: &WorkMeta, source: PaperSource) -> PaperHit {
     );
     enrich_hit_identity(&mut hit);
     apply_detail(&mut hit, SearchDetail::Compact, None);
+    if pick(Scheme::Doi).is_none() && pick(Scheme::Arxiv).is_none() {
+        // A record URL (OpenAlex / Semantic Scholar page) is not a paper.
+        hit.next.retain(|n| n != "open_paper");
+    }
     hit.next.push("get_citations".into());
     // Compact wire projection, as `SearchPapersResult::agent_output`.
     hit.doi = None;
@@ -930,14 +938,12 @@ fn build_result(
         .collect();
     let all_complete = !coverage.is_empty() && coverage.iter().all(|c| c.complete);
     let more_upstream = coverage.iter().any(|c| {
-        c.resumable()
-            && (c.cursor.is_some() || c.pages == 0)
-            && c.total_reported.is_none_or(|t| c.fetched < t)
+        c.resumable() && c.cursor.is_some() && c.total_reported.is_none_or(|t| c.fetched < t)
     });
     let why_edge = match direction {
-        CitationDirection::Refs => format!("cited by {subject_hit}"),
-        CitationDirection::CitedBy => format!("cites {subject_hit}"),
-        CitationDirection::Related => format!("related to {subject_hit}"),
+        CitationDirection::Refs => "cited by subject".to_string(),
+        CitationDirection::CitedBy => "cites subject".to_string(),
+        CitationDirection::Related => "related to subject".to_string(),
     };
 
     let mut trimmed = false;
@@ -949,10 +955,10 @@ fn build_result(
             let hit = mint_hit(&n.ids, &n.meta, source_of(first_source));
             let mut why = vec![why_edge.clone()];
             if n.sources.iter().any(|s| s.is_influential == Some(true)) {
-                why.push("influential citation (semantic_scholar)".into());
+                why.push("influential (semantic_scholar)".into());
             }
             if n.sources.len() > 1 {
-                why.push(format!("reported by {} sources", n.sources.len()));
+                why.push(format!("{} sources", n.sources.len()));
             }
             let truncated = n.sources.iter().any(|s| {
                 complete_by_source
@@ -997,7 +1003,11 @@ fn build_result(
         .collect();
     // Keep the whole result inside the MCP budget: drop contexts from the
     // last hits first.
-    let size = |hits: &[CitationHit]| serde_json::to_vec(hits).map_or(usize::MAX, |v| v.len());
+    let size = |hits: &[CitationHit]| {
+        serde_json::to_string(hits)
+            .and_then(|json| Ok(json.len() + serde_json::to_string(&json)?.len()))
+            .unwrap_or(usize::MAX)
+    };
     let mut index = hits.len();
     while size(&hits) > RESULT_SOFT_BYTES && index > 0 {
         index -= 1;
@@ -1012,7 +1022,9 @@ fn build_result(
 
     let total = page.total;
     let shown_end = offset as usize + hits.len();
-    let has_more = shown_end < total || (more_upstream && hits.len() == limit as usize);
+    // Merges and self-loops can shorten a page, so upstream resumability,
+    // not page fullness, decides whether more may exist.
+    let has_more = shown_end < total || more_upstream;
     CitationsResult {
         hit_id: subject_hit,
         direction,
@@ -1043,6 +1055,56 @@ fn build_result(
             .collect(),
         diagnostics,
     }
+}
+
+/// A heavy result: 50 hits with long-ish metadata, two edge sources and
+/// escape-heavy contexts. Pathological metadata alone can still exceed the
+/// budget; MCP then returns its bounded `response_too_large` recovery, as
+/// for search. Contexts must never be what pushes a result over.
+#[cfg(test)]
+pub(crate) fn worst_case_result() -> CitationsResult {
+    let nasty = "\"\\\u{1}<>&".repeat(300);
+    let neighbor = |n: u32| citegraph::Neighbor {
+        ids: vec![
+            ExtId::doi(&format!("10.1234/journal.{n:06}")).unwrap(),
+            ExtId::openalex(&format!("W{n}")).unwrap(),
+        ],
+        meta: WorkMeta {
+            title: Some("T".repeat(150)),
+            year: Some(2020),
+            venue: Some("v".repeat(70)),
+            authors: (0..10).map(|_| "A".repeat(30)).collect(),
+        },
+        has_meta: true,
+        sources: ["openalex", "semantic_scholar"]
+            .into_iter()
+            .map(|s| citegraph::EdgeSource {
+                source: s.into(),
+                intents: vec!["background".into(), "methodology".into(), "result".into()],
+                is_influential: Some(true),
+                stale: false,
+                first_seen: String::new(),
+                last_seen: String::new(),
+            })
+            .collect(),
+        contexts: (0..10)
+            .map(|i| ("semantic_scholar".into(), format!("{i}{nasty}")))
+            .collect(),
+        versions: vec![ExtId::arxiv("1706.03762").unwrap()],
+    };
+    build_result(
+        &ExtId::doi("10.1/seed").unwrap(),
+        &[],
+        CitationDirection::CitedBy,
+        0,
+        MAX_LIMIT,
+        NeighborPage {
+            total: 50,
+            items: (0..MAX_LIMIT).map(neighbor).collect(),
+        },
+        Vec::new(),
+        CitationDiagnostics::default(),
+    )
 }
 
 #[cfg(test)]
@@ -1134,7 +1196,6 @@ mod tests {
             CitationDiagnostics::default(),
         );
         let bytes = serde_json::to_vec(&out).unwrap().len();
-        // Text plus structured copy, with escaping headroom, under 64 KiB.
         assert!(bytes * 2 < 60_000, "{bytes}");
         assert!(out.hits[0].contexts.len() <= CONTEXTS_PER_HIT);
         assert!(

@@ -119,8 +119,8 @@ Check them before citing a paper. `search_papers` hits do not carry notices.
 
 ```bash
 paperbridge papers refs doi:10.1038/nature12373 --json
-paperbridge papers cited-by arxiv:1706.03762 --limit 20 --json
-paperbridge papers cited-by arxiv:1706.03762 --offset 20 --json   # continues the stored cursor
+paperbridge papers cited-by arxiv:1706.03762 --limit 25 --json
+paperbridge papers cited-by arxiv:1706.03762 --offset 25 --json   # continues the stored cursor
 paperbridge papers refs doi:10.1038/nature12373 --include contexts --json
 paperbridge papers related doi:10.1038/nature12373 --json
 ```
@@ -128,7 +128,7 @@ paperbridge papers related doi:10.1038/nature12373 --json
 MCP: `get_citations { hit_id, direction: "refs" | "cited_by" | "related",
 limit?, offset?, refresh?, include?: ["contexts"] }`.
 
-- Input and output ids are `hit_id`s. Neighbors without a DOI or arXiv id
+- `limit` defaults to 10, max 25. Input and output ids are `hit_id`s. Neighbors without a DOI or arXiv id
   come back as `url:https://openalex.org/W…`; pass that to `get_citations`
   to keep walking.
 - Lists are cached in `$XDG_DATA_HOME/paperbridge/citegraph.sqlite`.

@@ -42,7 +42,11 @@ CREATE TABLE merge_log(
   reason TEXT NOT NULL,
   evidence TEXT,
   at TEXT NOT NULL,
+  -- meta.seq at merge and undo: orders merges against review decisions
+  -- (stage 3) without relying on wall-clock resolution.
+  seq INTEGER NOT NULL,
   undone_at TEXT,
+  undone_seq INTEGER,
   CHECK (winner <> loser)
 );
 -- A work has at most one active parent: the merge relation is a forest.

@@ -98,10 +98,7 @@ async fn refs_are_fetched_once_hydrated_and_served_from_cache() {
         .collect();
     assert_eq!(ids, vec!["doi:10.5555/two", "url:https://openalex.org/W3"]);
     assert_eq!(out.hits[0].hit.title, "Work 2");
-    assert_eq!(
-        out.hits[0].why,
-        vec!["cited by doi:10.5555/seed".to_string()]
-    );
+    assert_eq!(out.hits[0].why, vec!["cited by subject".to_string()]);
     assert_eq!(out.hits[0].edge_sources[0].source, "openalex");
     let json = serde_json::to_value(&out).unwrap();
     assert!(
@@ -163,7 +160,7 @@ async fn cited_by_resumes_from_committed_cursor() {
     assert_eq!(first.next_offset, Some(2));
     assert_eq!(first.count_kind, CountKind::Unknown);
     assert_eq!(first.coverage[0].total_reported, Some(5));
-    assert_eq!(first.hits[0].why[0], "cites doi:10.5555/seed");
+    assert_eq!(first.hits[0].why[0], "cites subject");
 
     // A new service (another process) resumes from the stored cursor.
     let svc2 = service(&server, &dir, false, CallBudget::default());
@@ -302,7 +299,7 @@ async fn missing_key_skips_semantic_scholar_and_related_uses_openalex() {
         .await
         .unwrap();
     assert_eq!(out.hits.len(), 1);
-    assert_eq!(out.hits[0].why[0], "related to doi:10.5555/seed");
+    assert_eq!(out.hits[0].why[0], "related to subject");
 
     let mut request = req("doi:10.5555/nowhere", CitationDirection::Refs, 10, 0);
     request.include_contexts = true;
@@ -370,4 +367,50 @@ async fn unsupported_ids_fail_with_guidance() {
     );
     // Nothing was opened or created for an invalid request.
     assert!(!dir.path().join("citegraph.sqlite").exists());
+}
+
+/// Semantic Scholar folds preprint and published versions into one paper;
+/// the store keeps them as two linked works, and an arXiv subject still
+/// reads the edges fetched under the published version.
+#[tokio::test]
+async fn arxiv_subject_reads_edges_across_versions() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    Mock::given(method("GET"))
+        .and(path("/oa/works/doi:10.48550/arxiv.1706.03762"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/s2/paper/ARXIV:1706.03762"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "paperId": S2_ID,
+            "externalIds": {"DOI": "10.5555/pub", "ArXiv": "1706.03762"},
+            "title": "Attention"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/s2/paper/{S2_ID}/references")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "offset": 0,
+            "data": [{"contexts": ["as in [1]"], "citedPaper": {
+                "paperId": "00000000000000000000000000000000000000cc",
+                "externalIds": {"DOI": "10.5555/ref"}, "title": "Ref"}}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let svc = service(&server, &dir, true, CallBudget::default());
+    for _ in 0..2 {
+        let mut request = req("arxiv:1706.03762", CitationDirection::Refs, 10, 0);
+        request.include_contexts = true;
+        let out = svc.get_citations(request).await.unwrap();
+        assert_eq!(out.hit_id, "arxiv:1706.03762");
+        assert_eq!(out.hits.len(), 1, "{out:?}");
+        assert_eq!(out.hits[0].contexts[0].text, "as in [1]");
+        assert_eq!(out.coverage.len(), 1);
+        assert!(out.coverage[0].complete);
+    }
 }

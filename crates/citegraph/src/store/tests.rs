@@ -74,6 +74,8 @@ fn strong_id_match_merges_and_undo_splits() {
 
     assert!(store.undo_merge(merges[0].id).unwrap());
     assert!(!store.undo_merge(merges[0].id).unwrap());
+    let undone = &store.merges().unwrap()[0];
+    assert!(undone.undone_seq.unwrap() > undone.seq);
     let w1 = store.class_ids(&w(1)).unwrap();
     let s1 = store.class_ids(&s2(1)).unwrap();
     assert_ne!(w1, s1);

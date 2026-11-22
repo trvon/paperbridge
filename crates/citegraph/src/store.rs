@@ -202,7 +202,11 @@ pub struct MergeInfo {
     pub reason: String,
     pub evidence: Option<String>,
     pub at: String,
+    /// Store sequence number of the merge; review decisions (stage 3)
+    /// compare against it to tell post-merge decisions apart.
+    pub seq: i64,
     pub undone_at: Option<String>,
+    pub undone_seq: Option<i64>,
 }
 
 pub struct Store {
@@ -423,14 +427,29 @@ impl Store {
         class_ids(&tx, &uf, uf.find(base)?)
     }
 
-    /// Latest fetch generation per source for `id`'s class and direction.
+    /// External ids of `id`'s class, followed by those of its other
+    /// versions (preprint / published).
+    pub fn linked_ids(&mut self, id: &ExtId) -> Result<Vec<ExtId>> {
+        let tx = self.conn.transaction()?;
+        let uf = UnionFind::load(&tx)?;
+        let Some(base) = base_of(&tx, id)? else {
+            return Ok(Vec::new());
+        };
+        let root = uf.find(base)?;
+        let mut out = class_ids(&tx, &uf, root)?;
+        out.extend(version_ids(&tx, &uf, root)?);
+        Ok(out)
+    }
+
+    /// Latest fetch generation per source for `id`'s class (and its
+    /// versions) and direction.
     pub fn coverage(&mut self, id: &ExtId, direction: Direction) -> Result<Vec<FetchState>> {
         let tx = self.conn.transaction()?;
         let uf = UnionFind::load(&tx)?;
         let Some(base) = base_of(&tx, id)? else {
             return Ok(Vec::new());
         };
-        let members = uf.members(uf.find(base)?)?;
+        let (_, members) = subject_scope(&tx, &uf, uf.find(base)?)?;
         let mut latest: BTreeMap<String, FetchState> = BTreeMap::new();
         for &work in &members {
             let mut stmt = tx.prepare_cached(
@@ -480,8 +499,7 @@ impl Store {
                 items: Vec::new(),
             });
         };
-        let root = uf.find(base)?;
-        let members = uf.members(root)?;
+        let (roots, members) = subject_scope(&tx, &uf, uf.find(base)?)?;
         let raw = edge_rows(&tx, &members, direction)?;
 
         struct Group {
@@ -492,7 +510,7 @@ impl Store {
         let mut groups: HashMap<i64, Group> = HashMap::new();
         for row in raw {
             let other_root = uf.find(row.other)?;
-            if other_root == root {
+            if roots.contains(&other_root) {
                 continue;
             }
             let group = groups.entry(other_root).or_insert_with(|| Group {
@@ -569,7 +587,7 @@ impl Store {
     /// Active and undone merges, oldest first.
     pub fn merges(&mut self) -> Result<Vec<MergeInfo>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, reason, evidence, at, undone_at FROM merge_log ORDER BY id",
+            "SELECT id, reason, evidence, at, seq, undone_at, undone_seq FROM merge_log ORDER BY id",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(MergeInfo {
@@ -577,7 +595,9 @@ impl Store {
                 reason: r.get(1)?,
                 evidence: r.get(2)?,
                 at: r.get(3)?,
-                undone_at: r.get(4)?,
+                seq: r.get(4)?,
+                undone_at: r.get(5)?,
+                undone_seq: r.get(6)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -587,9 +607,10 @@ impl Store {
     /// merge does not exist or is already undone.
     pub fn undo_merge(&mut self, merge_id: i64) -> Result<bool> {
         let tx = self.write()?;
+        let seq = bump_seq(&tx)?;
         let changed = tx.execute(
-            "UPDATE merge_log SET undone_at = ?2 WHERE id = ?1 AND undone_at IS NULL",
-            params![merge_id, now_rfc3339()],
+            "UPDATE merge_log SET undone_at = ?2, undone_seq = ?3 WHERE id = ?1 AND undone_at IS NULL",
+            params![merge_id, now_rfc3339(), seq],
         )?;
         tx.commit()?;
         Ok(changed == 1)
@@ -617,6 +638,14 @@ fn set_wal(conn: &Connection) -> Result<()> {
             Err(e) => return Err(e.into()),
         }
     }
+}
+
+fn bump_seq(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row(
+        "UPDATE meta SET value = value + 1 WHERE key = 'seq' RETURNING value",
+        [],
+        |r| r.get(0),
+    )?)
 }
 
 fn no_fetch(key: &FetchKey, generation: i64) -> Error {
@@ -746,7 +775,8 @@ fn class_meta(conn: &Connection, uf: &UnionFind, root: i64) -> Result<(WorkMeta,
     Ok((meta, has_meta))
 }
 
-fn version_ids(conn: &Connection, uf: &UnionFind, root: i64) -> Result<Vec<ExtId>> {
+/// Roots of classes linked to `root` as other versions (one hop).
+fn version_roots(conn: &Connection, uf: &UnionFind, root: i64) -> Result<Vec<i64>> {
     let mut stmt = conn.prepare_cached(
         "SELECT version_of FROM work_versions WHERE work = ?1
          UNION SELECT work FROM work_versions WHERE version_of = ?1",
@@ -760,13 +790,29 @@ fn version_ids(conn: &Connection, uf: &UnionFind, root: i64) -> Result<Vec<ExtId
             }
         }
     }
+    Ok(roots)
+}
+
+fn version_ids(conn: &Connection, uf: &UnionFind, root: i64) -> Result<Vec<ExtId>> {
     let mut out = Vec::new();
-    for r in roots {
+    for r in version_roots(conn, uf, root)? {
         out.extend(class_ids(conn, uf, r)?);
     }
     out.sort();
     out.dedup();
     Ok(out)
+}
+
+/// The subject's root plus its versions' roots, and all their members.
+/// Display aggregates across versions; storage keeps them apart.
+fn subject_scope(conn: &Connection, uf: &UnionFind, root: i64) -> Result<(Vec<i64>, Vec<i64>)> {
+    let mut roots = vec![root];
+    roots.extend(version_roots(conn, uf, root)?);
+    let mut members = Vec::new();
+    for &r in &roots {
+        members.extend(uf.members(r)?);
+    }
+    Ok((roots, members))
 }
 
 struct RawEdge {
@@ -873,11 +919,7 @@ impl<'t> Writer<'t> {
     }
 
     fn bump_seq(&mut self) -> Result<i64> {
-        Ok(self.tx.query_row(
-            "UPDATE meta SET value = value + 1 WHERE key = 'seq' RETURNING value",
-            [],
-            |r| r.get(0),
-        )?)
+        bump_seq(self.tx)
     }
 
     /// An undone merge links the two classes: undo is a decision, so the
@@ -1027,10 +1069,17 @@ impl<'t> Writer<'t> {
                 continue;
             }
             let (winner, loser) = (anchor.min(root), anchor.max(root));
+            let seq = self.bump_seq()?;
             self.tx.execute(
-                "INSERT INTO merge_log(winner, loser, reason, evidence, at)
-                 VALUES (?1, ?2, 'strong_id', ?3, ?4)",
-                params![winner, loser, format!("{source}:{evidence}"), now_rfc3339()],
+                "INSERT INTO merge_log(winner, loser, reason, evidence, at, seq)
+                 VALUES (?1, ?2, 'strong_id', ?3, ?4, ?5)",
+                params![
+                    winner,
+                    loser,
+                    format!("{source}:{evidence}"),
+                    now_rfc3339(),
+                    seq
+                ],
             )?;
             self.uf.link(winner, loser)?;
             anchor = winner;
