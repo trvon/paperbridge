@@ -9,6 +9,10 @@ ignore = [
     # unmaintained and states that no safe upgrade is available. Keep lopdf on
     # the fixed line for RUSTSEC-2026-0187 and track replacement upstream.
     "RUSTSEC-2026-0192",
+    # chrono is marked unmaintained with no patched release. It is pulled in
+    # only by rmcp and schemars (not a direct dependency); drop this once they
+    # move off it.
+    "RUSTSEC-2026-0543",
 ]
 
 [bans]
