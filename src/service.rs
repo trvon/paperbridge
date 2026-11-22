@@ -113,6 +113,7 @@ pub struct PaperbridgeService {
     paperseed: Option<PaperseedApi>,
     paperseed_auto_download: bool,
     institution_access: InstitutionAccess,
+    citations: Option<crate::citations::CitationService>,
 }
 
 impl PaperbridgeService {
@@ -132,7 +133,25 @@ impl PaperbridgeService {
             paperseed: None,
             paperseed_auto_download: false,
             institution_access: InstitutionAccess::disabled(),
+            citations: None,
         }
+    }
+
+    /// Enable `get_citations`; the store opens on first use.
+    pub fn with_citations(mut self, citations: crate::citations::CitationService) -> Self {
+        self.citations = Some(citations);
+        self
+    }
+
+    /// References, cited-by or related works through the citation store.
+    pub async fn get_citations(
+        &self,
+        req: crate::citations::CitationsRequest,
+    ) -> Result<crate::citations::CitationsResult> {
+        let citations = self.citations.as_ref().ok_or_else(|| {
+            ZoteroMcpError::Config("citation store is not configured for this service".into())
+        })?;
+        citations.get_citations(req).await
     }
 
     /// Point DOI resolution at another Crossref-compatible endpoint.

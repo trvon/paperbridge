@@ -267,6 +267,13 @@ Primary (discovery + read):
 
 Secondary (skill sections, not default “start here”):
 
+- `get_citations` (refs / cited_by / related; see
+  [citation-graph.md](citation-graph.md)). Envelope adds `hit_id`,
+  `direction`, `truncated` and per-source `coverage`; `total_count` is
+  `exact` only when every source's list was read to its end, else `unknown`.
+  Hits are compact plus `why`, `edge_sources`, `truncated`, optional
+  `versions` and, with `include=["contexts"]`, bounded `contexts`.
+  `diagnostics.budget` reports requests spent per source.
 - Vox prepare tools
 - Write tools
 - Paperseed admin

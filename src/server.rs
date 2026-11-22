@@ -268,6 +268,42 @@ pub struct CreateCollectionParams {
     pub parent_collection: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CitationIncludeParam {
+    Contexts,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetCitationsParams {
+    #[schemars(
+        description = "hit_id of the paper (doi:…, arxiv:…, pmid:…, or url:https://openalex.org/W… / url:https://www.semanticscholar.org/paper/… as returned by get_citations), or a bare DOI / arXiv id"
+    )]
+    pub hit_id: String,
+
+    #[schemars(
+        description = "refs (works it cites), cited_by (works citing it), or related (OpenAlex related works, not citations)"
+    )]
+    pub direction: crate::citations::CitationDirection,
+
+    #[schemars(description = "Page size (default 10, max 50)")]
+    pub limit: Option<u32>,
+
+    #[schemars(description = "Zero-based offset; pass next_offset to continue (default 0)")]
+    pub offset: Option<u32>,
+
+    #[schemars(
+        description = "Refetch from the sources instead of using the cached list (default false)"
+    )]
+    pub refresh: Option<bool>,
+
+    #[schemars(
+        description = "Optional extras: [\"contexts\"] adds Semantic Scholar citation contexts and intents (refs/cited_by; needs its API key)"
+    )]
+    pub include: Option<Vec<CitationIncludeParam>>,
+}
+
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ResolveDoiParams {
     #[schemars(description = "DOI string to resolve (e.g. 10.1038/nature12373)")]
@@ -524,6 +560,11 @@ fn bounded_read_recovery(
             if name == "search_papers" {
                 arguments.insert("detail".into(), "compact".into());
             }
+            name
+        }
+        "get_citations" => {
+            arguments.insert("limit".into(), 1.into());
+            arguments.remove("include");
             name
         }
         "open_paper" | "get_pdf_text" | "get_item_fulltext" => {
@@ -900,6 +941,34 @@ impl PaperbridgeServer {
         Parameters(params): Parameters<ResolveDoiParams>,
     ) -> std::result::Result<CallToolResult, McpError> {
         Self::result_json(self.service.resolve_doi_with_notices(&params.doi).await)
+    }
+
+    #[tool(
+        name = "get_citations",
+        output_schema = schema_for_type::<crate::citations::CitationsResult>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = true),
+        description = "References (direction=refs), citing works (cited_by) or related works (related) of a paper by hit_id/DOI/arXiv. Read-through cache: lists are stored locally and fetched from OpenAlex (Semantic Scholar fallback) within a per-call request budget; repeat the call or pass next_offset to continue a partial cited_by list. Returns an envelope {hit_id,direction,total_count,count_kind,offset,limit,has_more,next_offset,truncated,hits,coverage,diagnostics}; hits are compact plus why/edge_sources/truncated. include=[\"contexts\"] adds citation contexts."
+    )]
+    async fn get_citations(
+        &self,
+        Parameters(params): Parameters<GetCitationsParams>,
+    ) -> std::result::Result<CallToolResult, McpError> {
+        validate_range("limit", params.limit.map(u64::from), 1, 50)?;
+        let result = self
+            .service
+            .get_citations(crate::citations::CitationsRequest {
+                id: params.hit_id,
+                direction: params.direction,
+                limit: params.limit,
+                offset: params.offset,
+                refresh: params.refresh.unwrap_or(false),
+                include_contexts: params
+                    .include
+                    .unwrap_or_default()
+                    .contains(&CitationIncludeParam::Contexts),
+            })
+            .await;
+        Self::result_json(result)
     }
 
     #[tool(

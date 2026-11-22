@@ -478,6 +478,27 @@ pub enum PapersAction {
         #[arg(long)]
         selector: Option<String>,
     },
+    /// List works a paper cites (cached in the citation store; OpenAlex, then Semantic Scholar)
+    Refs {
+        #[command(flatten)]
+        args: CitationArgs,
+        /// Also return citation contexts and intents (Semantic Scholar; needs its API key)
+        #[arg(long, value_enum, value_delimiter = ',')]
+        include: Vec<CitationInclude>,
+    },
+    /// List works citing a paper (resumable across calls; OpenAlex, then Semantic Scholar)
+    CitedBy {
+        #[command(flatten)]
+        args: CitationArgs,
+        /// Also return citation contexts and intents (Semantic Scholar; needs its API key)
+        #[arg(long, value_enum, value_delimiter = ',')]
+        include: Vec<CitationInclude>,
+    },
+    /// List works OpenAlex considers related to a paper (not citations)
+    Related {
+        #[command(flatten)]
+        args: CitationArgs,
+    },
     /// Resolve a DOI via Crossref
     ResolveDoi {
         /// DOI to resolve (e.g. 10.1038/nature12373)
@@ -569,6 +590,29 @@ pub enum PapersAction {
         #[arg(long)]
         attachment: Option<String>,
     },
+}
+
+/// Target and paging shared by `papers refs|cited-by|related`.
+#[derive(Debug, clap::Args)]
+pub struct CitationArgs {
+    /// hit_id (doi:…, arxiv:…, pmid:…, url:https://openalex.org/W…) or a bare DOI / arXiv id
+    #[arg(value_name = "ID")]
+    pub id: String,
+    /// Page size (default 10, max 50)
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=50))]
+    pub limit: Option<u32>,
+    /// Zero-based offset into the list (default 0); use next_offset to continue
+    #[arg(long)]
+    pub offset: Option<u32>,
+    /// Refetch from the sources instead of using the cached list (starts a new generation)
+    #[arg(long)]
+    pub refresh: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CitationInclude {
+    /// Citation contexts, intents and influence flags
+    Contexts,
 }
 
 #[derive(Debug, Subcommand)]

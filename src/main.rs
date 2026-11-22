@@ -1,4 +1,5 @@
 use clap::{CommandFactory, Parser};
+use paperbridge::citations::CitationDirection;
 use paperbridge::cli::{
     Cli, CollectionAction, Command, ConfigAction, ItemAction, LibraryAction, PaperAction,
     PapersAction, PaperseedAction, PaperseedCorpusAction, PaperseedExportFormat,
@@ -275,6 +276,18 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
                     output,
                 )
                 .await?
+            }
+            PapersAction::Refs { args, include } => {
+                handle_papers_citations(config, args, CitationDirection::Refs, &include, output)
+                    .await?
+            }
+            PapersAction::CitedBy { args, include } => {
+                handle_papers_citations(config, args, CitationDirection::CitedBy, &include, output)
+                    .await?
+            }
+            PapersAction::Related { args } => {
+                handle_papers_citations(config, args, CitationDirection::Related, &[], output)
+                    .await?
             }
             PapersAction::ResolveDoi { doi } => {
                 handle_papers_resolve_doi(config, doi, output).await?
@@ -1236,6 +1249,27 @@ fn normalize_papers_query(
     Ok(query)
 }
 
+async fn handle_papers_citations(
+    config: Config,
+    args: paperbridge::cli::CitationArgs,
+    direction: CitationDirection,
+    include: &[paperbridge::cli::CitationInclude],
+    output: OutputFormat,
+) -> paperbridge::Result<()> {
+    let service = build_service(config)?;
+    let result = service
+        .get_citations(paperbridge::citations::CitationsRequest {
+            id: args.id,
+            direction,
+            limit: args.limit,
+            offset: args.offset,
+            refresh: args.refresh,
+            include_contexts: include.contains(&paperbridge::cli::CitationInclude::Contexts),
+        })
+        .await?;
+    print_output(&result, output)
+}
+
 async fn handle_papers_resolve_doi(
     config: Config,
     doi: String,
@@ -1736,6 +1770,14 @@ fn build_service(config: Config) -> paperbridge::Result<PaperbridgeService> {
         yams_enabled: config.paperseed_yams_enabled,
     };
     let paper_search = paperbridge::external::PaperSearch::with_keys_struct(keys);
+    let citations = {
+        let mut cfg = paperbridge::citations::CitationConfig::new(
+            paperbridge::citations::default_store_path(),
+        );
+        cfg.openalex_mailto = config.unpaywall_email.clone();
+        cfg.semantic_scholar_api_key = config.semantic_scholar_api_key.clone();
+        paperbridge::citations::CitationService::new(cfg)?
+    };
     let backend = build_backend(config)?;
     let service = PaperbridgeService::with_paper_search(backend, paper_search)
         .with_unpaywall(unpaywall_email)
@@ -1746,7 +1788,8 @@ fn build_service(config: Config) -> paperbridge::Result<PaperbridgeService> {
             institution_resolver_url,
             institution_gateway_url,
         )?
-        .with_paper_config(paper_config);
+        .with_paper_config(paper_config)
+        .with_citations(citations);
     Ok(if paperseed_enabled {
         service.with_paperseed(paperseed_config)
     } else {

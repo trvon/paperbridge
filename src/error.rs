@@ -96,6 +96,11 @@ fn input_suggestions(reason: &str) -> Vec<String> {
             "paperbridge paperseed corpus export --format bibtex",
             "paperbridge paperseed corpus export --json",
         ]
+    } else if reason.contains("citation") {
+        &[
+            "paperbridge papers refs --help",
+            "paperbridge papers search --help",
+        ]
     } else if reason.contains("search query") || reason.contains("Search query") {
         &["paperbridge papers search --help"]
     } else if reason.contains("selector")
