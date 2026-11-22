@@ -308,6 +308,14 @@ TLC findings that bind the implementation (PR #69):
    matter are another worker creating a work for the same ID, and an undo
    landing during the await.
 6. `candidate` is written only where the resolved root has no state.
+7. `review decide` on a merged row writes every work row in the class and
+   sets `decided_at`.
+8. Undo is per merge: if `decided_at` is later than the merge, both works
+   keep the current decision; otherwise the winner gets its logged prior
+   state and the loser keeps its own row.
+9. Undo is LIFO per winner, or the winner's state is recomputed from the
+   merges that remain active. Restoring an earlier merge's logged state
+   while a later merge is active loses decisions.
 
 Rust mirrors the same invariants with proptest. Fetch-log resume and
 sequential review state are covered by proptest only, not TLA+.
