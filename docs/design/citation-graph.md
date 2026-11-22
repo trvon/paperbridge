@@ -48,9 +48,9 @@ this table; values below are the audit's findings as of 2026-11-22.
 
 Requirements from the limits:
 
-- `PAPERBRIDGE_OPENALEX_API_KEY` (OpenAlex requires a key since 2026-02-13,
-  with a daily budget; today the client sends only `mailto`,
-  `src/external/openalex.rs:15-47`).
+- `PAPERBRIDGE_OPENALEX_API_KEY`, optional. OpenAlex documents keyed
+  access with a daily budget; unkeyed calls still succeeded on 2026-11-22
+  (PR #68), so the key raises the budget rather than gating access.
 - `PAPERBRIDGE_SEMANTIC_SCHOLAR_API_KEY` is required for review expansion,
   not optional.
 - A per-source token bucket. The request router limits concurrency and
@@ -175,8 +175,13 @@ review_log(review_id, at, action, detail)    -- searches, rounds, decisions, mer
   through union-find over active merges, so a merge can be undone by setting
   `undone_at`.
 - Review conflict on merge: if winner and loser have different states in a
-  review, the resolved row becomes `needs_decision`, both prior states are
-  kept in `review_log`, and the agent sees it in `review status`.
+  review (any difference, including `seed` vs `candidate`), the resolved row
+  becomes `needs_decision`, both prior states are kept in `review_log`, and
+  the agent sees it in `review status`. A merge writes only the winner's
+  row; the loser's row is kept.
+- Undo after a decision: a decision made on the merged row after the merge
+  carries to both works when the merge is undone. If no decision was made
+  after the merge, undo restores each work's own prior state.
 - Versions: preprint and published records are separate works linked in
   `work_versions`. The arXiv DOI (`10.48550/arXiv.*`) and a publisher DOI are
   versions, not a veto conflict. When Semantic Scholar folds both into one
@@ -288,6 +293,21 @@ fetches and review decisions.
 - Bound: 3 works, 4 IDs, 2 workers, 1 review, 2 pages, 1 crash, symmetry
   on works. Target under 1M states and about a minute in CI; measure and
   record in the spec header.
+
+TLC findings that bind the implementation (PR #69):
+
+1. A merge joins the two current roots, computed inside the merge
+   transaction.
+2. Edges store the work an external ID first mapped to and resolve through
+   active merges at read time; self-loops that appear after resolution are
+   dropped. Rewriting edges to roots breaks replay and undo.
+3. New external IDs insert with `ON CONFLICT DO NOTHING` and the mapping is
+   read back in the same transaction.
+4. `cursor = max(cursor, page)`; a replayed page never moves it back.
+5. A merge during a fetch's await is harmless under (2). The races that
+   matter are another worker creating a work for the same ID, and an undo
+   landing during the await.
+6. `candidate` is written only where the resolved root has no state.
 
 Rust mirrors the same invariants with proptest. Fetch-log resume and
 sequential review state are covered by proptest only, not TLA+.
