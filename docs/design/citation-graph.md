@@ -344,7 +344,25 @@ Edge relation `cites`, properties `{sources, intents, is_influential}` at a
 constant weight so upserts refresh them. Held papers link with `held_as` to
 `doc:<hash>`, re-projected after re-index.
 
+Constraints from yams#607 (graph ingest/remove):
+
+- Every projected node and edge carries `properties.ns = "paperbridge"`;
+  only namespaced rows survive document and orphan cleanup.
+- Never set `snapshot_id` or `canonical_key` (snapshot pruning deletes them).
+- Read `unresolved_edges` from ingest output; the CLI exits 0 even when
+  edges were dropped.
+- Ingest is chunked and not atomic; recover from a failure by re-ingesting
+  (upserts are idempotent).
+- Remove with `--ns paperbridge --relation cites` for edge refreshes;
+  removing the namespace without a relation also drops foreign edges that
+  touch our nodes.
+- `held_as` edges to `doc:<hash>` still vanish on re-index; re-project.
+- Detect support via `yams graph ingest --help` or by handling the error;
+  there is no capability flag.
+
 ### Parallel YAMS PR (prerequisite for stage 6)
+
+Implemented as yams#607 (base `experimental`).
 
 1. `yams graph ingest --file <json>` CLI (paperbridge talks to YAMS via CLI).
 2. Truthful ingest counts (rows inserted / updated / dropped) and report
