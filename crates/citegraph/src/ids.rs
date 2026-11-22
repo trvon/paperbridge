@@ -177,18 +177,74 @@ fn strip_trailing_punctuation(doi: &str) -> &str {
     }
 }
 
+fn doi_shape(n: &str) -> bool {
+    n.strip_prefix("10.")
+        .and_then(|rest| rest.split_once('/'))
+        .is_some_and(|(prefix, suffix)| {
+            !prefix.is_empty() && prefix.bytes().all(|b| b.is_ascii_digit()) && !suffix.is_empty()
+        })
+        && !n.chars().any(char::is_whitespace)
+}
+
+/// Lowercase and strip DOI wrappers without percent-decoding: the form
+/// paperbridge used before the shared normalizer.
+fn strip_doi_prefix_raw(raw: &str) -> String {
+    let lowered = raw.trim().to_lowercase();
+    let rest = strip_scheme(&lowered);
+    let rest = rest
+        .strip_prefix("www.")
+        .or_else(|| rest.strip_prefix("dx."))
+        .unwrap_or(rest);
+    rest.strip_prefix("doi.org/")
+        .or_else(|| lowered.strip_prefix("doi:"))
+        .unwrap_or(lowered.as_str())
+        .trim()
+        .to_string()
+}
+
 /// Canonical DOI: lowercase `10.<digits>/<suffix>`, percent-decoded, with
 /// resolver wrappers and trailing prose punctuation removed and no
 /// whitespace. `None` when the input is not a DOI.
+///
+/// Never stricter than [`normalize_doi_legacy`]: when decoding introduces
+/// whitespace or stripping punctuation empties the suffix, the less
+/// processed form is kept, so every DOI paperbridge accepted before still
+/// normalizes.
 pub fn normalize_doi(raw: &str) -> Option<String> {
-    let stripped = strip_doi_prefix(raw);
-    let n = strip_trailing_punctuation(&stripped);
-    let (prefix, suffix) = n.strip_prefix("10.")?.split_once('/')?;
-    (!prefix.is_empty()
-        && prefix.bytes().all(|b| b.is_ascii_digit())
-        && !suffix.is_empty()
-        && !n.chars().any(char::is_whitespace))
-    .then(|| n.to_string())
+    let decoded = strip_doi_prefix(raw);
+    let undecoded = strip_doi_prefix_raw(raw);
+    [
+        strip_trailing_punctuation(&decoded),
+        decoded.as_str(),
+        strip_trailing_punctuation(&undecoded),
+        undecoded.as_str(),
+    ]
+    .into_iter()
+    .find(|n| doi_shape(n))
+    .map(str::to_string)
+}
+
+/// The DOI form paperbridge produced before percent-decoding and
+/// punctuation stripping were added (lowercase, wrappers removed).
+pub fn normalize_doi_legacy(raw: &str) -> Option<String> {
+    let n = strip_doi_prefix_raw(raw);
+    doi_shape(&n).then_some(n)
+}
+
+/// Forms to try when resolving a DOI upstream: canonical first, then the
+/// legacy form if it differs (a DOI that really ends in `.` or contains
+/// `%2F`, or a `doi:` hit_id minted before the shared normalizer).
+pub fn doi_lookup_forms(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for form in [normalize_doi(raw), normalize_doi_legacy(raw)]
+        .into_iter()
+        .flatten()
+    {
+        if !out.contains(&form) {
+            out.push(form);
+        }
+    }
+    out
 }
 
 /// Lowercase `raw` and strip arXiv wrappers: `arxiv:`, and
@@ -360,9 +416,47 @@ mod tests {
             normalize_doi("10.1000/abc(1)").as_deref(),
             Some("10.1000/abc(1)")
         );
-        assert_eq!(normalize_doi("10.1234/a%20b"), None);
-        assert_eq!(normalize_doi("10.1234/."), None);
+        // Never stricter than before: these were accepted and still are.
+        assert_eq!(
+            normalize_doi("10.1234/a%20b").as_deref(),
+            Some("10.1234/a%20b")
+        );
+        assert_eq!(normalize_doi("10.1234/.").as_deref(), Some("10.1234/."));
         assert_eq!(normalize_doi("https://example.com/10.1234/abc"), None);
+    }
+
+    /// Each input whose output changed with the shared normalizer (review
+    /// table): canonical form, legacy form, and both tried on lookup.
+    #[test]
+    fn changed_doi_outputs_keep_a_legacy_lookup() {
+        let cases: &[(&str, &str, &str)] = &[
+            ("10.1234/abc.", "10.1234/abc", "10.1234/abc."),
+            ("10.1000/xyz)", "10.1000/xyz", "10.1000/xyz)"),
+            ("10.1234/a%2Fb", "10.1234/a/b", "10.1234/a%2fb"),
+            ("10.1234/a%20b", "10.1234/a%20b", "10.1234/a%20b"),
+            ("10.1234/x%", "10.1234/x%", "10.1234/x%"),
+            ("10.1234/abc;", "10.1234/abc", "10.1234/abc;"),
+            ("10.1234/foo]", "10.1234/foo", "10.1234/foo]"),
+            (
+                "10.1002/(SICI)1097-4571(199110)42:9<676::AID-ASI6>3.0.CO;2-#",
+                "10.1002/(sici)1097-4571(199110)42:9<676::aid-asi6>3.0.co;2-#",
+                "10.1002/(sici)1097-4571(199110)42:9<676::aid-asi6>3.0.co;2-#",
+            ),
+        ];
+        for &(raw, canonical, legacy) in cases {
+            assert_eq!(normalize_doi(raw).as_deref(), Some(canonical), "{raw}");
+            assert_eq!(normalize_doi_legacy(raw).as_deref(), Some(legacy), "{raw}");
+            let forms = doi_lookup_forms(raw);
+            assert_eq!(forms[0], canonical);
+            assert!(forms.iter().any(|f| f == legacy), "{raw}");
+            // An old `doi:` hit_id (legacy form) still resolves to the same
+            // canonical id.
+            assert_eq!(
+                normalize_doi(legacy).as_deref(),
+                Some(canonical),
+                "{legacy}"
+            );
+        }
     }
 
     #[test]
@@ -417,6 +511,13 @@ mod tests {
         fn doi_normalization_is_idempotent(raw in ".{0,40}") {
             if let Some(n) = normalize_doi(&raw) {
                 prop_assert_eq!(normalize_doi(&n), Some(n.clone()));
+            }
+        }
+
+        #[test]
+        fn never_stricter_than_legacy(raw in "(doi:|https://doi.org/)?10\\.[0-9]{4}/[ -~]{1,20}") {
+            if normalize_doi_legacy(&raw).is_some() {
+                prop_assert!(normalize_doi(&raw).is_some(), "{}", raw);
             }
         }
 

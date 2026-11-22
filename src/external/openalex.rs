@@ -261,11 +261,10 @@ fn convert_work(w: RawOpenAlexWork) -> PaperHit {
     }
 }
 
+/// OpenAlex reports DOIs as `https://doi.org/…`; use the shared normalizer
+/// and keep the raw value only if it is not DOI-shaped.
 fn strip_doi_prefix(doi: String) -> String {
-    doi.strip_prefix("https://doi.org/")
-        .or_else(|| doi.strip_prefix("http://doi.org/"))
-        .map(|s| s.to_string())
-        .unwrap_or(doi)
+    crate::hit_enrich::normalize_doi_str(&doi).unwrap_or(doi)
 }
 
 fn reconstruct_abstract(map: serde_json::Map<String, serde_json::Value>) -> String {

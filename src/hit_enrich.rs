@@ -287,6 +287,12 @@ pub(crate) fn normalize_doi_str(raw: &str) -> Option<String> {
     citegraph::ids::normalize_doi(raw)
 }
 
+/// Canonical then legacy DOI forms, for resolving ids minted before the
+/// shared normalizer (see `citegraph::ids::doi_lookup_forms`).
+pub(crate) fn doi_lookup_forms(raw: &str) -> Vec<String> {
+    citegraph::ids::doi_lookup_forms(raw)
+}
+
 /// Lowercase `raw` and strip arXiv wrappers; keeps any version suffix.
 pub(crate) fn strip_arxiv_prefix(raw: &str) -> String {
     citegraph::ids::strip_arxiv_prefix(raw)

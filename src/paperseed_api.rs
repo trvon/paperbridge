@@ -448,14 +448,15 @@ fn entry_isbn_matches(entry: &IndexedPaper, target_isbn: &str) -> bool {
 }
 
 fn entry_doi_matches(entry: &IndexedPaper, expected: &str) -> bool {
-    entry
-        .paper
-        .metadata
-        .doi
-        .as_deref()
-        .and_then(normalize_doi)
-        .zip(normalize_doi(expected))
-        .is_some_and(|(actual, expected)| actual == expected)
+    // Compare every canonical/legacy form so entries and ids recorded
+    // before the shared normalizer still match.
+    let Some(actual) = entry.paper.metadata.doi.as_deref() else {
+        return false;
+    };
+    let actual = crate::hit_enrich::doi_lookup_forms(actual);
+    crate::hit_enrich::doi_lookup_forms(expected)
+        .iter()
+        .any(|form| actual.contains(form))
 }
 
 fn entry_arxiv_matches(entry: &IndexedPaper, expected: &str) -> bool {
