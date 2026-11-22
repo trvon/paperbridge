@@ -341,6 +341,33 @@ fn merge_during_await_is_resolved_inside_commit() {
     );
 }
 
+/// An undo landing during the await: the commit resolves through the
+/// merges active at commit time, and the edge stays on its base work.
+#[test]
+fn undo_during_await_keeps_edges_on_base_works() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("c.sqlite");
+    let mut a = Store::open(&path).unwrap();
+    let mut b = Store::open(&path).unwrap();
+    b.observe(&[rec(w(2), &[])], "openalex").unwrap();
+    b.observe(&[rec(s2(1), &[d(2)])], "semantic_scholar")
+        .unwrap();
+    b.observe(&[rec(w(2), &[d(2)])], "openalex").unwrap();
+    let st = a
+        .begin_fetch(&rec(w(1), &[]), Direction::Refs, "openalex", false)
+        .unwrap();
+    // Before the await the page id W2 resolves to the merged class.
+    assert_eq!(a.class_ids(&w(2)).unwrap(), vec![d(2), w(2), s2(1)]);
+    let id = b.merges().unwrap()[0].id;
+    assert!(b.undo_merge(id).unwrap());
+    a.commit_page(&st, &page(&[rec(w(2), &[]), rec(s2(1), &[])], true))
+        .unwrap();
+    assert_eq!(
+        neighbor_keys(&mut a, &w(1), Direction::Refs, false),
+        vec![vec![w(2)], vec![d(2), s2(1)]]
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Property test mirroring MergeFetchDecide.tla's invariants.
 
@@ -352,7 +379,10 @@ enum Op {
     /// source would return it (page content depends only on position).
     Commit(usize),
     /// Another writer observes a record (may merge, veto, attach ids).
+    /// Between a `Snap` and its `Commit` this is another worker creating
+    /// the work for a page id during the await.
     Observe(WorkRecord),
+    /// Between a `Snap` and its `Commit`: an undo during the await.
     Undo(usize),
     Refresh,
 }

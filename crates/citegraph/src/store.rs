@@ -324,8 +324,9 @@ impl Store {
     /// have landed while the page was in flight; (2) stores edges by base
     /// work (the `work_ids` mapping, never the union-find root) so undoing a
     /// merge cannot strand them; (3) advances the cursor only if `state` is
-    /// still the committed position, so a replayed page changes no ids,
-    /// works, edges or cursor.
+    /// still the committed position (`pages` equals the snapshot; the
+    /// spec's `cursor' = max(cursor, page)`), so a replayed page never moves
+    /// the cursor back and changes no ids, works or edges.
     pub fn commit_page(&mut self, state: &FetchState, page: &Page) -> Result<CommitOutcome> {
         let key = &state.key;
         let tx = self.write()?;
@@ -1005,7 +1006,10 @@ impl<'t> Writer<'t> {
             for id in &unknown {
                 self.insert_id(id, work, source)?;
             }
-            return Ok(work);
+            // Read the mapping back rather than trusting the insert.
+            return base_of(self.tx, primary)?.ok_or_else(|| {
+                Error::Corrupt(format!("{} has no work after insert", primary.key()))
+            });
         };
 
         let mut anchor = self.uf.find(first)?;
