@@ -603,3 +603,36 @@ async fn pagination_counts_distinct_neighbors() {
     assert_eq!(out.hits.len(), 2);
     assert_eq!(out.next_offset, Some(2));
 }
+
+/// The configured OpenAlex key is sent on citation requests and never
+/// appears in diagnostics.
+#[tokio::test]
+async fn openalex_api_key_is_sent_and_redacted() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    Mock::given(method("GET"))
+        .and(path("/oa/works/doi:10.5555/seed"))
+        .and(query_param("api_key", "oa-secret-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(seed()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/oa/works"))
+        .and(query_param("api_key", "oa-secret-key"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    let mut cfg = CitationConfig::new(dir.path().join("citegraph.sqlite"));
+    cfg.openalex_base = format!("{}/oa", server.uri());
+    cfg.openalex_api_key = Some("oa-secret-key".into());
+    cfg.rates = (FAST, FAST);
+    let svc = CitationService::new(cfg).unwrap();
+    let out = svc
+        .get_citations(req("doi:10.5555/seed", CitationDirection::Refs, 10, 0))
+        .await
+        .unwrap();
+    assert_eq!(out.hits.len(), 2);
+    let json = serde_json::to_string(&out).unwrap();
+    assert!(!json.contains("oa-secret-key"));
+}

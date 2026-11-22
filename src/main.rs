@@ -1775,6 +1775,7 @@ fn build_service(config: Config) -> paperbridge::Result<PaperbridgeService> {
             paperbridge::citations::default_store_path(),
         );
         cfg.openalex_mailto = config.unpaywall_email.clone();
+        cfg.openalex_api_key = config.openalex_api_key.clone();
         cfg.semantic_scholar_api_key = config.semantic_scholar_api_key.clone();
         paperbridge::citations::CitationService::new(cfg)?
     };

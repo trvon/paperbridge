@@ -57,7 +57,7 @@ impl OpenAlexCitations {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
             mailto,
-            api_key,
+            api_key: api_key.filter(|k| !k.trim().is_empty()),
         }
     }
 
