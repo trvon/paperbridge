@@ -4,6 +4,7 @@ pub mod backends;
 pub mod book;
 pub mod browser;
 pub mod chunking;
+pub mod citations;
 pub mod cli;
 pub mod config;
 pub mod crossref;
