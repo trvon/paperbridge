@@ -152,17 +152,82 @@ fn undo_with_dependent_merge_keeps_later_evidence() {
     assert_eq!(store.class_ids(&w(1)).unwrap(), vec![w(1)]);
     assert_eq!(store.class_ids(&w(2)).unwrap(), vec![w(2)]);
     assert_eq!(store.class_ids(&s2(1)).unwrap(), vec![d(1), s2(1)]);
-    // Undone evidence is sticky per base pair: W2+S1 again is vetoed, but
-    // other evidence (W2+d1) is not blocked by it.
+    // The undo veto is class level: W2 and S1 stay apart whatever the
+    // evidence (W2+S1 again, or W2+d1 while d1 is in S1's class) ...
     assert_eq!(store.observe(&[rec(w(2), &[s2(1)])], "x").unwrap(), 1);
-    assert_eq!(store.observe(&[rec(w(2), &[d(1)])], "x").unwrap(), 0);
-    assert_eq!(store.class_ids(&w(2)).unwrap(), vec![d(1), w(2), s2(1)]);
-    // Other evidence linking W1 to the class is not blocked by its undo.
-    store.observe(&[rec(w(1), &[s2(1)])], "x").unwrap();
-    assert_eq!(
-        store.class_ids(&w(1)).unwrap(),
-        vec![d(1), w(1), w(2), s2(1)]
+    assert_eq!(store.observe(&[rec(w(2), &[d(1)])], "x").unwrap(), 1);
+    assert_eq!(store.class_ids(&w(2)).unwrap(), vec![w(2)]);
+    // ... but works never separated still join.
+    assert_eq!(store.observe(&[rec(w(2), &[w(3)])], "x").unwrap(), 0);
+    assert_eq!(store.class_ids(&w(2)).unwrap(), vec![w(2), w(3)]);
+}
+
+/// Review probe t10: re-observing a 3-id record after undoing one of its
+/// merges must not reunite the classes through the record's other pair.
+#[test]
+fn undo_veto_holds_for_multi_id_records() {
+    let mut s = Store::open_in_memory().unwrap();
+    s.observe(&[rec(w(1), &[d(1)])], "openalex").unwrap();
+    let record = rec(s2(1), &[w(1), d(1)]);
+    s.observe(std::slice::from_ref(&record), "semantic_scholar")
+        .unwrap();
+    // Only (S1, W1) was logged: d1 was already in W1's class.
+    assert_eq!(s.merges().unwrap().len(), 2);
+    let last = last_merge(&mut s);
+    assert!(s.undo_merge(last).unwrap());
+    assert_eq!(s.class_ids(&s2(1)).unwrap(), vec![s2(1)]);
+
+    let conflicts = s
+        .observe(std::slice::from_ref(&record), "semantic_scholar")
+        .unwrap();
+    assert_eq!(conflicts, 2, "both joins of the record are vetoed");
+    assert_eq!(s.class_ids(&s2(1)).unwrap(), vec![s2(1)]);
+    assert_eq!(s.merges().unwrap().len(), 2, "nothing written");
+
+    // Redo lifts the separation it re-applies.
+    assert!(s.redo_merge(last).unwrap().is_some());
+    assert_eq!(s.class_ids(&s2(1)).unwrap(), vec![d(1), w(1), s2(1)]);
+}
+
+/// Redo re-applies only its own pair: another user-undone pair that still
+/// separates the two classes refuses it.
+#[test]
+fn redo_respects_other_separations() {
+    let mut s = Store::open_in_memory().unwrap();
+    s.observe(&[rec(w(1), &[d(1)])], "x").unwrap();
+    let w1_d1 = last_merge(&mut s);
+    s.observe(&[rec(w(2), &[d(1)])], "x").unwrap();
+    let w2_d1 = last_merge(&mut s);
+    assert!(s.undo_merge(w2_d1).unwrap());
+    // W2 and d1 are separated, so W2 cannot reach d1's class via W1.
+    assert_eq!(s.observe(&[rec(w(2), &[w(1)])], "x").unwrap(), 1);
+    assert!(s.undo_merge(w1_d1).unwrap());
+    // Now W1 and W2 can join (nothing separates them) ...
+    assert_eq!(s.observe(&[rec(w(2), &[w(1)])], "x").unwrap(), 0);
+    // ... and redoing W1-d1 would put W2 with d1: refused.
+    assert_eq!(s.redo_merge(w1_d1).unwrap(), None);
+    assert_eq!(s.class_ids(&d(1)).unwrap(), vec![d(1)]);
+    // Symmetrically, W1-d1 (still undone) refuses redoing W2-d1.
+    assert_eq!(s.redo_merge(w2_d1).unwrap(), None);
+    // Undo the W1-W2 join (itself a new separation); W1-d1 can then be
+    // redone, being exempt from its own separation only ...
+    let w1_w2 = last_merge(&mut s);
+    assert!(s.undo_merge(w1_w2).unwrap());
+    assert!(s.redo_merge(w1_d1).unwrap().is_some());
+    assert_eq!(s.class_ids(&d(1)).unwrap(), vec![d(1), w(1)]);
+    // ... while W2 stays apart from W1 (undone W1-W2) whichever pair is
+    // redone, until that pair's own redo.
+    assert_eq!(s.redo_merge(w2_d1).unwrap(), None);
+    assert_eq!(s.redo_merge(w1_w2).unwrap(), None);
+    assert_eq!(s.class_ids(&w(2)).unwrap(), vec![w(2)]);
+    // Redoing both together is exempt from both separations.
+    let redone = s.redo_merges(&[w1_w2, w2_d1]).unwrap().unwrap();
+    assert!(redone[0].is_some(), "{redone:?}");
+    assert!(
+        redone[1].is_none(),
+        "already one class: separation lifted, no row"
     );
+    assert_eq!(s.class_ids(&w(2)).unwrap(), vec![d(1), w(1), w(2)]);
 }
 
 #[test]
@@ -713,6 +778,25 @@ fn check_forest(store: &Store) -> std::result::Result<(), TestCaseError> {
     let uf = UnionFind::load(store.conn());
     prop_assert!(uf.is_ok(), "active merges form a cycle");
     let uf = uf.unwrap();
+    // VetoHolds: every evidence pair whose latest row a user undid is in
+    // two different classes.
+    let separated: Vec<(i64, i64)> = store
+        .conn()
+        .prepare(
+            "SELECT m.base_a, m.base_b FROM merge_log m
+             WHERE m.undo_reason = 'user' AND m.undone_at IS NOT NULL
+               AND m.id = (SELECT MAX(x.id) FROM merge_log x
+                 WHERE (x.base_a = m.base_a AND x.base_b = m.base_b)
+                    OR (x.base_a = m.base_b AND x.base_b = m.base_a))",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    for (a, b) in separated {
+        prop_assert_ne!(uf.find(a), uf.find(b), "undone pair {}-{} reunited", a, b);
+    }
     let active: i64 = store
         .conn()
         .query_row(
@@ -1072,14 +1156,40 @@ proptest! {
                 }
                 Op::Undo(i) => {
                     if let Some(m) = store.merges().unwrap().get(i) {
+                        // Independent model of rule 9: the latest active
+                        // merge (by seq) whose evidence lies in m's class.
+                        let uf = UnionFind::load(store.conn()).unwrap();
+                        let (base_a, active): (i64, bool) = store
+                            .conn()
+                            .query_row(
+                                "SELECT base_a, undone_at IS NULL FROM merge_log WHERE id = ?1",
+                                [m.id],
+                                |r| Ok((r.get(0)?, r.get(1)?)),
+                            )
+                            .unwrap();
+                        let latest: Option<i64> = store
+                            .conn()
+                            .prepare("SELECT id, base_a FROM merge_log WHERE undone_at IS NULL ORDER BY seq DESC")
+                            .unwrap()
+                            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
+                            .unwrap()
+                            .map(|r| r.unwrap())
+                            .find(|&(_, a)| uf.find(a) == uf.find(base_a))
+                            .map(|(id, _)| id);
                         let before = snapshot(&store);
-                        match store.undo_merge(m.id) {
-                            Ok(_) => {}
-                            Err(Error::UndoBlocked { blocking, .. }) => {
-                                prop_assert_ne!(blocking, m.id);
+                        let result = store.undo_merge(m.id);
+                        match (&result, active) {
+                            (Ok(undone), false) => prop_assert!(!undone),
+                            (Ok(undone), true) => {
+                                prop_assert!(*undone);
+                                prop_assert_eq!(latest, Some(m.id), "undid a non-outermost merge");
+                            }
+                            (Err(Error::UndoBlocked { blocking, .. }), true) => {
+                                prop_assert_ne!(latest, Some(m.id), "outermost merge refused");
+                                prop_assert_eq!(Some(*blocking), latest);
                                 prop_assert_eq!(&before, &snapshot(&store));
                             }
-                            Err(e) => return Err(TestCaseError::fail(e.to_string())),
+                            (r, _) => return Err(TestCaseError::fail(format!("{r:?}"))),
                         }
                     }
                 }

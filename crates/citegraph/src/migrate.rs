@@ -52,7 +52,8 @@ CREATE TABLE merge_log(
   seq INTEGER NOT NULL,
   undone_at TEXT,
   undone_seq INTEGER,
-  -- 'user' (sticky: the same evidence does not redo it) or 'version_split'
+  -- 'user' (keeps the pair's classes apart), 'redone' (a user undo
+  -- lifted by redo_merge) or 'version_split'
   undo_reason TEXT,
   CHECK (winner <> loser),
   CHECK (base_a <> base_b)

@@ -224,7 +224,7 @@ pub struct MergeInfo {
     pub seq: i64,
     pub undone_at: Option<String>,
     pub undone_seq: Option<i64>,
-    /// `user` or `version_split`.
+    /// `user`, `redone` (a user undo later redone) or `version_split`.
     pub undo_reason: Option<String>,
 }
 
@@ -723,26 +723,63 @@ impl Store {
         Ok(true)
     }
 
-    /// Re-apply an undone merge as a new row (append-only). Returns the new
-    /// merge id, or `None` when the works are already in one class or a
-    /// strong-id or version veto now forbids joining them.
+    /// Redo an undone merge in one `BEGIN IMMEDIATE` transaction: lift its
+    /// separation (`undo_reason` becomes `redone`) and, if its two works are
+    /// in different classes, re-apply it as a new row (append-only). Returns
+    /// the new merge id, or `None` when no row was needed (already one
+    /// class) or the redo was refused (strong-id or version veto, or another
+    /// user-undone pair separating the classes). A refused redo writes
+    /// nothing; [`Store::redo_merges`] can redo mutually separating pairs
+    /// together.
     pub fn redo_merge(&mut self, merge_id: i64) -> Result<Option<i64>> {
+        Ok(self
+            .redo_merges(&[merge_id])?
+            .and_then(|ids| ids.into_iter().next().flatten()))
+    }
+
+    /// Redo several undone merges together, in order, each exempt from the
+    /// separations of every merge in the set. All or nothing: `Ok(None)`
+    /// and no write if any is refused; otherwise the new row id (or `None`
+    /// when no row was needed) per merge.
+    pub fn redo_merges(&mut self, merge_ids: &[i64]) -> Result<Option<Vec<Option<i64>>>> {
         let tx = self.write()?;
-        let row: Option<(i64, i64, String)> = tx
-            .query_row(
-                "SELECT base_a, base_b, COALESCE(evidence, '') FROM merge_log
-                 WHERE id = ?1 AND undone_at IS NOT NULL",
-                [merge_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .optional()?;
+        let mut pairs = Vec::new();
+        for &id in merge_ids {
+            let row: Option<(i64, i64, String)> = tx
+                .query_row(
+                    "SELECT base_a, base_b, COALESCE(evidence, '') FROM merge_log
+                     WHERE id = ?1 AND undone_at IS NOT NULL",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            pairs.push((id, row));
+        }
+        let exempt: Vec<(i64, i64)> = pairs
+            .iter()
+            .filter_map(|(_, row)| row.as_ref().map(|&(a, b, _)| (a, b)))
+            .collect();
         let mut w = Writer::new(&tx)?;
-        let new_id = match row {
-            Some((a, b, evidence)) => w.join(a, b, "redo", &evidence, false)?,
-            None => None,
-        };
+        let mut out = Vec::new();
+        for (id, row) in &pairs {
+            let Some((a, b, evidence)) = row else {
+                out.push(None);
+                continue;
+            };
+            tx.execute(
+                "UPDATE merge_log SET undo_reason = 'redone' WHERE id = ?1 AND undo_reason = 'user'",
+                [id],
+            )?;
+            let vetoed_before = w.conflicts;
+            let new_id = w.join(*a, *b, "redo", evidence, &exempt)?;
+            if w.conflicts > vetoed_before {
+                // Refused: drop the transaction (rolls back every redo).
+                return Ok(None);
+            }
+            out.push(new_id);
+        }
         tx.commit()?;
-        Ok(new_id)
+        Ok(Some(out))
     }
 
     /// Take one request token for `source` at `now_ms` (Unix ms), shared by
@@ -1188,6 +1225,7 @@ fn fnv_hex(s: &str) -> String {
 struct Writer<'t> {
     tx: &'t Transaction<'t>,
     uf: UnionFind,
+    separations: HashMap<i64, Vec<i64>>,
     conflicts: u32,
     pending_splits: u32,
 }
@@ -1196,6 +1234,7 @@ impl<'t> Writer<'t> {
     fn new(tx: &'t Transaction<'t>) -> Result<Self> {
         Ok(Self {
             uf: UnionFind::load(tx)?,
+            separations: Self::load_separations(tx)?,
             tx,
             conflicts: 0,
             pending_splits: 0,
@@ -1232,40 +1271,71 @@ impl<'t> Writer<'t> {
         Ok(out)
     }
 
-    /// The most recent row for this evidence pair was undone by a user.
-    fn undone_pair(&self, a: i64, b: i64) -> Result<bool> {
-        let reason: Option<Option<String>> = self
-            .tx
-            .prepare_cached(
-                "SELECT CASE WHEN undone_at IS NULL THEN NULL ELSE undo_reason END FROM merge_log
-                 WHERE (base_a = ?1 AND base_b = ?2) OR (base_a = ?2 AND base_b = ?1)
-                 ORDER BY id DESC LIMIT 1",
-            )?
-            .query_row(params![a, b], |r| r.get(0))
-            .optional()?;
-        Ok(matches!(reason, Some(Some(r)) if r == "user"))
+    /// Separations from user undos: for every evidence pair whose latest
+    /// `merge_log` row was undone by a user, each base maps to the other.
+    /// Loaded once per transaction (observe never creates user undos).
+    fn load_separations(tx: &Transaction<'_>) -> Result<HashMap<i64, Vec<i64>>> {
+        let mut stmt = tx.prepare_cached(
+            "SELECT m.base_a, m.base_b FROM merge_log m
+             WHERE m.undone_at IS NOT NULL AND m.undo_reason = 'user'
+               AND m.id = (SELECT MAX(x.id) FROM merge_log x
+                           WHERE (x.base_a = m.base_a AND x.base_b = m.base_b)
+                              OR (x.base_a = m.base_b AND x.base_b = m.base_a))",
+        )?;
+        let mut out: HashMap<i64, Vec<i64>> = HashMap::new();
+        for row in stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))? {
+            let (a, b) = row?;
+            out.entry(a).or_default().push(b);
+            out.entry(b).or_default().push(a);
+        }
+        Ok(out)
+    }
+
+    /// Some user-undone evidence pair has one base in `ra`'s class and the
+    /// other in `rb`'s, ignoring `exempt` (the pair being redone). Cost is
+    /// the smaller class's size, not the store's.
+    fn separated(&self, ra: i64, rb: i64, exempt: &[(i64, i64)]) -> bool {
+        let (small, big) = if self.uf.members(ra).len() <= self.uf.members(rb).len() {
+            (ra, rb)
+        } else {
+            (rb, ra)
+        };
+        let big_root = self.uf.find(big);
+        self.uf.members(small).into_iter().any(|w| {
+            self.separations.get(&w).is_some_and(|others| {
+                others.iter().any(|&o| {
+                    let is_exempt = exempt
+                        .iter()
+                        .any(|&(x, y)| (x == w && y == o) || (x == o && y == w));
+                    !is_exempt && self.uf.find(o) == big_root
+                })
+            })
+        })
     }
 
     /// Join the classes of evidence works `a` and `b` with a logged merge,
-    /// unless they are already one class or a veto applies: contradicting
-    /// DOI/arXiv/PMID, a class that would hold both an arXiv id and a
-    /// publisher DOI (versions are never merged), or (when `sticky`) a user
-    /// undo of this same evidence pair. The roots are computed here, inside
-    /// the merge transaction.
+    /// unless they are already one class or a veto applies. The classes are
+    /// computed here, inside the merge transaction. Vetoes:
+    /// - contradicting DOI/arXiv/PMID;
+    /// - the join would put an arXiv id and a publisher DOI in one class
+    ///   (versions are never merged);
+    /// - undo veto (rule 11, class level): some evidence pair `{x, y}` whose
+    ///   latest row was undone by a user has `x` in one class and `y` in
+    ///   the other. `exempt` holds the pairs a redo re-applies.
     fn join(
         &mut self,
         a: i64,
         b: i64,
         reason: &str,
         evidence: &str,
-        sticky: bool,
+        exempt: &[(i64, i64)],
     ) -> Result<Option<i64>> {
         let (ra, rb) = (self.uf.find(a), self.uf.find(b));
         if ra == rb {
             return Ok(None);
         }
         let (ia, ib) = (self.class_strong_ids(ra)?, self.class_strong_ids(rb)?);
-        if ia.conflicts(&ib) || ia.mixes_versions(&ib) || (sticky && self.undone_pair(a, b)?) {
+        if ia.conflicts(&ib) || ia.mixes_versions(&ib) || self.separated(ra, rb, exempt) {
             self.conflicts += 1;
             return Ok(None);
         }
@@ -1365,7 +1435,7 @@ impl<'t> Writer<'t> {
             let Some(anchor) = anchor else { continue };
             for &(_, base) in group {
                 if base != anchor {
-                    self.join(anchor, base, "strong_id", &evidence, true)?;
+                    self.join(anchor, base, "strong_id", &evidence, &[])?;
                 }
             }
             anchors.push(anchor);
@@ -1410,6 +1480,9 @@ impl<'t> Writer<'t> {
         Ok(primary)
     }
 
+    /// `first_seen`/`last_seen` are wall-clock display data only; staleness
+    /// reads only `first_seen_seq` and the per-direction `*_seen_seq`
+    /// stamps (rule 13).
     fn upsert_edge(
         &mut self,
         citing: i64,
