@@ -6,27 +6,38 @@
 /// If the input contains multiple ISBN candidates (e.g. separated by whitespace,
 /// comma, or semicolon as often found in Zotero), returns the first valid one.
 pub(crate) fn normalize_isbn(raw: &str) -> Option<String> {
-    let tokens: Vec<&str> = raw
-        .split(|c: char| c.is_whitespace() || c == ',' || c == ';')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    if tokens.len() > 1 {
-        for token in &tokens {
-            if let Some(norm) = normalize_single_isbn(token) {
-                return Some(norm);
-            }
-        }
-        // Spaced ISBNs like "978 1 4919 0307 0" split into multiple tokens,
-        // none of which is a full ISBN alone. Fall back to parsing the whole string.
-        return normalize_single_isbn(raw);
-    }
-
-    normalize_single_isbn(raw)
+    raw.split([',', ';']).find_map(normalize_segment)
 }
 
-fn normalize_single_isbn(raw: &str) -> Option<String> {
+/// Whitespace inside a segment either separates ISBN groups
+/// ("978 1 4919 0307 0") or whole ISBNs ("9781491903070 1491903074").
+/// From each start token, the longest run of tokens that forms a valid ISBN
+/// wins, so a fragment of a spaced ISBN-13 (such as the last ten digits of
+/// "979 7861108570") is never read as an ISBN-10 of its own.
+fn normalize_segment(segment: &str) -> Option<String> {
+    let tokens: Vec<&str> = segment.split_whitespace().collect();
+    (0..tokens.len()).find_map(|start| {
+        let mut longest = None;
+        for end in start..tokens.len() {
+            let candidate = tokens[start..=end].join(" ");
+            // Adding tokens never removes a bad character or a digit.
+            let Some(body) = isbn_body(&candidate) else {
+                break;
+            };
+            if body.len() > 13 {
+                break;
+            }
+            if let Some(isbn) = canonical_isbn(body) {
+                longest = Some(isbn);
+            }
+        }
+        longest
+    })
+}
+
+/// The ISBN digits (and a trailing-position 'X') of `raw` once any "ISBN"
+/// label and separators are removed, or `None` on any other character.
+fn isbn_body(raw: &str) -> Option<Vec<u8>> {
     let trimmed = raw.trim();
     let upper = trimmed.to_ascii_uppercase();
     const PREFIXES: &[&str] = &[
@@ -60,7 +71,10 @@ fn normalize_single_isbn(raw: &str) -> Option<String> {
             return None;
         }
     }
+    Some(cleaned)
+}
 
+fn canonical_isbn(cleaned: Vec<u8>) -> Option<String> {
     if cleaned.len() == 13 && is_valid_isbn13_bytes(&cleaned) {
         // Safe: cleaned contains only ASCII digits
         String::from_utf8(cleaned).ok()
@@ -250,6 +264,50 @@ mod tests {
         assert_eq!(normalize_isbn("invalid-isbn"), None);
         assert_eq!(normalize_isbn(""), None);
     }
+
+    #[test]
+    fn spaced_979_isbn_is_not_read_as_its_last_ten_digits() {
+        // Minimal proptest failure: "7861108570" alone is a valid ISBN-10,
+        // which used to win over the whole spaced 979 ISBN-13.
+        assert_eq!(
+            normalize_isbn("979 7861108570"),
+            Some("9797861108570".to_string())
+        );
+        assert_eq!(
+            normalize_isbn("9 7 9 7861108570"),
+            Some("9797861108570".to_string())
+        );
+        assert_eq!(
+            normalize_isbn("ISBN-13: 979 7861108570"),
+            Some("9797861108570".to_string())
+        );
+        // The same ISBN-13 followed by another candidate.
+        assert_eq!(
+            normalize_isbn("979 7861108570 0306406152"),
+            Some("9797861108570".to_string())
+        );
+        assert_eq!(
+            normalize_isbn("978 1 4919 0307 0, 0306406152"),
+            Some("9781491903070".to_string())
+        );
+    }
+
+    #[test]
+    fn an_isbn_inside_a_longer_digit_run_is_rejected() {
+        for raw in [
+            "97814919030705",
+            "19781491903070",
+            "978-1-4919-0307-0-5",
+            "5-978-1-4919-0307-0",
+            "97978611085701",
+            "03064061521",
+            "1-0306406152",
+            "978 1 4919 0307 05",
+            "ISBN 97814919030705",
+        ] {
+            assert_eq!(normalize_isbn(raw), None, "{raw}");
+        }
+    }
     mod props {
         use super::super::*;
         use proptest::prelude::*;
@@ -341,6 +399,21 @@ mod tests {
                 let expected = normalize_isbn(&isbn);
                 let decorated = format!("{label}{}", with_separators(&isbn, mask, sep));
                 prop_assert_eq!(normalize_isbn(&decorated), expected);
+            }
+
+            #[test]
+            fn extra_digits_joined_to_an_isbn_are_rejected(
+                isbn in prop_oneof![valid_isbn13(), valid_isbn10()],
+                extra in "[0-9]{1,2}",
+                before: bool,
+                joiner in prop::sample::select(vec!["", "-", "."]),
+            ) {
+                let raw = if before {
+                    format!("{extra}{joiner}{isbn}")
+                } else {
+                    format!("{isbn}{joiner}{extra}")
+                };
+                prop_assert_eq!(normalize_isbn(&raw), None, "{}", raw);
             }
 
             #[test]
