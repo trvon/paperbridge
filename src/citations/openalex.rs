@@ -3,8 +3,7 @@
 //! batched hydration by OpenAlex id. Kept apart from
 //! `external::openalex` (search), which owns API-key handling.
 
-use super::{Fetched, UpstreamError};
-use crate::external::send_with_retry;
+use super::{Fetched, Transport, UpstreamError};
 use citegraph::{ExtId, WorkMeta, WorkRecord};
 use reqwest::Client;
 use serde::Deserialize;
@@ -77,10 +76,14 @@ impl OpenAlexCitations {
         url
     }
 
-    async fn get<T: serde::de::DeserializeOwned>(&self, url: &str) -> Fetched<T> {
-        let response = send_with_retry("citations_openalex", self.client.get(url))
-            .await
-            .map_err(|e| UpstreamError::Failed(e.to_string()))?;
+    async fn get<T: serde::de::DeserializeOwned>(
+        &self,
+        t: &mut Transport<'_>,
+        url: &str,
+    ) -> Fetched<T> {
+        let response = t
+            .send(SOURCE, "citations_openalex", self.client.get(url))
+            .await?;
         let status = response.status();
         if status == reqwest::StatusCode::NOT_FOUND {
             return Err(UpstreamError::NotFound);
@@ -95,13 +98,13 @@ impl OpenAlexCitations {
     }
 
     /// Look a work up by OpenAlex id, DOI or PMID.
-    pub(crate) async fn work(&self, id: &ExtId) -> Fetched<OpenAlexWork> {
+    pub(crate) async fn work(&self, t: &mut Transport<'_>, id: &ExtId) -> Fetched<OpenAlexWork> {
         let key = lookup_key(id).ok_or(UpstreamError::NotFound)?;
         let url = self.url(&format!(
             "/works/{}?select={SELECT_WITH_LISTS}",
             super::path_segment(&key)
         ));
-        let raw: RawWork = self.get(&url).await?;
+        let raw: RawWork = self.get(t, &url).await?;
         let referenced = raw
             .referenced_works
             .iter()
@@ -123,6 +126,7 @@ impl OpenAlexCitations {
     /// One page of works citing `work` (`filter=cites:W…`, cursor paging).
     pub(crate) async fn cites_page(
         &self,
+        t: &mut Transport<'_>,
         work: &ExtId,
         cursor: Option<&str>,
         per_page: u32,
@@ -133,7 +137,7 @@ impl OpenAlexCitations {
             per_page.clamp(1, MAX_PER_PAGE),
             urlencoding::encode(cursor.unwrap_or("*")),
         ));
-        let raw: RawList = self.get(&url).await?;
+        let raw: RawList = self.get(t, &url).await?;
         Ok(CitesPage {
             records: raw
                 .results
@@ -146,7 +150,11 @@ impl OpenAlexCitations {
     }
 
     /// Metadata for up to [`HYDRATE_BATCH`] OpenAlex ids.
-    pub(crate) async fn hydrate(&self, ids: &[ExtId]) -> Fetched<Vec<WorkRecord>> {
+    pub(crate) async fn hydrate(
+        &self,
+        t: &mut Transport<'_>,
+        ids: &[ExtId],
+    ) -> Fetched<Vec<WorkRecord>> {
         let filter = ids
             .iter()
             .map(|i| i.value.as_str())
@@ -156,7 +164,7 @@ impl OpenAlexCitations {
             "/works?filter=openalex:{filter}&per_page={}&select={SELECT}",
             ids.len().max(1)
         ));
-        let raw: RawList = self.get(&url).await?;
+        let raw: RawList = self.get(t, &url).await?;
         Ok(raw
             .results
             .into_iter()

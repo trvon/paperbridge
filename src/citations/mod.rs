@@ -12,7 +12,7 @@ pub mod bucket;
 mod openalex;
 mod semantic_scholar;
 
-pub use bucket::{BudgetUse, CallBudget, Rate, TokenBucket};
+pub use bucket::{BudgetUse, CallBudget, OPENALEX_LIMIT, RateLimit, SEMANTIC_SCHOLAR_LIMIT};
 
 use crate::error::{Result, ZoteroMcpError};
 use crate::hit_enrich::{apply_detail, enrich_hit_identity};
@@ -48,12 +48,15 @@ pub(crate) enum UpstreamError {
     NotFound,
     Status(u16),
     Failed(String),
+    /// The per-call or daily request budget is spent; not a source failure.
+    Budget,
 }
 
 impl UpstreamError {
     fn reason(&self) -> String {
         match self {
             Self::NotFound => "not_found".into(),
+            Self::Budget => "budget_exhausted".into(),
             Self::Status(429) => "rate_limited".into(),
             Self::Status(status) => format!("http_{status}"),
             Self::Failed(message) => {
@@ -91,8 +94,9 @@ pub struct CitationConfig {
     pub semantic_scholar_base: String,
     pub semantic_scholar_api_key: Option<String>,
     pub budget: CallBudget,
-    /// `(openalex, semantic_scholar)`; `None` shares the process-wide buckets.
-    pub rates: Option<(Rate, Rate)>,
+    /// `(openalex, semantic_scholar)` rate and daily limits, enforced
+    /// through the store so every process shares them.
+    pub rates: (RateLimit, RateLimit),
 }
 
 impl CitationConfig {
@@ -105,7 +109,7 @@ impl CitationConfig {
             semantic_scholar_base: "https://api.semanticscholar.org/graph/v1".into(),
             semantic_scholar_api_key: None,
             budget: CallBudget::default(),
-            rates: None,
+            rates: (OPENALEX_LIMIT, SEMANTIC_SCHOLAR_LIMIT),
         }
     }
 }
@@ -228,10 +232,12 @@ pub struct CitationsResult {
     pub diagnostics: CitationDiagnostics,
 }
 
-struct Call {
+pub(crate) struct Call {
     ledger: BudgetLedger,
     diagnostics: CitationDiagnostics,
     conflicts: u32,
+    /// The request's DOI in its legacy form, when that differs.
+    legacy_doi: Option<ExtId>,
 }
 
 impl Call {
@@ -271,7 +277,6 @@ struct Inner {
     store: tokio::sync::OnceCell<Arc<Mutex<Store>>>,
     openalex: OpenAlexCitations,
     semantic_scholar: Option<SemanticScholarCitations>,
-    buckets: (TokenBucket, TokenBucket),
 }
 
 /// Citation graph service. Cheap to clone; opens the store on first use.
@@ -306,17 +311,12 @@ impl CitationService {
             .clone()
             .filter(|k| !k.trim().is_empty())
             .map(|key| SemanticScholarCitations::new(client, &config.semantic_scholar_base, key));
-        let buckets = match config.rates {
-            Some((oa, s2)) => (TokenBucket::new(oa), TokenBucket::new(s2)),
-            None => bucket::default_buckets(),
-        };
         Ok(Self {
             inner: Arc::new(Inner {
                 config,
                 store: tokio::sync::OnceCell::new(),
                 openalex,
                 semantic_scholar,
-                buckets,
             }),
         })
     }
@@ -362,19 +362,38 @@ impl CitationService {
         .map_err(|e| store_error(&path, e))
     }
 
-    /// Spend budget and wait for a rate token; false when the budget is out.
-    async fn gate(&self, call: &mut Call, source: &'static str) -> bool {
+    /// Spend one request of the per-call budget, then wait for a shared
+    /// rate token (counted against the source's daily budget). False when
+    /// either budget is spent.
+    async fn gate(&self, call: &mut Call, source: &'static str) -> Result<bool> {
         if !call.ledger.spend(source) {
             call.note(&format!("{source}_budget_exhausted"));
-            return false;
+            return Ok(false);
         }
-        let bucket = if source == OA {
-            &self.inner.buckets.0
+        let limit = if source == OA {
+            self.inner.config.rates.0
         } else {
-            &self.inner.buckets.1
+            self.inner.config.rates.1
         };
-        bucket.acquire().await;
-        true
+        loop {
+            let now = unix_ms();
+            match self.db(move |s| s.take_request(source, limit, now)).await? {
+                citegraph::RateGrant::Granted => return Ok(true),
+                citegraph::RateGrant::Wait(ms) => {
+                    tokio::time::sleep(Duration::from_millis(ms.min(5_000))).await;
+                }
+                citegraph::RateGrant::DailyExhausted => {
+                    call.note(&format!("{source}_daily_budget_exhausted"));
+                    return Ok(false);
+                }
+            }
+        }
+    }
+
+    /// Distinct cached neighbors (what a page is cut from).
+    async fn cached_total(&self, subject: &ExtId, direction: Direction) -> Result<u64> {
+        let id = subject.clone();
+        Ok(self.db(move |s| s.neighbor_total(&id, direction)).await? as u64)
     }
 
     pub async fn get_citations(&self, req: CitationsRequest) -> Result<CitationsResult> {
@@ -397,6 +416,7 @@ impl CitationService {
             ledger: BudgetLedger::new(&self.inner.config.budget),
             diagnostics: CitationDiagnostics::default(),
             conflicts: 0,
+            legacy_doi: legacy_doi_of(&req.id, &subject),
         };
 
         let openalex_ok = self
@@ -539,7 +559,9 @@ impl CitationService {
                     source: OA.into(),
                 })
                 .await?
-            && (!state.resumable() || (direction == Direction::CitedBy && state.fetched >= need))
+            && (!state.resumable()
+                || (direction == Direction::CitedBy
+                    && self.cached_total(subject, direction).await? >= need))
         {
             call.ok(OA);
             return Ok(true);
@@ -550,11 +572,23 @@ impl CitationService {
                 call.skip(OA, "no_openalex_identity");
                 return Ok(false);
             };
-            if !self.gate(call, OA).await {
-                return Ok(false);
+            let mut fetched = self
+                .inner
+                .openalex
+                .work(&mut Transport { svc: self, call }, &lookup)
+                .await;
+            if matches!(fetched, Err(UpstreamError::NotFound))
+                && let Some(legacy) = legacy_lookup(&lookup, call)
+            {
+                fetched = self
+                    .inner
+                    .openalex
+                    .work(&mut Transport { svc: self, call }, &legacy)
+                    .await;
             }
-            let work = match self.inner.openalex.work(&lookup).await {
+            let work = match fetched {
                 Ok(work) => work,
+                Err(UpstreamError::Budget) => return Ok(false),
                 Err(e) => {
                     call.fail(OA, e.reason());
                     return Ok(false);
@@ -568,6 +602,15 @@ impl CitationService {
                 } else {
                     work.related
                 };
+                // An empty list is not evidence of zero references (OpenAlex
+                // often lacks them): record the work, leave the list
+                // unknown, and let Semantic Scholar answer.
+                if ids.is_empty() {
+                    call.note(&format!("openalex_{}_empty", direction.as_str()));
+                    let record = work.record;
+                    self.db(move |s| s.observe(&[record], OA)).await?;
+                    return Ok(false);
+                }
                 let page = Page {
                     total_reported: Some(ids.len() as u64),
                     rows: ids
@@ -609,23 +652,27 @@ impl CitationService {
         };
         let mut restarted = false;
         loop {
+            // Stop on distinct cached neighbors, not rows fetched: merges
+            // and duplicates make the two differ.
+            let cached = self.cached_total(subject, direction).await?;
             if let Some(s) = &state
-                && (!s.resumable() || s.fetched >= need)
+                && (!s.resumable() || cached >= need)
             {
                 break;
             }
-            if !self.gate(call, OA).await {
-                break;
-            }
             let cursor = state.as_ref().and_then(|s| s.cursor.clone());
-            let fetched = state.as_ref().map_or(0, |s| s.fetched);
             let per_page = need
-                .saturating_sub(fetched)
+                .saturating_sub(cached)
                 .clamp(25, u64::from(openalex::MAX_PER_PAGE)) as u32;
             match self
                 .inner
                 .openalex
-                .cites_page(&work_id, cursor.as_deref(), per_page)
+                .cites_page(
+                    &mut Transport { svc: self, call },
+                    &work_id,
+                    cursor.as_deref(),
+                    per_page,
+                )
                 .await
             {
                 Ok(p) => {
@@ -650,6 +697,7 @@ impl CitationService {
                     state = None;
                     call.note("openalex_cursor_restarted");
                 }
+                Err(UpstreamError::Budget) => break,
                 Err(e) => {
                     call.fail(OA, e.reason());
                     return Ok(state.is_some_and(|s| s.pages > 0));
@@ -680,11 +728,15 @@ impl CitationService {
                     call.skip(S2, "no_semantic_scholar_identity");
                     return Ok(false);
                 };
-                if !self.gate(call, S2).await {
-                    return Ok(false);
+                let mut fetched = s2.paper(&mut Transport { svc: self, call }, &lookup).await;
+                if matches!(fetched, Err(UpstreamError::NotFound))
+                    && let Some(legacy) = legacy_lookup(&lookup, call)
+                {
+                    fetched = s2.paper(&mut Transport { svc: self, call }, &legacy).await;
                 }
-                let record = match s2.paper(&lookup).await {
+                let record = match fetched {
                     Ok(r) => r,
+                    Err(UpstreamError::Budget) => return Ok(false),
                     Err(e) => {
                         call.fail(S2, e.reason());
                         return Ok(false);
@@ -705,8 +757,9 @@ impl CitationService {
             )
         };
         loop {
+            let cached = self.cached_total(subject, direction).await?;
             if let Some(s) = &state
-                && (!s.resumable() || s.fetched >= need)
+                && (!s.resumable() || cached >= need)
             {
                 break;
             }
@@ -715,7 +768,6 @@ impl CitationService {
                 .and_then(|s| s.cursor.as_deref())
                 .and_then(|c| c.parse().ok())
                 .unwrap_or(0);
-            let fetched = state.as_ref().map_or(0, |s| s.fetched);
             if offset >= semantic_scholar::OFFSET_CAP {
                 let page = Page {
                     hard_cap: true,
@@ -726,13 +778,19 @@ impl CitationService {
                 call.note("semantic_scholar_offset_cap");
                 break;
             }
-            if !self.gate(call, S2).await {
-                break;
-            }
-            let limit = (need.saturating_sub(fetched).max(20) as u32)
+            let limit = (need.saturating_sub(cached).max(20) as u32)
                 .min(semantic_scholar::MAX_LIMIT)
                 .min(semantic_scholar::OFFSET_CAP - offset);
-            match s2.edges(&paper, direction, offset, limit).await {
+            match s2
+                .edges(
+                    &mut Transport { svc: self, call },
+                    &paper,
+                    direction,
+                    offset,
+                    limit,
+                )
+                .await
+            {
                 Ok(p) => {
                     call.ok(S2);
                     let hard_cap = p.next.is_some_and(|n| n >= semantic_scholar::OFFSET_CAP);
@@ -752,6 +810,7 @@ impl CitationService {
                             .await?,
                     );
                 }
+                Err(UpstreamError::Budget) => break,
                 Err(e) => {
                     call.fail(S2, e.reason());
                     return Ok(state.is_some_and(|s| s.pages > 0));
@@ -771,16 +830,21 @@ impl CitationService {
             .collect();
         let mut changed = false;
         for batch in missing.chunks(openalex::HYDRATE_BATCH) {
-            if !self.gate(call, OA).await {
-                call.note("metadata_incomplete");
-                break;
-            }
-            match self.inner.openalex.hydrate(batch).await {
+            match self
+                .inner
+                .openalex
+                .hydrate(&mut Transport { svc: self, call }, batch)
+                .await
+            {
                 Ok(records) => {
                     if !records.is_empty() {
                         self.db(move |s| s.observe(&records, OA)).await?;
                         changed = true;
                     }
+                }
+                Err(UpstreamError::Budget) => {
+                    call.note("metadata_incomplete");
+                    break;
                 }
                 Err(e) => {
                     call.fail(OA, e.reason());
@@ -791,6 +855,68 @@ impl CitationService {
         }
         Ok(changed)
     }
+}
+
+/// Sends one citation request under the call's budgets through the
+/// router's `send_once` (permits and existing cooldown, no retry): every
+/// attempt, including the single retry after 429/503, takes a shared rate
+/// token and spends the per-call and daily budgets.
+pub(crate) struct Transport<'a> {
+    svc: &'a CitationService,
+    call: &'a mut Call,
+}
+
+impl Transport<'_> {
+    pub(crate) async fn send(
+        &mut self,
+        source: &'static str,
+        component: &'static str,
+        request: reqwest::RequestBuilder,
+    ) -> Fetched<crate::request_router::RoutedResponse> {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match self.svc.gate(self.call, source).await {
+                Ok(true) => {}
+                Ok(false) => return Err(UpstreamError::Budget),
+                Err(e) => return Err(UpstreamError::Failed(e.to_string())),
+            }
+            let outbound = request
+                .try_clone()
+                .ok_or_else(|| UpstreamError::Failed("request is not cloneable".into()))?;
+            let response = crate::request_router::global_request_router()
+                .send_once(component, outbound)
+                .await
+                .map_err(|e| UpstreamError::Failed(e.to_string()))?;
+            let status = response.status();
+            let throttled = status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                || status == reqwest::StatusCode::SERVICE_UNAVAILABLE;
+            if throttled && attempt == 1 {
+                // `send_once` neither retries nor touches the shared origin
+                // cooldown, so honour the server's delay here; the retry
+                // pays for its own token and budget.
+                self.call.note(&format!("{source}_throttled_retry"));
+                let delay = crate::request_router::retry_delay(response.headers());
+                drop(response);
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+            return Ok(response);
+        }
+    }
+}
+
+fn unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
+
+/// The pre-normalizer form of the requested DOI, to retry a lookup the
+/// canonical form missed (a DOI that really ends in `.` or holds `%2F`).
+fn legacy_lookup(lookup: &ExtId, call: &Call) -> Option<ExtId> {
+    let legacy = call.legacy_doi.as_ref()?;
+    (lookup.scheme == Scheme::Doi && legacy.value != lookup.value).then(|| legacy.clone())
 }
 
 /// Percent-encode an id for a URL path, keeping the `:` and `/` that
@@ -836,6 +962,20 @@ pub fn parse_citation_id(raw: &str) -> Result<ExtId> {
             .or_else(|| ExtId::openalex(raw).filter(|_| !raw.contains('/')))
     };
     parsed.ok_or_else(|| unsupported(&format!("'{raw}' is not one")))
+}
+
+/// Legacy DOI form of a DOI request, as an unnormalized lookup key.
+fn legacy_doi_of(raw: &str, subject: &ExtId) -> Option<ExtId> {
+    if subject.scheme != Scheme::Doi {
+        return None;
+    }
+    let raw = raw.trim();
+    let raw = raw.strip_prefix("doi:").unwrap_or(raw);
+    let legacy = citegraph::ids::normalize_doi_legacy(raw)?;
+    (legacy != subject.value).then_some(ExtId {
+        scheme: Scheme::Doi,
+        value: legacy,
+    })
 }
 
 fn parse_url_id(raw: &str) -> Option<ExtId> {
@@ -1025,6 +1165,7 @@ fn build_result(
     // Merges and self-loops can shorten a page, so upstream resumability,
     // not page fullness, decides whether more may exist.
     let has_more = shown_end < total || more_upstream;
+    let hits_len = u32::try_from(hits.len()).unwrap_or(u32::MAX);
     CitationsResult {
         hit_id: subject_hit,
         direction,
@@ -1037,7 +1178,7 @@ fn build_result(
         offset,
         limit,
         has_more,
-        next_offset: has_more.then_some(offset + limit),
+        next_offset: has_more.then_some(offset + hits_len),
         truncated: !all_complete,
         hits,
         coverage: coverage

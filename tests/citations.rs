@@ -2,16 +2,17 @@
 //! Scholar (no live calls).
 
 use paperbridge::citations::{
-    CallBudget, CitationConfig, CitationDirection, CitationService, CitationsRequest, Rate,
+    CallBudget, CitationConfig, CitationDirection, CitationService, CitationsRequest, RateLimit,
 };
 use paperbridge::models::CountKind;
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-const FAST: Rate = Rate {
+const FAST: RateLimit = RateLimit {
     per_second: 1000.0,
     burst: 100,
+    daily: 10_000,
 };
 const S2_ID: &str = "00000000000000000000000000000000000000aa";
 
@@ -25,7 +26,7 @@ fn service(
     cfg.openalex_base = format!("{}/oa", server.uri());
     cfg.semantic_scholar_base = format!("{}/s2", server.uri());
     cfg.semantic_scholar_api_key = s2_key.then(|| "test-key".to_string());
-    cfg.rates = Some((FAST, FAST));
+    cfg.rates = (FAST, FAST);
     cfg.budget = budget;
     CitationService::new(cfg).unwrap()
 }
@@ -413,4 +414,192 @@ async fn arxiv_subject_reads_edges_across_versions() {
         assert_eq!(out.coverage.len(), 1);
         assert!(out.coverage[0].complete);
     }
+}
+
+/// A 429 then 200: the retry pays for its own token and per-call budget.
+#[tokio::test]
+async fn throttled_retry_consumes_budget() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    Mock::given(method("GET"))
+        .and(path("/oa/works/doi:10.5555/seed"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    mount_seed(&server, 1).await;
+    Mock::given(method("GET"))
+        .and(path("/oa/works"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"results": []})))
+        .mount(&server)
+        .await;
+    let svc = service(&server, &dir, false, CallBudget::default());
+    let out = svc
+        .get_citations(req("doi:10.5555/seed", CitationDirection::Refs, 10, 0))
+        .await
+        .unwrap();
+    assert_eq!(out.hits.len(), 2);
+    // 429 + retry + hydration.
+    assert_eq!(out.diagnostics.budget[0].used, 3);
+    assert!(
+        out.diagnostics
+            .notes
+            .contains(&"openalex_throttled_retry".to_string())
+    );
+}
+
+/// The daily budget lives in the store, so a second process (service)
+/// sees the first one's spend.
+#[tokio::test]
+async fn daily_budget_is_shared_across_processes() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    mount_seed(&server, 1).await;
+    Mock::given(method("GET"))
+        .and(path("/oa/works"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"results": []})))
+        .mount(&server)
+        .await;
+    let tight = RateLimit { daily: 2, ..FAST };
+    let mk = || {
+        let mut cfg = CitationConfig::new(dir.path().join("citegraph.sqlite"));
+        cfg.openalex_base = format!("{}/oa", server.uri());
+        cfg.rates = (tight, FAST);
+        CitationService::new(cfg).unwrap()
+    };
+    let first = mk()
+        .get_citations(req("doi:10.5555/seed", CitationDirection::Refs, 10, 0))
+        .await
+        .unwrap();
+    assert_eq!(first.hits.len(), 2);
+    let second = mk()
+        .get_citations(req("doi:10.5555/other", CitationDirection::Refs, 10, 0))
+        .await
+        .unwrap();
+    assert!(second.hits.is_empty());
+    assert!(
+        second
+            .diagnostics
+            .notes
+            .contains(&"openalex_daily_budget_exhausted".to_string())
+    );
+    assert!(
+        second.diagnostics.sources_failed.is_empty(),
+        "budget is not a failure"
+    );
+}
+
+/// An empty OpenAlex reference list is not final: Semantic Scholar is
+/// asked, and only its positive answer completes the list.
+#[tokio::test]
+async fn empty_openalex_refs_fall_back_to_semantic_scholar() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    Mock::given(method("GET"))
+        .and(path("/oa/works/doi:10.5555/seed"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(work(1, Some("10.5555/seed"))))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/s2/paper/DOI:10.5555/seed"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "paperId": S2_ID, "externalIds": {"DOI": "10.5555/seed"}
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/s2/paper/{S2_ID}/references")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "offset": 0,
+            "data": [{"citedPaper": {"paperId": "00000000000000000000000000000000000000dd",
+                                     "externalIds": {"DOI": "10.5555/r"}, "title": "R"}}]
+        })))
+        .mount(&server)
+        .await;
+    let svc = service(&server, &dir, true, CallBudget::default());
+    let out = svc
+        .get_citations(req("doi:10.5555/seed", CitationDirection::Refs, 10, 0))
+        .await
+        .unwrap();
+    assert!(
+        out.diagnostics
+            .notes
+            .contains(&"openalex_refs_empty".to_string())
+    );
+    assert_eq!(out.hits.len(), 1);
+    assert_eq!(out.coverage.len(), 1);
+    assert_eq!(out.coverage[0].source, "semantic_scholar");
+    assert!(out.coverage[0].complete);
+}
+
+/// A DOI the canonical form misses (it really ends in `.`) is retried in
+/// its legacy form.
+#[tokio::test]
+async fn legacy_doi_form_is_retried_on_not_found() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    Mock::given(method("GET"))
+        .and(path("/oa/works/doi:10.5555/seed"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    let mut w = seed();
+    w["doi"] = json!("https://doi.org/10.5555/seed.");
+    Mock::given(method("GET"))
+        .and(path("/oa/works/doi:10.5555/seed."))
+        .respond_with(ResponseTemplate::new(200).set_body_json(w))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/oa/works"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"results": []})))
+        .mount(&server)
+        .await;
+    let svc = service(&server, &dir, false, CallBudget::default());
+    let out = svc
+        .get_citations(req("doi:10.5555/seed.", CitationDirection::Refs, 10, 0))
+        .await
+        .unwrap();
+    assert_eq!(out.hits.len(), 2);
+}
+
+/// Rows that collapse into one neighbor (shared DOI) do not short a page:
+/// fetching continues until enough distinct neighbors are cached, and
+/// next_offset counts the hits actually returned.
+#[tokio::test]
+async fn pagination_counts_distinct_neighbors() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    mount_seed(&server, 1).await;
+    for (cursor, rows, next) in [
+        (
+            "*",
+            vec![
+                work(10, Some("10.5555/same")),
+                work(11, Some("10.5555/same")),
+            ],
+            Some("c2"),
+        ),
+        ("c2", vec![work(12, None), work(13, None)], Some("c3")),
+    ] {
+        Mock::given(method("GET"))
+            .and(path("/oa/works"))
+            .and(query_param("filter", "cites:W1"))
+            .and(query_param("cursor", cursor))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "meta": {"count": 9, "next_cursor": next}, "results": rows,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let svc = service(&server, &dir, false, CallBudget::default());
+    let out = svc
+        .get_citations(req("doi:10.5555/seed", CitationDirection::CitedBy, 2, 0))
+        .await
+        .unwrap();
+    assert_eq!(out.hits.len(), 2);
+    assert_eq!(out.next_offset, Some(2));
 }

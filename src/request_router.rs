@@ -415,7 +415,8 @@ fn request_origin(request: &RequestBuilder) -> Result<String> {
     ))
 }
 
-fn retry_delay(headers: &HeaderMap) -> Duration {
+/// Delay a 429/503 asks for (`Retry-After` / `Backoff`), bounded.
+pub(crate) fn retry_delay(headers: &HeaderMap) -> Duration {
     let retry_after = parse_seconds_header(headers, RETRY_AFTER);
     let backoff = parse_seconds_header(headers, BACKOFF);
     let delay_ms = retry_after

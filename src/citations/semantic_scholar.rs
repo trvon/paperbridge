@@ -2,8 +2,7 @@
 //! offset-paged references/citations with contexts, intents and
 //! `isInfluential`.
 
-use super::{Fetched, UpstreamError};
-use crate::external::send_with_retry;
+use super::{Fetched, Transport, UpstreamError};
 use citegraph::{Direction, ExtId, PageRow, Scheme, WorkMeta, WorkRecord};
 use reqwest::Client;
 use serde::Deserialize;
@@ -48,11 +47,15 @@ impl SemanticScholarCitations {
         }
     }
 
-    async fn get<T: serde::de::DeserializeOwned>(&self, url: &str) -> Fetched<T> {
+    async fn get<T: serde::de::DeserializeOwned>(
+        &self,
+        t: &mut Transport<'_>,
+        url: &str,
+    ) -> Fetched<T> {
         let request = self.client.get(url).header("x-api-key", &self.api_key);
-        let response = send_with_retry("citations_semantic_scholar", request)
-            .await
-            .map_err(|e| UpstreamError::Failed(e.to_string()))?;
+        let response = t
+            .send(SOURCE, "citations_semantic_scholar", request)
+            .await?;
         let status = response.status();
         if status == reqwest::StatusCode::NOT_FOUND {
             return Err(UpstreamError::NotFound);
@@ -66,20 +69,21 @@ impl SemanticScholarCitations {
             .map_err(|e| UpstreamError::Failed(format!("invalid Semantic Scholar JSON: {e}")))
     }
 
-    pub(crate) async fn paper(&self, id: &ExtId) -> Fetched<WorkRecord> {
+    pub(crate) async fn paper(&self, t: &mut Transport<'_>, id: &ExtId) -> Fetched<WorkRecord> {
         let key = lookup_key(id).ok_or(UpstreamError::NotFound)?;
         let url = format!(
             "{}/paper/{}?fields={PAPER_FIELDS}",
             self.base_url,
             super::path_segment(&key)
         );
-        let raw: RawPaper = self.get(&url).await?;
+        let raw: RawPaper = self.get(t, &url).await?;
         raw.into_record().ok_or(UpstreamError::NotFound)
     }
 
     /// One page of references (`Refs`) or citations (`CitedBy`).
     pub(crate) async fn edges(
         &self,
+        t: &mut Transport<'_>,
         paper: &ExtId,
         direction: Direction,
         offset: u32,
@@ -94,7 +98,7 @@ impl SemanticScholarCitations {
             "{}/paper/{}/{path}?fields={EDGE_FIELDS}&offset={offset}&limit={limit}",
             self.base_url, paper.value
         );
-        let raw: RawEdgeList = self.get(&url).await?;
+        let raw: RawEdgeList = self.get(t, &url).await?;
         let mut rows = Vec::new();
         let mut unresolved = Vec::new();
         for entry in raw.data {

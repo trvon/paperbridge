@@ -1,95 +1,29 @@
-//! Per-source request rate and per-call request budgets.
+//! Per-source request rate, daily budgets and per-call request budgets.
 //!
 //! The request router bounds concurrency and honours cooldowns; it does not
-//! bound rate. Citation expansion issues many requests to the same source,
-//! so each source also gets a token bucket shared by the whole process.
+//! bound rate. Rate tokens and the daily count live in the citation store
+//! (`Store::take_request`), so the CLI and a running MCP server share one
+//! limit per source. Every attempt, including a retry after 429/503, takes
+//! a token and spends the per-call budget.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::sync::{Arc, OnceLock};
-use std::time::Duration;
-use tokio::sync::Mutex;
-use tokio::time::Instant;
 
-/// Sustained requests per second and burst size for one source.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Rate {
-    pub per_second: f64,
-    pub burst: u32,
-}
+pub use citegraph::RateLimit;
 
-impl Rate {
-    /// OpenAlex polite-pool guidance: at most 10 requests per second.
-    pub const OPENALEX: Self = Self {
-        per_second: 10.0,
-        burst: 10,
-    };
-    /// Semantic Scholar's default per-key limit: one request per second.
-    pub const SEMANTIC_SCHOLAR: Self = Self {
-        per_second: 1.0,
-        burst: 1,
-    };
-}
-
-#[derive(Debug)]
-struct BucketState {
-    tokens: f64,
-    updated: Instant,
-}
-
-/// A token bucket. `acquire` waits until a token is available.
-#[derive(Debug, Clone)]
-pub struct TokenBucket {
-    rate: Rate,
-    state: Arc<Mutex<BucketState>>,
-}
-
-impl TokenBucket {
-    pub fn new(rate: Rate) -> Self {
-        Self {
-            rate: Rate {
-                per_second: rate.per_second.max(0.001),
-                burst: rate.burst.max(1),
-            },
-            state: Arc::new(Mutex::new(BucketState {
-                tokens: f64::from(rate.burst.max(1)),
-                updated: Instant::now(),
-            })),
-        }
-    }
-
-    pub async fn acquire(&self) {
-        loop {
-            let wait = {
-                let mut state = self.state.lock().await;
-                let now = Instant::now();
-                let elapsed = now.duration_since(state.updated).as_secs_f64();
-                state.tokens =
-                    (state.tokens + elapsed * self.rate.per_second).min(f64::from(self.rate.burst));
-                state.updated = now;
-                if state.tokens >= 1.0 {
-                    state.tokens -= 1.0;
-                    return;
-                }
-                Duration::from_secs_f64((1.0 - state.tokens) / self.rate.per_second)
-            };
-            tokio::time::sleep(wait).await;
-        }
-    }
-}
-
-/// Process-wide buckets for the two citation sources.
-pub(crate) fn default_buckets() -> (TokenBucket, TokenBucket) {
-    static BUCKETS: OnceLock<(TokenBucket, TokenBucket)> = OnceLock::new();
-    BUCKETS
-        .get_or_init(|| {
-            (
-                TokenBucket::new(Rate::OPENALEX),
-                TokenBucket::new(Rate::SEMANTIC_SCHOLAR),
-            )
-        })
-        .clone()
-}
+/// OpenAlex polite-pool guidance (10 requests/s) and a conservative daily
+/// cap; re-check against the configured key's quota.
+pub const OPENALEX_LIMIT: RateLimit = RateLimit {
+    per_second: 10.0,
+    burst: 10,
+    daily: 20_000,
+};
+/// Semantic Scholar's default per-key rate (1 request/s).
+pub const SEMANTIC_SCHOLAR_LIMIT: RateLimit = RateLimit {
+    per_second: 1.0,
+    burst: 1,
+    daily: 5_000,
+};
 
 /// Requests one citation call may send per source.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,22 +101,6 @@ impl BudgetLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test(start_paused = true)]
-    async fn bucket_spaces_requests_after_burst() {
-        let bucket = TokenBucket::new(Rate {
-            per_second: 2.0,
-            burst: 2,
-        });
-        let start = Instant::now();
-        for _ in 0..4 {
-            bucket.acquire().await;
-        }
-        let elapsed = start.elapsed();
-        // Two from the burst, then two at 2/s.
-        assert!(elapsed >= Duration::from_millis(990), "{elapsed:?}");
-        assert!(elapsed < Duration::from_millis(1100), "{elapsed:?}");
-    }
 
     #[test]
     fn ledger_refuses_past_limit_and_reports() {
