@@ -8,9 +8,11 @@
 # Env:
 #   TLA2TOOLS_JAR   use this jar instead of downloading (hash still checked)
 #   TLA_CACHE_DIR   download cache (default: $XDG_CACHE_HOME/paperbridge/tla)
-#   TLC_WORKERS     TLC -workers for the main config (default: 1); bug and
+#   TLC_WORKERS     TLC -workers for passing configs (default: 1); bug and
 #                   witness configs always use 1 so the first violation
 #                   reported is deterministic
+#   TLA_FULL        1 also runs the large configs (_Split, _Undo2); CI runs
+#                   them nightly
 set -euo pipefail
 
 TLA_VERSION="v1.7.4"
@@ -99,31 +101,47 @@ run_tlc() {
 
 # Design: must pass. The minimum distinct-state count catches a spec edit
 # that silently shrinks the explored space.
-run_tlc MergeFetchDecide.cfg pass:300000
-run_tlc MergeFetchDecide_Undo2.cfg pass:1500000
+run_tlc MergeFetchDecide.cfg pass:900000
+run_tlc MergeFetchDecide_Gen.cfg pass:1000000
+run_tlc MergeFetchDecide_GenNoGuard.cfg pass:650000
+run_tlc MergeFetchDecide_SplitVeto.cfg pass:120000
+if [[ "${TLA_FULL:-0}" == 1 ]]; then
+  run_tlc MergeFetchDecide_Split.cfg pass:4800000
+  run_tlc MergeFetchDecide_Undo2.cfg pass:6600000
+fi
 
 # Seeded bugs: each must be rejected on the named invariant.
-run_tlc MergeFetchDecide_BugStaleSnapshotRoot.cfg ReplayIdempotent
-run_tlc MergeFetchDecide_BugStaleSnapshotNoReadBack.cfg EdgeFaithful
-run_tlc MergeFetchDecide_BugStaleSnapshotOrphan.cfg NoOrphanWork
-run_tlc MergeFetchDecide_BugMergeOverwrite.cfg NoDecisionLost
-run_tlc MergeFetchDecide_BugMergeNoFind.cfg SingleParent
-run_tlc MergeFetchDecide_BugStoreRoot.cfg ReplayIdempotent
-run_tlc MergeFetchDecide_BugStoreRootUndo.cfg EdgeFaithful
-run_tlc MergeFetchDecide_BugSplitCommit.cfg CursorImpliesEdges
-run_tlc MergeFetchDecide_BugCursorRegress.cfg CursorMonotonic
-run_tlc MergeFetchDecide_BugCandUnconditional.cfg NoDecisionLost
-run_tlc MergeFetchDecide_BugDecideRootOnly.cfg UndoCarriesDecision
-run_tlc MergeFetchDecide_BugUndoRestoresLoser.cfg UndoCarriesDecision
-run_tlc MergeFetchDecide_BugUndoNotLifo.cfg NoDecisionLost
-run_tlc MergeFetchDecide_BugUndoInner.cfg EvidenceHolds
-run_tlc MergeFetchDecide_BugAttachRoot.cfg IDsFollowEvidence
-run_tlc MergeFetchDecide_BugVetoRoots.cfg NoSpuriousVeto
-run_tlc MergeFetchDecide_BugVetoIgnored.cfg VetoHolds
+while read -r cfg inv; do
+  run_tlc "MergeFetchDecide_Bug${cfg}.cfg" "$inv"
+done <<'BUGS'
+StaleSnapshotRoot EdgeFaithful
+StaleSnapshotNoReadBack EdgeFaithful
+StaleSnapshotOrphan NoOrphanWork
+MergeOverwrite NoDecisionLost
+MergeNoFind Forest
+StoreRoot CursorImpliesEdges
+StoreRootUndo EdgeFaithful
+SplitCommit CursorImpliesEdges
+CursorRegress CursorMonotonic
+CandUnconditional NoDecisionLost
+DecideRootOnly UndoCarriesDecision
+UndoRestoresLoser UndoCarriesDecision
+UndoNotLifo WinnerIsRoot
+UndoInner NoDecisionLost
+VetoRoots NoSpuriousVeto
+VetoIgnored VetoHolds
+AttachRoot EvidenceHolds
+RedoOldRow WinnerIsRoot
+StampOverwrite FreshIsNewest
+GenNoGuard SupersededNoWrite
+SplitBypass NoDecisionLost
+SplitMarkNd UndoCarriesDecision
+BUGS
 
 # Witnesses: the scenarios the invariants guard are reachable.
 for w in NeedsDecision ResolvedSelfLoop SeedCandidateConflict CursorFull \
-         Replay UndoCarried DependentMerge AttachNonRoot NoStateMerge; do
+         Replay UndoCarried DependentMerge AttachNonRoot NoStateMerge Redo \
+         Superseded StaleEdge Split SplitBlocked; do
   run_tlc "MergeFetchDecide_Witness${w}.cfg" "Never${w}"
 done
 
