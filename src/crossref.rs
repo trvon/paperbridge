@@ -1,7 +1,7 @@
 use crate::error::{Result, ZoteroMcpError};
 use crate::external::send_with_retry;
 use crate::hit_enrich::normalize_doi_str;
-use crate::models::{CrossrefWork, PaperHit, PaperSource};
+use crate::models::{CrossrefWork, PaperHit, PaperSource, WorkNotice};
 use reqwest::Client;
 use serde::Deserialize;
 use std::ops::Not;
@@ -33,15 +33,32 @@ impl CrossrefClient {
         }
     }
 
+    /// Resolve a DOI. Tries the canonical form first, then (on 404 only)
+    /// the legacy form, so a DOI that really ends in punctuation or holds
+    /// `%2F`, and `doi:` hit_ids minted before the shared normalizer, still
+    /// resolve.
     pub async fn resolve_doi(&self, doi: &str) -> Result<CrossrefWork> {
-        let Some(canonical) = normalize_doi_str(doi) else {
+        let forms = crate::hit_enrich::doi_lookup_forms(doi);
+        if forms.is_empty() || normalize_doi_str(doi).is_none() {
             return Err(ZoteroMcpError::InvalidInput(format!(
                 "'{}' does not look like a valid DOI",
                 doi.trim()
             )));
-        };
-        let trimmed = canonical.as_str();
+        }
+        let last = forms.len() - 1;
+        for (index, form) in forms.iter().enumerate() {
+            match self.resolve_form(form).await {
+                Err(ZoteroMcpError::Api { status: 404, .. }) if index < last => continue,
+                other => return other,
+            }
+        }
+        Err(ZoteroMcpError::Api {
+            status: 404,
+            message: format!("DOI '{}' not found in Crossref", doi.trim()),
+        })
+    }
 
+    async fn resolve_form(&self, trimmed: &str) -> Result<CrossrefWork> {
         let encoded = urlencoding::encode(trimmed);
         let url = format!("{}/works/{encoded}", self.base_url);
 
@@ -144,6 +161,11 @@ struct RawCrossrefMessage {
     #[serde(rename = "type")]
     work_type: Option<String>,
     resource: Option<RawResource>,
+    /// Notices that update this work. `update-to` sits on the notice itself.
+    /// Kept as raw JSON and read field by field: this struct is shared with
+    /// search, so a malformed entry must not fail the whole message.
+    #[serde(rename = "updated-by", default)]
+    updated_by: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -216,7 +238,88 @@ fn convert_message(doi_input: &str, msg: RawCrossrefMessage) -> CrossrefWork {
         publisher: msg.publisher,
         item_type: msg.work_type,
         oa_pdf_url: None,
+        notices: convert_notices(msg.updated_by),
+        openalex_only_retracted: None,
+        notices_checked: Vec::new(),
+        notices_failed: Vec::new(),
     }
+}
+
+/// Upper bound on notices per work; they bypass the `open_paper` metadata budget.
+const MAX_NOTICES: usize = 32;
+/// Upper bound on each notice string, in chars.
+const MAX_NOTICE_FIELD_CHARS: usize = 256;
+
+/// Raw `updated-by` entries inspected per work, before dedupe and the cap.
+const MAX_RAW_NOTICE_ENTRIES: usize = 1024;
+
+fn convert_notices(raw: Option<serde_json::Value>) -> Vec<WorkNotice> {
+    let entries = match raw {
+        Some(serde_json::Value::Array(entries)) => entries,
+        _ => return Vec::new(),
+    };
+    let mut notices: Vec<WorkNotice> = Vec::new();
+    for entry in entries.iter().take(MAX_RAW_NOTICE_ENTRIES) {
+        let Some(notice_type) = notice_str(entry, "type").map(|t| normalize_notice_type(&t)) else {
+            continue;
+        };
+        let notice = WorkNotice {
+            notice_type,
+            source: notice_str(entry, "source"),
+            notice_doi: notice_str(entry, "DOI").map(|d| normalize_doi_str(&d).unwrap_or(d)),
+            date: format_date(entry.get("updated")),
+        };
+        if notices.contains(&notice).not() {
+            notices.push(notice);
+        }
+    }
+    // Over the cap, move retraction-class first (stable) so truncation never
+    // drops a retraction; otherwise keep Crossref's order.
+    if notices.len() > MAX_NOTICES {
+        notices.sort_by_key(|n| is_retraction_class(&n.notice_type).not());
+        notices.truncate(MAX_NOTICES);
+    }
+    notices
+}
+
+/// Lowercase and use `_` separators: `Partial-Retraction` -> `partial_retraction`.
+pub(crate) fn normalize_notice_type(raw: &str) -> String {
+    raw.trim().to_ascii_lowercase().replace(['-', ' '], "_")
+}
+
+/// Notice types that mean the work's findings were withdrawn.
+pub(crate) fn is_retraction_class(notice_type: &str) -> bool {
+    matches!(
+        normalize_notice_type(notice_type).as_str(),
+        "retraction" | "partial_retraction" | "withdrawal" | "removal"
+    )
+}
+
+fn notice_str(entry: &serde_json::Value, key: &str) -> Option<String> {
+    let value = entry.get(key)?.as_str()?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(value.chars().take(MAX_NOTICE_FIELD_CHARS).collect())
+}
+
+fn format_date(updated: Option<&serde_json::Value>) -> Option<String> {
+    let parts = updated?
+        .get("date-parts")?
+        .as_array()?
+        .first()?
+        .as_array()?;
+    let mut iter = parts.iter().map_while(serde_json::Value::as_u64);
+    let year = iter.next().filter(|y| *y <= 9999)?;
+    let mut out = format!("{year:04}");
+    // Month then day; stop at the first out-of-range part.
+    for (part, max) in iter.zip([12, 31]) {
+        if (1..=max).contains(&part).not() {
+            break;
+        }
+        out.push_str(&format!("-{part:02}"));
+    }
+    Some(out)
 }
 
 fn convert_message_to_hit(msg: RawCrossrefMessage) -> PaperHit {
@@ -527,6 +630,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_doi_retries_legacy_form_on_not_found() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/works/10.5555%2Fseed"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/works/10.5555%2Fseed."))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "message": {"DOI": "10.5555/seed.", "title": ["Seed"]}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = CrossrefClient::new(Some(&server.uri()));
+        let work = client.resolve_doi("doi:10.5555/seed.").await.unwrap();
+        assert_eq!(work.title.as_deref(), Some("Seed"));
+        // A DOI with no legacy variant still reports not-found once.
+        let err = client.resolve_doi("10.5555/other").await.unwrap_err();
+        assert!(matches!(err, ZoteroMcpError::Api { status: 404, .. }));
+    }
+
+    #[tokio::test]
     async fn search_returns_api_error_on_non_success_status() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -623,6 +755,228 @@ mod tests {
             });
             assert_eq!(work.doi, "10.1234/abc", "{raw}");
         }
+    }
+
+    /// Shape copied from the live record for 10.1016/S0140-6736(97)11096-0.
+    fn retracted_work_json() -> serde_json::Value {
+        serde_json::json!({
+            "status": "ok",
+            "message": {
+                "DOI": "10.1016/s0140-6736(97)11096-0",
+                "title": ["Ileal-lymphoid-nodular hyperplasia"],
+                "updated-by": [
+                    {
+                        "DOI": "10.1016/s0140-6736(04)15715-2",
+                        "type": "correction",
+                        "label": "Correction",
+                        "source": "retraction-watch",
+                        "updated": {
+                            "date-parts": [[2004, 3, 6]],
+                            "date-time": "2004-03-06T00:00:00Z",
+                            "timestamp": 1078531200000_i64
+                        },
+                        "record-id": "17269"
+                    },
+                    {
+                        "DOI": "10.1016/S0140-6736(10)60175-4",
+                        "type": "retraction",
+                        "label": "Retraction",
+                        "source": "retraction-watch",
+                        "updated": {"date-parts": [[2010, 2, 6]]},
+                        "record-id": "4036"
+                    }
+                ]
+            }
+        })
+    }
+
+    #[test]
+    fn convert_message_maps_updated_by_to_notices() {
+        let raw: RawCrossrefResponse = serde_json::from_value(retracted_work_json()).unwrap();
+        let work = convert_message("10.1016/s0140-6736(97)11096-0", raw.message);
+        assert_eq!(
+            work.notices,
+            vec![
+                WorkNotice {
+                    notice_type: "correction".into(),
+                    source: Some("retraction-watch".into()),
+                    notice_doi: Some("10.1016/s0140-6736(04)15715-2".into()),
+                    date: Some("2004-03-06".into()),
+                },
+                WorkNotice {
+                    notice_type: "retraction".into(),
+                    source: Some("retraction-watch".into()),
+                    notice_doi: Some("10.1016/s0140-6736(10)60175-4".into()),
+                    date: Some("2010-02-06".into()),
+                },
+            ]
+        );
+        assert!(work.openalex_only_retracted.is_none());
+    }
+
+    #[test]
+    fn convert_notices_is_lenient_and_dedupes() {
+        let raw = serde_json::json!([
+            {"type": "Expression_of_Concern", "source": "publisher", "updated": {"date-parts": [[2021, 7]]}},
+            {"type": "expression_of_concern", "source": "publisher", "updated": {"date-parts": [[2021, 7]]}},
+            {"DOI": "10.1/no-type", "source": "publisher"},
+            {"type": "  "},
+            {"type": "retraction", "updated": {"date-parts": [[2019]]}},
+            {"type": "withdrawal", "updated": {"date-parts": [[]]}}
+        ]);
+        let notices = convert_notices(Some(raw));
+        assert_eq!(notices.len(), 3);
+        assert_eq!(notices[0].notice_type, "expression_of_concern");
+        assert_eq!(notices[0].date.as_deref(), Some("2021-07"));
+        assert!(notices[0].notice_doi.is_none());
+        assert_eq!(notices[1].notice_type, "retraction");
+        assert_eq!(notices[1].date.as_deref(), Some("2019"));
+        assert!(notices[1].source.is_none());
+        assert_eq!(notices[2].notice_type, "withdrawal");
+        assert!(notices[2].date.is_none());
+    }
+
+    #[test]
+    fn malformed_updated_by_never_fails_the_message() {
+        for updated_by in [
+            serde_json::json!("not-an-array"),
+            serde_json::json!({"type": "retraction"}),
+            serde_json::json!(42),
+            serde_json::json!([
+                "string-entry",
+                {"type": 7, "source": ["x"], "DOI": {"a": 1}},
+                {"type": "retraction", "updated": {"date-parts": "2020"}},
+                {"type": "correction", "updated": {"date-parts": [["2020", 1]]}},
+                {"type": "removal", "updated": {"date-parts": [[2020, 13, 40]]}}
+            ]),
+        ] {
+            let json = serde_json::json!({
+                "message": {"DOI": "10.1/odd", "title": ["Odd"], "updated-by": updated_by}
+            });
+            let raw: RawCrossrefResponse = serde_json::from_value(json).unwrap();
+            let work = convert_message("10.1/odd", raw.message);
+            assert_eq!(work.title.as_deref(), Some("Odd"));
+            for notice in &work.notices {
+                assert!(!notice.notice_type.is_empty());
+            }
+        }
+        let raw = serde_json::json!([
+            {"type": 7},
+            {"type": "retraction", "updated": {"date-parts": "2020"}},
+            {"type": "correction", "updated": {"date-parts": [["2020", 1]]}},
+            {"type": "removal", "updated": {"date-parts": [[2020, 13, 40]]}}
+        ]);
+        let notices = convert_notices(Some(raw));
+        let types: Vec<_> = notices.iter().map(|n| n.notice_type.as_str()).collect();
+        assert_eq!(types, ["retraction", "correction", "removal"]);
+        assert!(notices[0].date.is_none());
+        assert!(notices[1].date.is_none());
+        assert_eq!(notices[2].date.as_deref(), Some("2020"));
+    }
+
+    #[test]
+    fn search_survives_malformed_updated_by() {
+        let json = serde_json::json!({
+            "message": {"items": [
+                {"DOI": "10.1/a", "title": ["A"], "updated-by": "garbage"},
+                {"DOI": "10.1/b", "title": ["B"], "updated-by": [{"type": false}]}
+            ]}
+        });
+        let raw: RawCrossrefSearchResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(raw.message.items.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn notice_types_normalize_and_classify() {
+        assert_eq!(
+            normalize_notice_type(" Partial-Retraction "),
+            "partial_retraction"
+        );
+        assert_eq!(
+            normalize_notice_type("Expression of Concern"),
+            "expression_of_concern"
+        );
+        for t in ["retraction", "Partial-Retraction", "withdrawal", "REMOVAL"] {
+            assert!(is_retraction_class(t), "{t}");
+        }
+        for t in [
+            "correction",
+            "erratum",
+            "expression_of_concern",
+            "new_version",
+        ] {
+            assert!(!is_retraction_class(t), "{t}");
+        }
+    }
+
+    #[test]
+    fn notices_are_capped_in_count_and_length() {
+        let long = "x".repeat(10_000);
+        let entries: Vec<_> = (0..100)
+            .map(|i| serde_json::json!({"type": format!("correction{i}"), "source": long}))
+            .collect();
+        let notices = convert_notices(Some(serde_json::Value::Array(entries)));
+        assert_eq!(notices.len(), MAX_NOTICES);
+        assert!(
+            notices
+                .iter()
+                .all(|n| n.source.as_ref().unwrap().chars().count() == MAX_NOTICE_FIELD_CHARS)
+        );
+    }
+
+    #[test]
+    fn cap_keeps_retraction_listed_last() {
+        let mut entries: Vec<_> = (0..40)
+            .map(|i| serde_json::json!({"type": "correction", "DOI": format!("10.1/c{i}")}))
+            .collect();
+        entries.push(serde_json::json!({"type": "Retraction", "DOI": "10.1/r"}));
+        let notices = convert_notices(Some(serde_json::Value::Array(entries)));
+        assert_eq!(notices.len(), MAX_NOTICES);
+        assert_eq!(notices[0].notice_type, "retraction");
+        assert_eq!(notices[0].notice_doi.as_deref(), Some("10.1/r"));
+        // Remaining order is preserved.
+        assert_eq!(notices[1].notice_doi.as_deref(), Some("10.1/c0"));
+    }
+
+    #[test]
+    fn work_without_updated_by_omits_notices_on_the_wire() {
+        let raw: RawCrossrefResponse = serde_json::from_value(serde_json::json!({
+            "message": {"DOI": "10.1/clean", "updated-by": null}
+        }))
+        .unwrap();
+        let work = convert_message("10.1/clean", raw.message);
+        assert!(work.notices.is_empty());
+        let value = serde_json::to_value(&work).unwrap();
+        assert!(value.get("notices").is_none());
+        assert!(value.get("openalex_only_retracted").is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_doi_returns_notices_from_mocked_crossref() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/works/10\.1016"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(retracted_work_json()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = CrossrefClient::new(Some(&server.uri()));
+        let work = client
+            .resolve_doi("10.1016/S0140-6736(97)11096-0")
+            .await
+            .unwrap();
+        let value = serde_json::to_value(&work).unwrap();
+        assert_eq!(value["notices"][1]["type"], "retraction");
+        assert_eq!(value["notices"][1]["source"], "retraction-watch");
+        assert_eq!(
+            value["notices"][1]["notice_doi"],
+            "10.1016/s0140-6736(10)60175-4"
+        );
+        assert_eq!(value["notices"][1]["date"], "2010-02-06");
     }
 
     #[tokio::test]

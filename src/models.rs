@@ -330,6 +330,38 @@ pub struct CrossrefWork {
     pub item_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oa_pdf_url: Option<String>,
+    /// Retraction/correction notices from Crossref `updated-by`. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<WorkNotice>,
+    /// `true` only when OpenAlex marks the work retracted and Crossref has no
+    /// retraction notice; an unconfirmed secondary signal. Omitted otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openalex_only_retracted: Option<bool>,
+    /// Sources whose notice check succeeded for this response (`crossref`,
+    /// `openalex`). Present on `resolve_doi`/`open_paper`; an absent source was
+    /// skipped or failed, so empty `notices` is not proof of a clean record.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices_checked: Vec<String>,
+    /// Sources whose notice check failed or timed out. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices_failed: Vec<String>,
+}
+
+/// One editorial notice attached to a work (Crossref `updated-by` entry).
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
+pub struct WorkNotice {
+    /// Crossref update type as published, e.g. `retraction`, `correction`,
+    /// `expression_of_concern`.
+    #[serde(rename = "type")]
+    pub notice_type: String,
+    /// Who asserted the notice, e.g. `retraction-watch` or `publisher`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice_doi: Option<String>,
+    /// `YYYY`, `YYYY-MM` or `YYYY-MM-DD`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
 }
 
 #[derive(

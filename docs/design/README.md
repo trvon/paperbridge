@@ -9,3 +9,6 @@ reviewed against these documents.
   params, result envelopes, search quality, discover→read execution.
 - [llm-interface-tasks.md](llm-interface-tasks.md) — implementation backlog and
   acceptance checklist for the LLM interface audit fixes.
+- [citation-graph.md](citation-graph.md) — citation graph store, review
+  state, snowball ranking, YAMS projection, and TLA+ verification plan
+  (draft).

@@ -105,6 +105,45 @@ paperbridge papers resolve-doi --doi "10.1038/nature12373"
 
 When `unpaywall_email` is configured, the response includes `oa_pdf_url`.
 
+`resolve-doi` and `papers open --want metadata` (MCP `resolve_doi`,
+`open_paper`) add `notices: [{type, source, notice_doi, date}]` from Crossref
+`updated-by` when the work has retraction, correction, or
+expression-of-concern notices. `openalex_only_retracted: true` means OpenAlex
+marks the work retracted but Crossref has no retraction notice; treat it as
+unconfirmed. `notices_checked` lists the sources that returned a record
+(`crossref`, `openalex`); `notices_failed` lists checks that failed or timed
+out. OpenAlex is absent from both when it was skipped or has no record. Empty `notices` is only clean for the sources in `notices_checked`.
+Check them before citing a paper. `search_papers` hits do not carry notices.
+
+### Follow citations — references, cited-by, related
+
+```bash
+paperbridge papers refs doi:10.1038/nature12373 --json
+paperbridge papers cited-by arxiv:1706.03762 --limit 25 --json
+paperbridge papers cited-by arxiv:1706.03762 --offset 25 --json   # continues the stored cursor
+paperbridge papers refs doi:10.1038/nature12373 --include contexts --json
+paperbridge papers related doi:10.1038/nature12373 --json
+```
+
+MCP: `get_citations { hit_id, direction: "refs" | "cited_by" | "related",
+limit?, offset?, refresh?, include?: ["contexts"] }`.
+
+- `limit` defaults to 10, max 25. Input and output ids are `hit_id`s. Neighbors without a DOI or arXiv id
+  come back as `url:https://openalex.org/W…`; pass that to `get_citations`
+  to keep walking.
+- Lists are cached in `$XDG_DATA_HOME/paperbridge/citegraph.sqlite`.
+  References are fetched once; `--refresh` refetches. Cited-by pages are
+  fetched on demand and resume across calls.
+- Each call has a request budget per source, and each source a rate and
+  daily limit shared by every paperbridge process on the machine. When
+  `truncated` is true or `diagnostics.budget[].exhausted` is set, repeat
+  the call (or follow `next_offset`) to fetch more; a
+  `*_daily_budget_exhausted` note means wait until the next UTC day. `coverage` shows `fetched` vs
+  `total_reported` per source.
+- Contexts and intents need `semantic_scholar_api_key`. Semantic Scholar
+  cannot page cited-by past 10,000 (`coverage[].capped`).
+- `related` is OpenAlex's related-works list, not citations.
+
 ### Resolve optional institutional access
 
 Institutional access is disabled by default. Configure it through the existing
@@ -349,6 +388,7 @@ paperbridge config snippet --target opencode
 | `paperseed_corpus_root` | override corpus path |
 | `hf_token`, `semantic_scholar_api_key`, `core_api_key`, `ads_api_token`, `scholarapi_key` | gate external sources |
 | `ncbi_api_key` | optional PubMed rate-limit upgrade |
+| `openalex_api_key` | sent as `api_key` on OpenAlex requests; masked in config output |
 | `unpaywall_email` | enables OA-PDF enrichment |
 | `institution_access_mode` | institutional routing: `off` (default), `fallback`, `prefer` |
 | `institution_resolver_url` | OpenURL holdings resolver; masked in config output |

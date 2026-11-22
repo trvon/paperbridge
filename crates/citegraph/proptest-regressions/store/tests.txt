@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc c7e6aa85da13e6d023c9cae6b9a9adf20a52471b2c54d55a290a925711379d30 # shrinks to pages = [[WorkRecord { primary: ExtId { scheme: Openalex, value: "W1" }, ids: [ExtId { scheme: Openalex, value: "W1" }], meta: None }], [WorkRecord { primary: ExtId { scheme: Openalex, value: "W0" }, ids: [ExtId { scheme: Openalex, value: "W0" }], meta: None }], [WorkRecord { primary: ExtId { scheme: Openalex, value: "W2" }, ids: [ExtId { scheme: Openalex, value: "W2" }], meta: None }]], ops = [Snap(0), Snap(1), Commit(0, 0), Commit(1, 1)]
+cc b8f96dee78e4be17c011b9d23e67fd540c3144edad823463adff2814864ca43e # shrinks to pages = [[WorkRecord { primary: ExtId { scheme: Openalex, value: "W0" }, ids: [ExtId { scheme: Openalex, value: "W0" }, ExtId { scheme: SemanticScholar, value: "0000000000000000000000000000000000000001" }], meta: None }], [WorkRecord { primary: ExtId { scheme: Openalex, value: "W0" }, ids: [ExtId { scheme: Openalex, value: "W0" }], meta: None }], [WorkRecord { primary: ExtId { scheme: SemanticScholar, value: "0000000000000000000000000000000000000001" }, ids: [ExtId { scheme: SemanticScholar, value: "0000000000000000000000000000000000000001" }], meta: None }]], ops = [Snap(1), Observe(WorkRecord { primary: ExtId { scheme: SemanticScholar, value: "0000000000000000000000000000000000000001" }, ids: [ExtId { scheme: SemanticScholar, value: "0000000000000000000000000000000000000001" }], meta: None }), Commit(1), Snap(0), Commit(0), Snap(1), Commit(1)]

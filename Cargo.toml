@@ -8,6 +8,7 @@ description = "MCP and CLI bridge for paper discovery and PDF/full-text retrieva
 
 [dependencies]
 async-trait = "0.1"
+citegraph.workspace = true
 base64 = "0.23.1"
 clap.workspace = true
 clap_complete = "4"
@@ -35,6 +36,7 @@ criterion.workspace = true
 jsonschema = { version = "0.61", default-features = false }
 proptest.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 wiremock = "0.6"
 
 [[bench]]
@@ -45,7 +47,7 @@ harness = false
 workspace = true
 
 [workspace]
-members = [".", "crates/paperseed", "crates/paperseed-index"]
+members = [".", "crates/citegraph", "crates/paperseed", "crates/paperseed-index"]
 exclude = ["fuzz"]
 resolver = "3"
 
@@ -57,6 +59,7 @@ license = "MIT"
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+citegraph = { path = "crates/citegraph" }
 paperseed = { path = "crates/paperseed" }
 paperseed-index = { path = "crates/paperseed-index" }
 proptest = "1"

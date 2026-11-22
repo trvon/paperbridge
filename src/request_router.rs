@@ -183,6 +183,26 @@ impl RequestRouter {
         component: &'static str,
         request: RequestBuilder,
     ) -> Result<RoutedResponse> {
+        self.send_with_policy(component, request, true).await
+    }
+
+    /// One attempt under the same permits and existing cooldown as `send`,
+    /// but a 429/503 neither retries nor sets/extends the origin cooldown.
+    /// For best-effort side checks that must not slow other callers.
+    pub async fn send_once(
+        &self,
+        component: &'static str,
+        request: RequestBuilder,
+    ) -> Result<RoutedResponse> {
+        self.send_with_policy(component, request, false).await
+    }
+
+    async fn send_with_policy(
+        &self,
+        component: &'static str,
+        request: RequestBuilder,
+        retry_and_cooldown: bool,
+    ) -> Result<RoutedResponse> {
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         self.metrics.requests.fetch_add(1, Ordering::Relaxed);
         let origin = request_origin(&request)?;
@@ -246,11 +266,14 @@ impl RequestRouter {
                 }
             };
             let status = response.status();
-            if matches!(
+            let limited = matches!(
                 status,
                 StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
-            ) {
+            );
+            if limited {
                 self.metrics.rate_limited.fetch_add(1, Ordering::Relaxed);
+            }
+            if limited && retry_and_cooldown {
                 let delay = retry_delay(response.headers());
                 self.extend_cooldown(&origin_state, delay).await;
                 if attempt == 1 {
@@ -392,7 +415,8 @@ fn request_origin(request: &RequestBuilder) -> Result<String> {
     ))
 }
 
-fn retry_delay(headers: &HeaderMap) -> Duration {
+/// Delay a 429/503 asks for (`Retry-After` / `Backoff`), bounded.
+pub(crate) fn retry_delay(headers: &HeaderMap) -> Duration {
     let retry_after = parse_seconds_header(headers, RETRY_AFTER);
     let backoff = parse_seconds_header(headers, BACKOFF);
     let delay_ms = retry_after
@@ -414,6 +438,56 @@ mod tests {
     use super::*;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn send_once_waits_out_cooldown_and_never_sets_one() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/limited"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "1"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/ok"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let client = reqwest::Client::new();
+        let router = RequestRouter::new(2, 1);
+        let origin = request_origin(&client.get(server.uri())).unwrap();
+
+        // send_once hitting 429: one attempt, no cooldown.
+        let response = router
+            .send_once(
+                "side_check",
+                client.get(format!("{}/limited", server.uri())),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        drop(response);
+        let state = router.origin(&origin).await;
+        assert_eq!(router.cooldown_remaining(&state).await, Duration::ZERO);
+        let snapshot = router.snapshot();
+        assert_eq!(snapshot.attempts, 1);
+        assert_eq!(snapshot.retries, 0);
+        assert_eq!(snapshot.rate_limited, 1);
+
+        // A regular send sets the cooldown; send_once then waits it out.
+        router
+            .send("search", client.get(format!("{}/limited", server.uri())))
+            .await
+            .unwrap();
+        assert!(router.cooldown_remaining(&state).await > Duration::ZERO);
+        let started = Instant::now();
+        let response = router
+            .send_once("side_check", client.get(format!("{}/ok", server.uri())))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(started.elapsed() >= Duration::from_millis(500));
+        assert_eq!(router.snapshot().components.len(), 2);
+    }
 
     #[tokio::test]
     async fn router_retries_once_and_records_metrics() {

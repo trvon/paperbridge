@@ -1,4 +1,5 @@
 use clap::{CommandFactory, Parser};
+use paperbridge::citations::CitationDirection;
 use paperbridge::cli::{
     Cli, CollectionAction, Command, ConfigAction, ItemAction, LibraryAction, PaperAction,
     PapersAction, PaperseedAction, PaperseedCorpusAction, PaperseedExportFormat,
@@ -275,6 +276,18 @@ async fn async_main(cli: Cli) -> paperbridge::Result<()> {
                     output,
                 )
                 .await?
+            }
+            PapersAction::Refs { args, include } => {
+                handle_papers_citations(config, args, CitationDirection::Refs, &include, output)
+                    .await?
+            }
+            PapersAction::CitedBy { args, include } => {
+                handle_papers_citations(config, args, CitationDirection::CitedBy, &include, output)
+                    .await?
+            }
+            PapersAction::Related { args } => {
+                handle_papers_citations(config, args, CitationDirection::Related, &[], output)
+                    .await?
             }
             PapersAction::ResolveDoi { doi } => {
                 handle_papers_resolve_doi(config, doi, output).await?
@@ -1236,13 +1249,34 @@ fn normalize_papers_query(
     Ok(query)
 }
 
+async fn handle_papers_citations(
+    config: Config,
+    args: paperbridge::cli::CitationArgs,
+    direction: CitationDirection,
+    include: &[paperbridge::cli::CitationInclude],
+    output: OutputFormat,
+) -> paperbridge::Result<()> {
+    let service = build_service(config)?;
+    let result = service
+        .get_citations(paperbridge::citations::CitationsRequest {
+            id: args.id,
+            direction,
+            limit: args.limit,
+            offset: args.offset,
+            refresh: args.refresh,
+            include_contexts: include.contains(&paperbridge::cli::CitationInclude::Contexts),
+        })
+        .await?;
+    print_output(&result, output)
+}
+
 async fn handle_papers_resolve_doi(
     config: Config,
     doi: String,
     output: OutputFormat,
 ) -> paperbridge::Result<()> {
     let service = build_service(config)?;
-    let work = service.resolve_doi(&doi).await?;
+    let work = service.resolve_doi_with_notices(&doi).await?;
     print_output(&work, output)
 }
 
@@ -1713,8 +1747,11 @@ fn build_service(config: Config) -> paperbridge::Result<PaperbridgeService> {
         ncbi_api_key: config.ncbi_api_key.clone(),
         scholarapi_key: config.scholarapi_key.clone(),
         unpaywall_email: config.unpaywall_email.clone(),
+        openalex_api_key: config.openalex_api_key.clone(),
     };
     let unpaywall_email = config.unpaywall_email.clone();
+    let openalex_mailto = config.unpaywall_email.clone();
+    let openalex_api_key = config.openalex_api_key.clone();
     let institution_access_mode = config.institution_access_mode;
     let institution_access_url = config.institution_access_url.clone();
     let institution_resolver_url = config.institution_resolver_url.clone();
@@ -1733,16 +1770,27 @@ fn build_service(config: Config) -> paperbridge::Result<PaperbridgeService> {
         yams_enabled: config.paperseed_yams_enabled,
     };
     let paper_search = paperbridge::external::PaperSearch::with_keys_struct(keys);
+    let citations = {
+        let mut cfg = paperbridge::citations::CitationConfig::new(
+            paperbridge::citations::default_store_path(),
+        );
+        cfg.openalex_mailto = config.unpaywall_email.clone();
+        cfg.openalex_api_key = config.openalex_api_key.clone();
+        cfg.semantic_scholar_api_key = config.semantic_scholar_api_key.clone();
+        paperbridge::citations::CitationService::new(cfg)?
+    };
     let backend = build_backend(config)?;
     let service = PaperbridgeService::with_paper_search(backend, paper_search)
         .with_unpaywall(unpaywall_email)
+        .with_openalex(openalex_mailto, openalex_api_key)
         .with_institution_profile(
             institution_access_mode,
             institution_access_url,
             institution_resolver_url,
             institution_gateway_url,
         )?
-        .with_paper_config(paper_config);
+        .with_paper_config(paper_config)
+        .with_citations(citations);
     Ok(if paperseed_enabled {
         service.with_paperseed(paperseed_config)
     } else {
@@ -2124,10 +2172,11 @@ async fn handle_config_init(force: bool, interactive: bool) -> paperbridge::Resu
     Ok(())
 }
 
-const SENSITIVE_CONFIG_KEYS: [&str; 10] = [
+const SENSITIVE_CONFIG_KEYS: [&str; 11] = [
     "api_key",
     "hf_token",
     "semantic_scholar_api_key",
+    "openalex_api_key",
     "core_api_key",
     "ads_api_token",
     "ncbi_api_key",
@@ -2163,7 +2212,7 @@ fn handle_config_get(
     if let Some(key) = key {
         let value = cfg.get_value(key).ok_or_else(|| {
             paperbridge::ZoteroMcpError::InvalidInput(format!(
-                "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key, core_api_key, ads_api_token, ncbi_api_key, scholarapi_key, unpaywall_email, institution_access_mode, institution_access_url, institution_resolver_url, institution_gateway_url, grobid_url, browser_command, grobid_timeout_secs, grobid_auto_spawn, grobid_image, update_check_enabled, paperseed_enabled, paperseed_auto_download, paperseed_yams_enabled, paperseed_corpus_root"
+                "Unknown config key '{key}'. Valid keys: backend_mode, cloud_api_base, local_api_base, api_base, api_key, library_type, user_id, group_id, timeout_secs, log_level, hf_token, semantic_scholar_api_key, core_api_key, ads_api_token, ncbi_api_key, scholarapi_key, openalex_api_key, unpaywall_email, institution_access_mode, institution_access_url, institution_resolver_url, institution_gateway_url, grobid_url, browser_command, grobid_timeout_secs, grobid_auto_spawn, grobid_image, update_check_enabled, paperseed_enabled, paperseed_auto_download, paperseed_yams_enabled, paperseed_corpus_root"
             ))
         })?;
         if SENSITIVE_CONFIG_KEYS.contains(&key) && !show_secret {

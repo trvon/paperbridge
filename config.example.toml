@@ -6,6 +6,7 @@ user_id = 123456
 # group_id = 987654
 # api_key = "zotero-api-key"
 # scholarapi_key = "sch_xxxxxxxxx"
+# openalex_api_key = "openalex-api-key" # sent as api_key= on OpenAlex requests
 timeout_secs = 20
 log_level = "info"
 

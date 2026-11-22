@@ -153,7 +153,16 @@ fn canonical_subtree_help_lists_actions() {
         cmd.find_subcommand_mut("papers")
             .expect("papers subtree exists"),
     );
-    for action in ["search", "resolve-doi", "access", "structure", "query"] {
+    for action in [
+        "search",
+        "resolve-doi",
+        "access",
+        "structure",
+        "query",
+        "refs",
+        "cited-by",
+        "related",
+    ] {
         assert!(
             papers_help.contains(action),
             "papers --help missing action '{action}'\n{papers_help}"

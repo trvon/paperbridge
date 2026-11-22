@@ -159,6 +159,7 @@ pub struct PaperSearchKeys {
     pub ncbi_api_key: Option<String>,
     pub scholarapi_key: Option<String>,
     pub unpaywall_email: Option<String>,
+    pub openalex_api_key: Option<String>,
 }
 
 impl PaperSearch {
@@ -182,7 +183,8 @@ impl PaperSearch {
                 .s2_api_key
                 .map(|k| SemanticScholarClient::new(None, Some(k))),
             crossref: CrossrefClient::new(None),
-            openalex: OpenAlexClient::new(None, keys.unpaywall_email.clone()),
+            openalex: OpenAlexClient::new(None, keys.unpaywall_email.clone())
+                .with_api_key(keys.openalex_api_key),
             europe_pmc: EuropePmcClient::new(None),
             dblp: DblpClient::new(None),
             openreview: OpenReviewClient::new(None),
@@ -527,6 +529,15 @@ pub(crate) async fn send_with_retry(
     global_request_router().send(component, req).await
 }
 
+/// Single attempt through the router: shares permits and waits out an active
+/// cooldown, but never retries or sets a cooldown itself.
+pub(crate) async fn send_once(
+    component: &'static str,
+    req: reqwest::RequestBuilder,
+) -> Result<RoutedResponse> {
+    global_request_router().send_once(component, req).await
+}
+
 pub(crate) fn dedupe(hits: Vec<PaperHit>) -> Vec<PaperHit> {
     // Identity keys are normalized strings; computing them once per record
     // (and again only after a merge) keeps this from re-normalizing every
@@ -591,8 +602,10 @@ impl IdentityKeys {
     }
 
     fn compatible(&self, other: &Self) -> bool {
-        let conflict =
-            |a: &Option<String>, b: &Option<String>| matches!((a, b), (Some(a), Some(b)) if a != b);
+        // Strong-id veto shared with the citation store (`citegraph::ids`).
+        let conflict = |a: &Option<String>, b: &Option<String>| {
+            citegraph::ids::scheme_conflict(a.as_deref(), b.as_deref())
+        };
         if conflict(&self.doi, &other.doi)
             || conflict(&self.arxiv, &other.arxiv)
             || conflict(&self.pmid, &other.pmid)
