@@ -19,7 +19,8 @@
 (* Measured with TLC 2.19 (tla2tools v1.7.4), Java 25, M4 Max, 10 workers *)
 (*   MergeFetchDecide.cfg  903,600 distinct, depth 27, 14 s               *)
 (*   _Gen 1,029,960 / 31 / 16 s; _Split 4,854,312 / 30 / 94 s;            *)
-(*   _Undo2 6,663,624 / 30 / 99 s. All configs: README.md, "Results".    *)
+(*   _Undo2 6,663,624 / 30 / 98 s; _Rec3 2,159,976 / 28 / 36 s.          *)
+(*   All configs: README.md, "Results".                                   *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets, TLC
 
@@ -34,6 +35,10 @@ CONSTANTS
     MaxSplit,    \* version_split budget
     NGen,        \* fetch generations (1 = no refresh)
     VersionVeto, \* join refuses a class mixing arXiv IDs and DOIs
+    Records2,    \* two-ID records: sets {x, y}
+    Rec3,        \* TRUE adds the three-ID record Records3
+    VetoMode,    \* sticky-undo veto: "class" (design), "pair", "skiplog",
+                 \* "skippath"; see Vetoed and ObserveRecord
     Bug          \* seeded defect, "none" for the design
 
 Works   == 1..NW
@@ -50,10 +55,14 @@ PageEdges(g, p) ==
     ELSE IF p = 2 /\ g = 1 THEN {<<C, A>>} ELSE {}
 PageIDs(g, p) == UNION {{e[1], e[2]} : e \in PageEdges(g, p)}
 
-\* Records a fetch may return: IDs one source reports for one paper.
-\* {A, A2} then {A2, C} makes C the seed, so C -> A becomes a resolved
-\* self-loop. {B, C} joins an arXiv ID with a DOI (a version pair).
-Records == {{B, C}, {A2, C}, {A, A2}}
+\* Records2 (cfg): IDs one source reports for one paper. With
+\* {A, A2}, {A2, C}, {B, C}: {A, A2} then {A2, C} makes C the seed, so
+\* C -> A becomes a resolved self-loop; {B, C} joins an arXiv ID with a
+\* DOI (a version pair).
+\* Records3: three-ID records <<primary, x, y>>, joined in that order. With
+\* {B, C} first, <<A2, B, C>> logs only (A2, B): (A2, C) is already one
+\* class. Undoing (A2, B) and re-observing the record joins via (A2, C).
+Records3 == IF Rec3 THEN {<<A2, B, C>>} ELSE {}
 
 States  == {"seed", "candidate", "included", "excluded", "needs_decision"}
 NoState == "none"
@@ -71,6 +80,8 @@ VARIABLES
                \* ghost true evidence pair why
     root,      \* class root per work, derived from merges (cached)
     vetoed,    \* evidence pairs whose latest row was undone by a user
+    skipEv,    \* <<row id, pair>>: pair skipped (already one class) and
+               \* logged against that row ("skiplog"/"skippath" only)
     undone,    \* user-undone rows (for redo)
     edgeSeen,  \* edge_sources: <<citing base, cited base>> -> last_seen gen
     decision,  \* review_works.state per work row (one review)
@@ -89,15 +100,16 @@ VARIABLES
     rawEdges,  \* <<gen, raw pair>> committed
     evid,      \* <<ID, base>> each ID mapping came from
     known,     \* <<work, state>> decisions not superseded by a later Decide
-    everUndone,\* evidence pairs ever user-undone
+    everUndone,\* evidence pairs ever user-undone (incl. logged skips)
+    splitG,    \* evidence pairs of user-undone rows not redone
     post,      \* <<merge id, state>> decided on the class after that merge
     ok,        \* transition-check flags
     seen       \* reachability markers for witnesses
 
-store == <<idMap, nworks, merges, root, vetoed, undone, edgeSeen, decision,
+store == <<idMap, nworks, merges, root, vetoed, skipEv, undone, edgeSeen, decision,
            reviewLog, cursor, curGen, mseq, decidedAt>>
 local == <<pc, page, pgen, snapshot, budget>>
-ghost == <<rawEdges, evid, known, everUndone, post, ok, seen>>
+ghost == <<rawEdges, evid, known, everUndone, splitG, post, ok, seen>>
 vars  == <<store, local, ghost>>
 
 -----------------------------------------------------------------------------
@@ -127,6 +139,22 @@ RootGuard(m) == IsRoot(m.w) /\ ~\E m2 \in merges : m2.w = m.w /\ m2.id > m.id
 
 ClassIDs(r) == {i \in IDs : idMap[i] # NoWork /\ Find(idMap[i]) = r}
 Mixed(ids)  == ids \cap Arxiv # {} /\ ids \cap Doi # {}
+
+\* Sticky-undo veto for joining bases a and b under root map rt.
+\* "class": the join would reunite the two classes of any undone pair.
+\* Otherwise (PR #70): the pair itself was undone (or logged as a skip
+\* against an undone row).
+PairSplit(v, rt, a, b) ==
+    \E v1, v2 \in v : v1 # v2 /\ rt[v1] = rt[a] /\ rt[v2] = rt[b]
+VetoedIn(V, rt, a, b) ==
+    IF VetoMode = "class" THEN \E v \in V : PairSplit(v, rt, a, b)
+    ELSE {a, b} \in V
+Vetoed(a, b) == VetoedIn(vetoed, root, a, b)
+\* Logged skip pairs of row id i.
+Extras(i) == {e[2] : e \in {e2 \in skipEv : e2[1] = i}}
+\* Rows whose removal would separate the two works of pair q.
+PathRows(ms, q) ==
+    {m \in ms : LET rt == RootsOf(ms \ {m}) IN \E x, y \in q : rt[x] # rt[y]}
 
 \* Read path: resolve stored edges and drop resolved self-loops.
 edges     == DOMAIN edgeSeen
@@ -209,7 +237,7 @@ Init ==
     /\ rawEdges = {}
     /\ evid = {<<A, 1>>}
     /\ known = {<<1, "seed">>}
-    /\ everUndone = {} /\ post = {}
+    /\ everUndone = {} /\ splitG = {} /\ post = {} /\ skipEv = {}
     /\ ok = [replay |-> TRUE, cursor |-> TRUE, carry |-> TRUE,
              restore |-> TRUE, veto |-> TRUE, gen |-> TRUE]
     /\ seen = {}
@@ -218,7 +246,7 @@ Init ==
 Refresh ==
     /\ curGen < NGen
     /\ curGen' = curGen + 1
-    /\ UNCHANGED <<idMap, nworks, merges, root, vetoed, undone, edgeSeen, decision,
+    /\ UNCHANGED <<idMap, nworks, merges, root, vetoed, skipEv, undone, edgeSeen, decision,
                    reviewLog, cursor, mseq, decidedAt, local, ghost>>
 
 \* Read the latest generation and its cursor and pick a page; a worker may
@@ -265,7 +293,7 @@ CommitPage(p) ==
     /\ UNCHANGED <<pgen, budget>>
     /\ IF superseded /\ Bug # "gen_no_guard"
        THEN /\ seen' = seen \cup {"superseded"}
-            /\ UNCHANGED <<store, rawEdges, evid, known, everUndone, post, ok>>
+            /\ UNCHANGED <<store, rawEdges, evid, known, everUndone, splitG, post, ok>>
        ELSE
          \E f \in [new -> Works] :
          LET inserted == {i \in new : idMap[i] = NoWork}
@@ -315,8 +343,8 @@ CommitPage(p) ==
                      !.cursor = @ /\ cursor2 >= cursor[g],
                      !.gen = @ /\ (superseded => seen2 = edgeSeen /\ new = {})]
          /\ seen' = seen \cup (IF replay THEN {"replay"} ELSE {})
-         /\ UNCHANGED <<merges, root, vetoed, undone, reviewLog, curGen, mseq,
-                        decidedAt, known, everUndone, post>>
+         /\ UNCHANGED <<merges, root, vetoed, skipEv, undone, reviewLog, curGen, mseq,
+                        decidedAt, known, everUndone, splitG, post>>
 
 \* split_commit bug: cursor in one transaction ...
 CommitCursor(p) ==
@@ -324,7 +352,7 @@ CommitCursor(p) ==
     /\ pc[p] = "fetched"
     /\ cursor' = [cursor EXCEPT ![pgen[p]] = IF page[p] > @ THEN page[p] ELSE @]
     /\ pc' = [pc EXCEPT ![p] = "half"]
-    /\ UNCHANGED <<idMap, nworks, merges, root, vetoed, undone, edgeSeen, decision,
+    /\ UNCHANGED <<idMap, nworks, merges, root, vetoed, skipEv, undone, edgeSeen, decision,
                    reviewLog, curGen, mseq, decidedAt, page, pgen, snapshot,
                    budget, ghost>>
 
@@ -353,14 +381,14 @@ CommitEdges(p) ==
     /\ pc' = [pc EXCEPT ![p] = "idle"]
     /\ page' = [page EXCEPT ![p] = 0]
     /\ snapshot' = [snapshot EXCEPT ![p] = [i \in IDs |-> NoWork]]
-    /\ UNCHANGED <<merges, root, vetoed, undone, reviewLog, cursor, curGen, mseq,
-                   decidedAt, pgen, budget, known, everUndone, post, ok, seen>>
+    /\ UNCHANGED <<merges, root, vetoed, skipEv, undone, reviewLog, cursor, curGen, mseq,
+                   decidedAt, pgen, budget, known, everUndone, splitG, post, ok, seen>>
 
 \* observe, one transaction: a record reports two known IDs in different
 \* classes; join them with a row recording the evidence bases unless a
 \* veto applies (sticky user undo of this pair; mixed versions).
 Merge ==
-    \E r \in Records : \E x, y \in r :
+    \E r \in Records2 : \E x, y \in r :
         /\ x # y
         /\ idMap[x] # NoWork /\ idMap[y] # NoWork
         /\ LET bx == idMap[x]
@@ -375,18 +403,18 @@ Merge ==
                         ELSE NewRow(bx, by, ev)
            IN
            /\ IF Bug = "merge_no_find" THEN bx # by ELSE Find(bx) # Find(by)
-           /\ Bug = "veto_ignored" \/ ev \notin vetoed
+           /\ Bug = "veto_ignored" \/ ~Vetoed(bx, by)
            /\ ~(VersionVeto /\ Mixed(ClassIDs(Find(bx)) \cup ClassIDs(Find(by))))
            /\ AddRow(row)
            /\ seen' = seen \cup (IF ev # {row.w, row.l} THEN {"dependent_merge"} ELSE {})
-    /\ UNCHANGED <<idMap, nworks, vetoed, undone, edgeSeen, cursor, curGen,
-                   decidedAt, local, rawEdges, evid, known, everUndone, post, ok>>
+    /\ UNCHANGED <<idMap, nworks, vetoed, skipEv, undone, edgeSeen, cursor, curGen,
+                   decidedAt, local, rawEdges, evid, known, everUndone, splitG, post, ok>>
 
 \* observe: a record reports a known ID x with a new ID y. y gets its own
 \* base work, joined to x's base by a logged row (unless the version veto
 \* refuses the join; y keeps its own work then).
 Attach ==
-    \E r \in Records : \E x, y \in r :
+    \E r \in Records2 : \E x, y \in r :
         /\ x # y
         /\ idMap[x] # NoWork /\ idMap[y] = NoWork
         /\ nworks < NW
@@ -405,8 +433,8 @@ Attach ==
                 THEN UNCHANGED <<merges, root, mseq, decision, reviewLog, seen>>
                 ELSE /\ AddRow(row)
                      /\ seen' = seen \cup (IF IsRoot(bx) THEN {} ELSE {"attach_nonroot"})
-    /\ UNCHANGED <<vetoed, undone, edgeSeen, cursor, curGen, decidedAt, local,
-                   rawEdges, known, everUndone, post, ok>>
+    /\ UNCHANGED <<vetoed, skipEv, undone, edgeSeen, cursor, curGen, decidedAt, local,
+                   rawEdges, known, everUndone, splitG, post, ok>>
 
 \* undo_merge, one transaction: only the outermost row of a class (the
 \* latest active row in it). Sticky: the evidence pair is vetoed.
@@ -420,11 +448,14 @@ UndoMerge ==
         /\ root' = RootsOf(merges')
         /\ Restore(m)
         /\ vetoed' = vetoed \cup {IF Bug = "veto_roots" THEN {m.w, m.l} ELSE m.ev}
+                            \cup Extras(m.id)
         /\ undone' = undone \cup {m}
-        /\ everUndone' = everUndone \cup {m.ev}
+        /\ everUndone' = everUndone \cup {m.ev} \cup Extras(m.id)
+        /\ splitG' = splitG \cup {m.ev}
     /\ budget' = [budget EXCEPT !.undo = @ + 1]
     /\ UNCHANGED <<idMap, nworks, edgeSeen, reviewLog, cursor, curGen, mseq,
-                   decidedAt, pc, page, pgen, snapshot, rawEdges, evid, known>>
+                   decidedAt, pc, page, pgen, snapshot, rawEdges, evid, known,
+                   skipEv>>
 
 \* redo_merge: re-apply an undone row as a NEW row; this lifts the veto.
 Redo ==
@@ -447,22 +478,96 @@ Redo ==
                              THEN reviewLog \cup {<<row.id, row.w, row.pw>>,
                                                   <<row.id, row.l, row.pl>>}
                              ELSE reviewLog
-        /\ vetoed' = vetoed \ {m.ev}
+        /\ vetoed' = vetoed \ ({m.ev} \cup Extras(m.id))
         /\ undone' = undone \ {m}
+        \* an explicit redo may reunite classes; drop the pairs it reunites
+        /\ splitG' = {v \in splitG : \E v1, v2 \in v : root'[v1] # root'[v2]}
         /\ seen' = seen \cup {"redo"}
     /\ UNCHANGED <<idMap, nworks, edgeSeen, cursor, curGen, decidedAt, local,
-                   rawEdges, evid, known, everUndone, post, ok>>
+                   rawEdges, evid, known, everUndone, post, ok, skipEv>>
+
+\* One join of observe's loop, over an in-transaction state st.
+JoinStep(st, a, b) ==
+    LET ra == st.rt[a]
+        rb == st.rt[b]
+        w  == IF ra < rb THEN ra ELSE rb
+        l  == IF ra < rb THEN rb ELSE ra
+        row == [id |-> st.seq + 1, w |-> w, l |-> l, ev |-> {a, b},
+                pw |-> st.dec[w], pl |-> st.dec[l], why |-> {a, b}]
+        cst == Combine(row.pw, row.pl)
+        ms2 == st.ms \cup {row}
+    IN
+    IF a = b THEN st
+    ELSE IF ra = rb THEN [st EXCEPT !.skips = @ \cup {{a, b}}]
+    ELSE IF VetoedIn(vetoed, st.rt, a, b) THEN [st EXCEPT !.vetoHit = TRUE]
+    ELSE IF VersionVeto /\ Mixed({i \in IDs : idMap[i] # NoWork /\ st.rt[idMap[i]] \in {ra, rb}})
+      THEN st
+    ELSE [st EXCEPT !.ms = ms2, !.rt = RootsOf(ms2),
+                    !.dec = [st.dec EXCEPT ![w] = cst],
+                    !.log = IF cst = "needs_decision" /\ row.pw # row.pl
+                              THEN @ \cup {<<row.id, w, row.pw>>, <<row.id, l, row.pl>>}
+                              ELSE @,
+                    !.seq = row.id, !.made = @ \cup {row.id}]
+
+\* observe of a three-ID record <<p, x, y>> (all IDs known), one
+\* transaction: join the primary's base to each other base in order,
+\* skipping pairs already in one class and vetoed pairs. Under "skiplog"
+\* a skipped pair is logged against the rows this record created; under
+\* "skippath" against every active row on the path joining it.
+ObserveRecord ==
+    \E r \in Records3 :
+        /\ \A i \in {r[1], r[2], r[3]} : idMap[i] # NoWork
+        /\ LET a  == idMap[r[1]]
+               st0 == [ms |-> merges, rt |-> root, dec |-> decision, log |-> reviewLog,
+                       seq |-> mseq, made |-> {}, skips |-> {}, vetoHit |-> FALSE]
+               st == JoinStep(JoinStep(st0, a, idMap[r[2]]), a, idMap[r[3]])
+               logged ==
+                   CASE VetoMode = "skiplog" ->
+                          {<<i, q>> : i \in st.made, q \in st.skips}
+                     [] VetoMode = "skippath" ->
+                          UNION {{<<m.id, q>> : m \in PathRows(st.ms, q)} : q \in st.skips}
+                     [] OTHER -> {}
+           IN
+           /\ \/ st.made # {}
+              \/ ~(logged \subseteq skipEv)
+              \/ st.vetoHit /\ "rec3_veto" \notin seen
+           /\ merges' = st.ms
+           /\ root' = st.rt
+           /\ decision' = st.dec
+           /\ reviewLog' = st.log
+           /\ mseq' = st.seq
+           /\ skipEv' = skipEv \cup logged
+           /\ seen' = seen \cup (IF st.vetoHit THEN {"rec3_veto"} ELSE {})
+                           \cup (IF st.made # {} /\ st.skips # {} THEN {"rec3_skip"} ELSE {})
+    /\ UNCHANGED <<idMap, nworks, vetoed, undone, edgeSeen, cursor, curGen,
+                   decidedAt, local, rawEdges, evid, known, everUndone, splitG,
+                   post, ok>>
+
+\* "skippath": a two-ID record whose IDs are already one class logs the
+\* pair against the rows joining them.
+SkipSame ==
+    /\ VetoMode = "skippath"
+    /\ \E r \in Records2 : \E x, y \in r :
+        /\ x # y
+        /\ idMap[x] # NoWork /\ idMap[y] # NoWork
+        /\ Find(idMap[x]) = Find(idMap[y])
+        /\ LET q == {idMap[x], idMap[y]}
+               logged == {<<m.id, q>> : m \in PathRows(merges, q)}
+           IN /\ ~(logged \subseteq skipEv)
+              /\ skipEv' = skipEv \cup logged
+    /\ UNCHANGED <<idMap, nworks, merges, root, vetoed, undone, edgeSeen, decision,
+                   reviewLog, cursor, curGen, mseq, decidedAt, local, ghost>>
 
 \* A record whose evidence pair is vetoed is skipped; the check is on the
 \* evidence base pair, never on roots.
 SkipVetoed ==
-    \E r \in Records : \E x, y \in r :
+    \E r \in Records2 : \E x, y \in r :
         /\ x # y
         /\ idMap[x] # NoWork /\ idMap[y] # NoWork
         /\ Find(idMap[x]) # Find(idMap[y])
-        /\ {idMap[x], idMap[y]} \in vetoed
-        /\ ok' = [ok EXCEPT !.veto = @ /\ {idMap[x], idMap[y]} \in everUndone]
-        /\ UNCHANGED <<store, local, rawEdges, evid, known, everUndone, post, seen>>
+        /\ Vetoed(idMap[x], idMap[y])
+        /\ ok' = [ok EXCEPT !.veto = @ /\ VetoedIn(everUndone, root, idMap[x], idMap[y])]
+        /\ UNCHANGED <<store, local, rawEdges, evid, known, everUndone, splitG, post, seen>>
 
 \* version_split: a folded record shows the class holds both versions
 \* (arXiv ID B, DOI C) and an active row joins their bases directly.
@@ -491,9 +596,9 @@ VersionSplit ==
                      ELSE UNCHANGED <<decision, reviewLog>>
                 /\ seen' = seen \cup {"split_blocked"}
                 /\ UNCHANGED <<merges, root, post, ok>>
-    /\ UNCHANGED <<idMap, nworks, vetoed, undone, edgeSeen, cursor, curGen, mseq,
+    /\ UNCHANGED <<idMap, nworks, vetoed, skipEv, undone, edgeSeen, cursor, curGen, mseq,
                    decidedAt, pc, page, pgen, snapshot, rawEdges, evid, known,
-                   everUndone>>
+                   everUndone, splitG>>
 
 \* review decide on a root row: writes every row in its class and stamps
 \* decided_seq. Re-deciding included/excluded is left out (bound).
@@ -509,8 +614,8 @@ Decide ==
         /\ decidedAt' = [v \in Works |-> IF v \in cls THEN mseq ELSE decidedAt[v]]
         /\ post' = {e \in post : e[1] \notin mids} \cup {<<i, s>> : i \in mids}
         /\ known' = {k \in known : Find(k[1]) # w} \cup {<<v, s>> : v \in cls}
-        /\ UNCHANGED <<idMap, nworks, merges, root, vetoed, undone, edgeSeen, reviewLog,
-                       cursor, curGen, mseq, local, rawEdges, evid, everUndone,
+        /\ UNCHANGED <<idMap, nworks, merges, root, vetoed, skipEv, undone, edgeSeen, reviewLog,
+                       cursor, curGen, mseq, local, rawEdges, evid, everUndone, splitG,
                        ok, seen>>
 
 Crash(p) ==
@@ -532,6 +637,7 @@ Next ==
                           \/ CommitCursor(p) \/ CommitEdges(p)
                           \/ Crash(p) \/ Restart(p)
     \/ Merge \/ Attach \/ UndoMerge \/ Redo \/ SkipVetoed \/ VersionSplit
+    \/ ObserveRecord \/ SkipSame
     \/ Decide \/ Refresh
 
 Spec == Init /\ [][Next]_vars
@@ -624,6 +730,9 @@ SupersededNoWrite   == ok.gen
 VetoHolds      == \A m \in merges : m.ev \notin vetoed
 NoSpuriousVeto == vetoed \subseteq everUndone /\ ok.veto
 
+\* The two classes a user undo split are never reunited except by Redo.
+NoReunionWithoutRedo == \A v \in splitG : \E v1, v2 \in v : root[v1] # root[v2]
+
 -----------------------------------------------------------------------------
 (* Witnesses: each must be violated, showing the scenario is reachable. *)
 
@@ -647,4 +756,6 @@ NeverStaleEdge      == \A e \in edges : edgeSeen[e] >= NewestComplete
 NeverSplit          == budget.split = 0
 NeverSplitBlocked   == "split_blocked" \notin seen
 NeverInnerRemoved   == "inner_removed" \notin seen
+NeverRec3Veto       == "rec3_veto" \notin seen
+NeverRec3Skip       == "rec3_skip" \notin seen
 =============================================================================

@@ -11,8 +11,8 @@
 #   TLC_WORKERS     TLC -workers for passing configs (default: 1); bug and
 #                   witness configs always use 1 so the first violation
 #                   reported is deterministic
-#   TLA_FULL        1 also runs the large configs (_Split, _Undo2); CI runs
-#                   them nightly
+#   TLA_FULL        1 also runs the large configs (_Split, _Undo2,
+#                   _PairVeto2); CI runs them nightly
 set -euo pipefail
 
 TLA_VERSION="v1.7.4"
@@ -105,9 +105,11 @@ run_tlc MergeFetchDecide.cfg pass:900000
 run_tlc MergeFetchDecide_Gen.cfg pass:1000000
 run_tlc MergeFetchDecide_GenNoGuard.cfg pass:650000
 run_tlc MergeFetchDecide_SplitVeto.cfg pass:120000
+run_tlc MergeFetchDecide_Rec3.cfg pass:2100000
 if [[ "${TLA_FULL:-0}" == 1 ]]; then
   run_tlc MergeFetchDecide_Split.cfg pass:4800000
   run_tlc MergeFetchDecide_Undo2.cfg pass:6600000
+  run_tlc MergeFetchDecide_PairVeto2.cfg pass:900000
 fi
 
 # Seeded bugs: each must be rejected on the named invariant.
@@ -136,14 +138,18 @@ StampOverwrite FreshIsNewest
 GenNoGuard SupersededNoWrite
 SplitBypass NoDecisionLost
 SplitMarkNd UndoCarriesDecision
+Rec3PairVeto NoReunionWithoutRedo
+Rec3SkipLog NoReunionWithoutRedo
+Rec3SkipPath NoReunionWithoutRedo
 BUGS
 
 # Witnesses: the scenarios the invariants guard are reachable.
 for w in NeedsDecision ResolvedSelfLoop SeedCandidateConflict CursorFull \
          Replay UndoCarried DependentMerge AttachNonRoot NoStateMerge Redo \
-         Superseded StaleEdge Split SplitBlocked; do
+         Superseded StaleEdge Split SplitBlocked Rec3Veto Rec3Skip; do
   run_tlc "MergeFetchDecide_Witness${w}.cfg" "Never${w}"
 done
+run_tlc MergeFetchDecide_WitnessRec3Redo.cfg NeverRedo
 
 if [[ $failures -ne 0 ]]; then
   echo "run.sh: $failures check(s) failed" >&2
