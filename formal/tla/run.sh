@@ -58,50 +58,74 @@ trap 'rm -rf "$workdir"' EXIT
 
 failures=0
 
-# run_tlc <cfg> <expected invariant or "">
+# run_tlc <cfg> <expected invariant | "pass:<min distinct states>">
+# TLC exits 0 when no error is found and 12 on a safety violation.
 run_tlc() {
-  local cfg="$1" expect="$2" log rc=0 start end workers=1
-  [[ -z "$expect" ]] && workers="${TLC_WORKERS:-1}"
+  local cfg="$1" expect="$2" log rc=0 start end workers=1 min=0
+  if [[ "$expect" == pass:* ]]; then
+    min="${expect#pass:}"
+    expect=""
+    workers="${TLC_WORKERS:-1}"
+  fi
   log="$workdir/${cfg%.cfg}.log"
   start=$(date +%s)
   (cd "$here" && java -XX:+UseParallelGC -cp "$jar" tlc2.TLC \
       -workers "$workers" -metadir "$workdir/meta-${cfg%.cfg}" \
       -config "$cfg" "$spec") >"$log" 2>&1 || rc=$?
   end=$(date +%s)
-  local stats
+  local stats depth distinct
   stats="$(grep -E 'distinct states found' "$log" | tail -1 || true)"
-  local depth
   depth="$(grep -E 'depth of the complete state graph' "$log" | tail -1 || true)"
+  distinct="$(sed -nE 's/.* ([0-9]+) distinct states found.*/\1/p' "$log" | tail -1)"
 
   if [[ -z "$expect" ]]; then
-    if [[ $rc -eq 0 ]] && grep -q 'Model checking completed. No error has been found.' "$log"; then
+    if [[ $rc -eq 0 ]] \
+        && grep -q 'Model checking completed. No error has been found.' "$log" \
+        && [[ "${distinct:-0}" -ge "$min" ]]; then
       echo "PASS  $cfg: no error ($stats; $depth; $((end - start)) s)"
       return
     fi
+    echo "FAIL  $cfg: exit $rc, distinct ${distinct:-?} (min $min), expected no error" >&2
   else
-    if [[ $rc -ne 0 ]] && grep -qE "^Error: Invariant ${expect} is violated\.$" "$log"; then
-      echo "PASS  $cfg: rejected on $expect as expected ($stats; $((end - start)) s)"
+    if [[ $rc -eq 12 ]] && grep -qE "^Error: Invariant ${expect} is violated\.$" "$log"; then
+      echo "PASS  $cfg: rejected on $expect as expected ($stats; $depth; $((end - start)) s)"
       return
     fi
+    echo "FAIL  $cfg: exit $rc, expected violation of $expect" >&2
   fi
-  echo "FAIL  $cfg: exit $rc, expected ${expect:-no error}" >&2
   tail -40 "$log" >&2
   failures=$((failures + 1))
 }
 
-run_tlc MergeFetchDecide.cfg ""
-# Seeded bugs: each must be rejected.
-run_tlc MergeFetchDecide_BugStaleSnapshot.cfg EdgeFaithful
+# Design: must pass. The minimum distinct-state count catches a spec edit
+# that silently shrinks the explored space.
+run_tlc MergeFetchDecide.cfg pass:300000
+run_tlc MergeFetchDecide_Undo2.cfg pass:1500000
+
+# Seeded bugs: each must be rejected on the named invariant.
+run_tlc MergeFetchDecide_BugStaleSnapshotRoot.cfg ReplayIdempotent
+run_tlc MergeFetchDecide_BugStaleSnapshotNoReadBack.cfg EdgeFaithful
+run_tlc MergeFetchDecide_BugStaleSnapshotOrphan.cfg NoOrphanWork
 run_tlc MergeFetchDecide_BugMergeOverwrite.cfg NoDecisionLost
+run_tlc MergeFetchDecide_BugMergeNoFind.cfg SingleParent
 run_tlc MergeFetchDecide_BugStoreRoot.cfg ReplayIdempotent
 run_tlc MergeFetchDecide_BugStoreRootUndo.cfg EdgeFaithful
 run_tlc MergeFetchDecide_BugSplitCommit.cfg CursorImpliesEdges
+run_tlc MergeFetchDecide_BugCursorRegress.cfg CursorMonotonic
+run_tlc MergeFetchDecide_BugCandUnconditional.cfg NoDecisionLost
+run_tlc MergeFetchDecide_BugDecideRootOnly.cfg UndoCarriesDecision
 run_tlc MergeFetchDecide_BugUndoRestoresLoser.cfg UndoCarriesDecision
 run_tlc MergeFetchDecide_BugUndoNotLifo.cfg NoDecisionLost
+run_tlc MergeFetchDecide_BugUndoInner.cfg EvidenceHolds
+run_tlc MergeFetchDecide_BugAttachRoot.cfg IDsFollowEvidence
+run_tlc MergeFetchDecide_BugVetoRoots.cfg NoSpuriousVeto
+run_tlc MergeFetchDecide_BugVetoIgnored.cfg VetoHolds
+
 # Witnesses: the scenarios the invariants guard are reachable.
-run_tlc MergeFetchDecide_WitnessNeedsDecision.cfg NeverNeedsDecision
-run_tlc MergeFetchDecide_WitnessSelfLoop.cfg NeverResolvedSelfLoop
-run_tlc MergeFetchDecide_WitnessSeedCandidate.cfg NeverSeedCandidateConflict
+for w in NeedsDecision ResolvedSelfLoop SeedCandidateConflict CursorFull \
+         Replay UndoCarried DependentMerge AttachNonRoot NoStateMerge; do
+  run_tlc "MergeFetchDecide_Witness${w}.cfg" "Never${w}"
+done
 
 if [[ $failures -ne 0 ]]; then
   echo "run.sh: $failures check(s) failed" >&2
