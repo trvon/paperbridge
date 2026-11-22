@@ -1048,16 +1048,28 @@ mod tests {
 
     /// A long-lived process that holds `profile` the way Chrome does: the
     /// profile and port are on its command line, and the lock names it.
+    ///
+    /// Returns only once the shell has run its first command. `spawn` can
+    /// return while the kernel is still finishing `execve`, and until then
+    /// `/proc/<pid>/cmdline` reads empty, so `endpoint_owner` would refuse it.
     #[cfg(unix)]
     fn hold_profile(profile: &Path, port: u16) -> std::process::Child {
-        let child = std::process::Command::new("sh")
+        use std::io::BufRead;
+
+        let mut child = std::process::Command::new("sh")
             .arg("-c")
-            .arg("while :; do sleep 1; done")
+            .arg("echo ready; while :; do sleep 1; done")
             .arg("fixture-chrome")
             .arg(format!("--user-data-dir={}", profile.display()))
             .arg(format!("--remote-debugging-port={port}"))
+            .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap();
+        let mut ready = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(ready, "ready\n");
         std::os::unix::fs::symlink(
             format!("fixturehost-{}", child.id()),
             profile.join("SingletonLock"),
