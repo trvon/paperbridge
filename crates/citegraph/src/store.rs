@@ -135,6 +135,9 @@ pub struct FetchState {
     pub complete: bool,
     pub truncated: bool,
     pub started_at: String,
+    /// Store sequence number when the generation began; orders generations
+    /// across processes and stamps the rows it sees.
+    pub started_seq: i64,
     pub finished_at: Option<String>,
 }
 
@@ -151,8 +154,10 @@ pub struct CommitOutcome {
     /// The page had already been committed (stale cursor read or retry);
     /// edges were upserted but the cursor did not move.
     pub replay: bool,
-    /// Ids withheld because they contradicted a strong id already held by
-    /// the work, or merges vetoed by the strong-id rule.
+    /// The generation is finished, or a newer generation of the same fetch
+    /// already completed: the commit wrote nothing.
+    pub superseded: bool,
+    /// Merges vetoed by the strong-id, version or undo rules.
     pub identity_conflicts: u32,
 }
 
@@ -207,6 +212,27 @@ pub struct MergeInfo {
     pub seq: i64,
     pub undone_at: Option<String>,
     pub undone_seq: Option<i64>,
+    /// `user` or `version_split`.
+    pub undo_reason: Option<String>,
+}
+
+/// Token bucket settings for one source.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RateLimit {
+    pub per_second: f64,
+    pub burst: u32,
+    /// Requests allowed per UTC day across all processes.
+    pub daily: u32,
+}
+
+/// Result of [`Store::take_request`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateGrant {
+    Granted,
+    /// No token yet; retry after this many milliseconds.
+    Wait(u64),
+    /// The source's daily budget is spent.
+    DailyExhausted,
 }
 
 pub struct Store {
@@ -260,7 +286,7 @@ impl Store {
     }
 
     /// Record works (for example hydrated metadata) in one transaction.
-    /// Returns the number of identity conflicts.
+    /// Returns the number of vetoed merges.
     pub fn observe(&mut self, records: &[WorkRecord], source: &str) -> Result<u32> {
         let tx = self.write()?;
         let mut w = Writer::new(&tx)?;
@@ -305,12 +331,11 @@ impl Store {
             Some(state) if !refresh => state,
             other => {
                 let generation = other.map_or(1, |s| s.generation + 1);
-                let seq = w.bump_seq()?;
-                let now = now_rfc3339();
+                let seq = bump_seq(&tx)?;
                 tx.execute(
                     "INSERT INTO fetch_log(work, direction, source, generation, started_at, started_seq)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![base, direction.as_str(), source, generation, now, seq],
+                    params![base, direction.as_str(), source, generation, now_rfc3339(), seq],
                 )?;
                 latest_generation(&tx, base, &key)?.ok_or_else(|| no_fetch(&key, generation))?
             }
@@ -322,15 +347,21 @@ impl Store {
     /// Commit one fetched page and its cursor atomically.
     ///
     /// This is `CommitPage` in `formal/tla/MergeFetchDecide.tla`: one
-    /// `BEGIN IMMEDIATE` transaction that (1) re-resolves the subject and
-    /// every page id through `work_ids` *inside* the transaction, minting
-    /// works for unknown ids, because a merge, undo or another writer may
-    /// have landed while the page was in flight; (2) stores edges by base
-    /// work (the `work_ids` mapping, never the union-find root) so undoing a
-    /// merge cannot strand them; (3) advances the cursor only if `state` is
-    /// still the committed position (`pages` equals the snapshot; the
-    /// spec's `cursor' = max(cursor, page)`), so a replayed page never moves
-    /// the cursor back and changes no ids, works or edges.
+    /// `BEGIN IMMEDIATE` transaction that
+    /// 1. re-resolves the subject and every page id through `work_ids`
+    ///    *inside* the transaction (`INSERT … ON CONFLICT DO NOTHING`, then
+    ///    read back), because another worker may have minted a work for an
+    ///    id, or a merge or undo may have landed, while the page was in
+    ///    flight;
+    /// 2. stores edges by base work (the `work_ids` mapping, never the class
+    ///    root), so undoing a merge cannot strand them;
+    /// 3. advances the cursor only if `state` is still the committed
+    ///    position (`pages` equals the snapshot; the spec's
+    ///    `cursor' = max(cursor, page)`), so a replay never moves it back;
+    /// 4. stamps seen rows with the generation's `started_seq`, never the
+    ///    commit time, and writes nothing for a generation older than the
+    ///    latest complete one (or to a finished generation), so late
+    ///    commits cannot hide staleness.
     pub fn commit_page(&mut self, state: &FetchState, page: &Page) -> Result<CommitOutcome> {
         let key = &state.key;
         let tx = self.write()?;
@@ -338,22 +369,37 @@ impl Store {
         let subject = w.observe(&WorkRecord::new(key.subject.clone()), &key.source)?;
         let current = generation(&tx, subject, key, state.generation)?
             .ok_or_else(|| no_fetch(key, state.generation))?;
-        let replay = current.pages != state.pages || !current.resumable();
-        let seq = w.bump_seq()?;
+        // A finished generation (complete or capped) takes no more pages, and
+        // one older than the newest complete generation is superseded.
+        let superseded = !current.resumable()
+            || newest_complete(&tx, subject, key)?.is_some_and(|g| g > state.generation);
+        if superseded {
+            tx.commit()?;
+            return Ok(CommitOutcome {
+                state: current,
+                replay: true,
+                superseded: true,
+                identity_conflicts: 0,
+            });
+        }
+        let replay = current.pages != state.pages;
+        let stamp = current.started_seq;
         let now = now_rfc3339();
 
         for row in &page.rows {
             let other = w.observe(&row.work, &key.source)?;
             match key.direction {
-                Direction::Refs => w.upsert_edge(subject, other, key, row, seq, &now)?,
-                Direction::CitedBy => w.upsert_edge(other, subject, key, row, seq, &now)?,
+                Direction::Refs => w.upsert_edge(subject, other, key, row, stamp, &now)?,
+                Direction::CitedBy => w.upsert_edge(other, subject, key, row, stamp, &now)?,
                 Direction::Related => {
                     tx.execute(
-                        "INSERT INTO related_works(work, related, source, first_seen, last_seen, last_seen_seq)
-                         VALUES (?1, ?2, ?3, ?4, ?4, ?5)
+                        "INSERT INTO related_works(work, related, source, first_seen, last_seen,
+                                                   first_seen_seq, last_seen_seq)
+                         VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?5)
                          ON CONFLICT(work, related, source) DO UPDATE SET
-                           last_seen = excluded.last_seen, last_seen_seq = excluded.last_seen_seq",
-                        params![subject, other, key.source, now, seq],
+                           last_seen = excluded.last_seen,
+                           last_seen_seq = MAX(last_seen_seq, excluded.last_seen_seq)",
+                        params![subject, other, key.source, now, stamp],
                     )?;
                 }
             }
@@ -413,6 +459,7 @@ impl Store {
         Ok(CommitOutcome {
             state,
             replay,
+            superseded: false,
             identity_conflicts,
         })
     }
@@ -424,7 +471,7 @@ impl Store {
         let Some(base) = base_of(&tx, id)? else {
             return Ok(Vec::new());
         };
-        class_ids(&tx, &uf, uf.find(base)?)
+        class_ids(&tx, &uf, uf.find(base))
     }
 
     /// External ids of `id`'s class, followed by those of its other
@@ -435,28 +482,28 @@ impl Store {
         let Some(base) = base_of(&tx, id)? else {
             return Ok(Vec::new());
         };
-        let root = uf.find(base)?;
+        let root = uf.find(base);
         let mut out = class_ids(&tx, &uf, root)?;
         out.extend(version_ids(&tx, &uf, root)?);
         Ok(out)
     }
 
     /// Latest fetch generation per source for `id`'s class (and its
-    /// versions) and direction.
+    /// versions) and direction, latest by `started_seq`.
     pub fn coverage(&mut self, id: &ExtId, direction: Direction) -> Result<Vec<FetchState>> {
         let tx = self.conn.transaction()?;
         let uf = UnionFind::load(&tx)?;
         let Some(base) = base_of(&tx, id)? else {
             return Ok(Vec::new());
         };
-        let (_, members) = subject_scope(&tx, &uf, uf.find(base)?)?;
+        let (_, members) = subject_scope(&tx, &uf, uf.find(base))?;
         let mut latest: BTreeMap<String, FetchState> = BTreeMap::new();
         for &work in &members {
-            let mut stmt = tx.prepare_cached(
-                "SELECT source, MAX(generation) FROM fetch_log WHERE work = ?1 AND direction = ?2
-                 GROUP BY source",
-            )?;
-            let found = stmt
+            let found = tx
+                .prepare_cached(
+                    "SELECT source, MAX(generation) FROM fetch_log WHERE work = ?1 AND direction = ?2
+                     GROUP BY source",
+                )?
                 .query_map(params![work, direction.as_str()], |r| {
                     Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
                 })?
@@ -472,7 +519,7 @@ impl Store {
                     // source; report the most recently started.
                     let newer = latest
                         .get(&source)
-                        .is_none_or(|cur| state.started_at > cur.started_at);
+                        .is_none_or(|cur| state.started_seq > cur.started_seq);
                     if newer {
                         latest.insert(source, state);
                     }
@@ -482,9 +529,23 @@ impl Store {
         Ok(latest.into_values().collect())
     }
 
+    /// Distinct resolved, non-stale neighbors of `id` in `direction`.
+    pub fn neighbor_total(&mut self, id: &ExtId, direction: Direction) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let uf = UnionFind::load(&tx)?;
+        let Some(base) = base_of(&tx, id)? else {
+            return Ok(0);
+        };
+        let (roots, members) = subject_scope(&tx, &uf, uf.find(base))?;
+        Ok(neighbor_order(&tx, &uf, &roots, &members, direction, false)?.len())
+    }
+
     /// Resolved neighbors of `id` in `direction`, deduplicated across
-    /// sources and merges, with resolved self-loops dropped. Ordered by
-    /// first insertion.
+    /// sources, merges and versions, with resolved self-loops dropped and
+    /// stale rows excluded unless asked. Ordered by first insertion.
+    ///
+    /// The ordering pass reads only `(other, MIN(rowid))` aggregated in SQL;
+    /// full rows, metadata and contexts are read for the requested page only.
     pub fn neighbors(
         &mut self,
         id: &ExtId,
@@ -499,69 +560,50 @@ impl Store {
                 items: Vec::new(),
             });
         };
-        let (roots, members) = subject_scope(&tx, &uf, uf.find(base)?)?;
-        let raw = edge_rows(&tx, &members, direction)?;
-
-        struct Group {
-            order: i64,
-            sources: BTreeMap<String, EdgeSource>,
-            pairs: Vec<(i64, i64, String)>,
-        }
-        let mut groups: HashMap<i64, Group> = HashMap::new();
-        for row in raw {
-            let other_root = uf.find(row.other)?;
-            if roots.contains(&other_root) {
-                continue;
-            }
-            let group = groups.entry(other_root).or_insert_with(|| Group {
-                order: row.rowid,
-                sources: BTreeMap::new(),
-                pairs: Vec::new(),
-            });
-            group.order = group.order.min(row.rowid);
-            group
-                .pairs
-                .push((row.citing, row.cited, row.source.clone()));
-            let entry = group
-                .sources
-                .entry(row.source.clone())
-                .or_insert_with(|| EdgeSource {
-                    source: row.source.clone(),
-                    intents: Vec::new(),
-                    is_influential: None,
-                    stale: true,
-                    first_seen: row.first_seen.clone(),
-                    last_seen: row.last_seen.clone(),
-                });
-            entry.stale &= row.stale;
-            for intent in row.intents {
-                if !entry.intents.contains(&intent) {
-                    entry.intents.push(intent);
-                }
-            }
-            entry.is_influential = match (entry.is_influential, row.is_influential) {
-                (Some(a), Some(b)) => Some(a || b),
-                (a, b) => a.or(b),
-            };
-            entry.first_seen = entry.first_seen.clone().min(row.first_seen);
-            entry.last_seen = entry.last_seen.clone().max(row.last_seen);
-        }
-        let mut ordered: Vec<(i64, Group)> = groups
-            .into_iter()
-            .filter(|(_, g)| query.include_stale || g.sources.values().any(|s| !s.stale))
-            .collect();
-        ordered.sort_by_key(|(r, g)| (g.order, *r));
-        let total = ordered.len();
+        let (roots, members) = subject_scope(&tx, &uf, uf.find(base))?;
+        let order = neighbor_order(&tx, &uf, &roots, &members, direction, query.include_stale)?;
+        let total = order.len();
         let mut items = Vec::new();
-        for (other_root, group) in ordered.into_iter().skip(query.offset).take(query.limit) {
-            let (meta, has_meta) = class_meta(&tx, &uf, other_root)?;
+        for other_root in order.into_iter().skip(query.offset).take(query.limit) {
+            let others = uf.members(other_root);
+            let rows = edge_rows_between(&tx, &members, &others, direction)?;
+            let mut sources: BTreeMap<String, EdgeSource> = BTreeMap::new();
+            let mut pairs = Vec::new();
+            for row in rows {
+                if !query.include_stale && row.stale {
+                    continue;
+                }
+                pairs.push((row.citing, row.cited, row.source.clone()));
+                let entry = sources
+                    .entry(row.source.clone())
+                    .or_insert_with(|| EdgeSource {
+                        source: row.source.clone(),
+                        intents: Vec::new(),
+                        is_influential: None,
+                        stale: true,
+                        first_seen: row.first_seen.clone(),
+                        last_seen: row.last_seen.clone(),
+                    });
+                entry.stale &= row.stale;
+                for intent in row.intents {
+                    if !entry.intents.contains(&intent) {
+                        entry.intents.push(intent);
+                    }
+                }
+                entry.is_influential = match (entry.is_influential, row.is_influential) {
+                    (Some(a), Some(b)) => Some(a || b),
+                    (a, b) => a.or(b),
+                };
+                entry.first_seen = entry.first_seen.clone().min(row.first_seen);
+                entry.last_seen = entry.last_seen.clone().max(row.last_seen);
+            }
             let mut contexts = Vec::new();
-            if query.include_contexts {
+            if query.include_contexts && direction != Direction::Related {
                 let mut stmt = tx.prepare_cached(
                     "SELECT source, text FROM contexts WHERE citing = ?1 AND cited = ?2 AND source = ?3
                      ORDER BY first_seen, text_hash",
                 )?;
-                for (citing, cited, source) in &group.pairs {
+                for (citing, cited, source) in &pairs {
                     for row in stmt.query_map(params![citing, cited, source], |r| {
                         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
                     })? {
@@ -572,11 +614,12 @@ impl Store {
                     }
                 }
             }
+            let (meta, has_meta) = class_meta(&tx, &uf, other_root)?;
             items.push(Neighbor {
                 ids: class_ids(&tx, &uf, other_root)?,
                 meta,
                 has_meta,
-                sources: group.sources.into_values().collect(),
+                sources: sources.into_values().collect(),
                 contexts,
                 versions: version_ids(&tx, &uf, other_root)?,
             });
@@ -587,7 +630,8 @@ impl Store {
     /// Active and undone merges, oldest first.
     pub fn merges(&mut self) -> Result<Vec<MergeInfo>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, reason, evidence, at, seq, undone_at, undone_seq FROM merge_log ORDER BY id",
+            "SELECT id, reason, evidence, at, seq, undone_at, undone_seq, undo_reason
+             FROM merge_log ORDER BY id",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(MergeInfo {
@@ -598,22 +642,123 @@ impl Store {
                 seq: r.get(4)?,
                 undone_at: r.get(5)?,
                 undone_seq: r.get(6)?,
+                undo_reason: r.get(7)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Undo an active merge by setting `undone_at`. Returns false if the
-    /// merge does not exist or is already undone.
+    /// Undo an active merge (sets `undone_at`). Returns false if the merge
+    /// does not exist or is already undone. Classes are recomputed from the
+    /// merges that remain active (design rule 9), so later merges keep their
+    /// own evidence and nothing cascades. Active rows form a forest, so the
+    /// row's two evidence works always end up in different classes. Undo is
+    /// sticky for this evidence pair: observing the same two works together
+    /// again does not redo it; [`Store::redo_merge`] does.
     pub fn undo_merge(&mut self, merge_id: i64) -> Result<bool> {
         let tx = self.write()?;
         let seq = bump_seq(&tx)?;
         let changed = tx.execute(
-            "UPDATE merge_log SET undone_at = ?2, undone_seq = ?3 WHERE id = ?1 AND undone_at IS NULL",
+            "UPDATE merge_log SET undone_at = ?2, undone_seq = ?3, undo_reason = 'user'
+             WHERE id = ?1 AND undone_at IS NULL",
             params![merge_id, now_rfc3339(), seq],
         )?;
         tx.commit()?;
         Ok(changed == 1)
+    }
+
+    /// Re-apply an undone merge as a new row (append-only). Returns the new
+    /// merge id, or `None` when the works are already in one class or a
+    /// strong-id or version veto now forbids joining them.
+    pub fn redo_merge(&mut self, merge_id: i64) -> Result<Option<i64>> {
+        let tx = self.write()?;
+        let row: Option<(i64, i64, String)> = tx
+            .query_row(
+                "SELECT base_a, base_b, COALESCE(evidence, '') FROM merge_log
+                 WHERE id = ?1 AND undone_at IS NOT NULL",
+                [merge_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let mut w = Writer::new(&tx)?;
+        let new_id = match row {
+            Some((a, b, evidence)) => w.join(a, b, "redo", &evidence, false)?,
+            None => None,
+        };
+        tx.commit()?;
+        Ok(new_id)
+    }
+
+    /// Take one request token for `source` at `now_ms` (Unix ms), shared by
+    /// every process on this store. Counts the request against the UTC
+    /// day's budget when granted.
+    pub fn take_request(
+        &mut self,
+        source: &str,
+        limit: RateLimit,
+        now_ms: i64,
+    ) -> Result<RateGrant> {
+        let tx = self.write()?;
+        let day = crate::time::utc_day(now_ms);
+        let used: i64 = tx
+            .query_row(
+                "SELECT requests FROM source_usage WHERE day = ?1 AND source = ?2",
+                params![day, source],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        if used >= i64::from(limit.daily) {
+            tx.commit()?;
+            return Ok(RateGrant::DailyExhausted);
+        }
+        let burst = f64::from(limit.burst.max(1));
+        let rate = limit.per_second.max(0.001);
+        let (tokens, updated): (f64, i64) = tx
+            .query_row(
+                "SELECT tokens, updated_ms FROM source_rate WHERE source = ?1",
+                [source],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .unwrap_or((burst, now_ms));
+        let elapsed = (now_ms - updated).max(0) as f64 / 1000.0;
+        let tokens = (tokens + elapsed * rate).min(burst);
+        let (tokens, grant) = if tokens >= 1.0 {
+            (tokens - 1.0, RateGrant::Granted)
+        } else {
+            let wait = ((1.0 - tokens) / rate * 1000.0).ceil().max(1.0) as u64;
+            (tokens, RateGrant::Wait(wait))
+        };
+        tx.execute(
+            "INSERT INTO source_rate(source, tokens, updated_ms) VALUES (?1, ?2, ?3)
+             ON CONFLICT(source) DO UPDATE SET tokens = excluded.tokens,
+               updated_ms = MAX(updated_ms, excluded.updated_ms)",
+            params![source, tokens, now_ms],
+        )?;
+        if grant == RateGrant::Granted {
+            tx.execute(
+                "INSERT INTO source_usage(day, source, requests) VALUES (?1, ?2, 1)
+                 ON CONFLICT(day, source) DO UPDATE SET requests = requests + 1",
+                params![day, source],
+            )?;
+        }
+        tx.commit()?;
+        Ok(grant)
+    }
+
+    /// Requests counted for `source` on the UTC day of `now_ms`.
+    pub fn requests_today(&mut self, source: &str, now_ms: i64) -> Result<u64> {
+        let day = crate::time::utc_day(now_ms);
+        let used: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT requests FROM source_usage WHERE day = ?1 AND source = ?2",
+                params![day, source],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(used.unwrap_or(0).max(0) as u64)
     }
 
     #[cfg(test)]
@@ -664,7 +809,7 @@ fn base_of(conn: &Connection, id: &ExtId) -> Result<Option<i64>> {
         .optional()?)
 }
 
-const FETCH_COLUMNS: &str = "generation, cursor, pages, fetched, total_reported, complete, truncated, started_at, finished_at";
+const FETCH_COLUMNS: &str = "generation, cursor, pages, fetched, total_reported, complete, truncated, started_at, started_seq, finished_at";
 
 fn fetch_state_from_row(key: &FetchKey, r: &rusqlite::Row<'_>) -> rusqlite::Result<FetchState> {
     Ok(FetchState {
@@ -677,7 +822,8 @@ fn fetch_state_from_row(key: &FetchKey, r: &rusqlite::Row<'_>) -> rusqlite::Resu
         complete: r.get(5)?,
         truncated: r.get(6)?,
         started_at: r.get(7)?,
-        finished_at: r.get(8)?,
+        started_seq: r.get(8)?,
+        finished_at: r.get(9)?,
     })
 }
 
@@ -692,6 +838,17 @@ fn latest_generation(conn: &Connection, work: i64, key: &FetchKey) -> Result<Opt
             fetch_state_from_row(key, r)
         })
         .optional()?)
+}
+
+fn newest_complete(conn: &Connection, work: i64, key: &FetchKey) -> Result<Option<i64>> {
+    Ok(conn
+        .prepare_cached(
+            "SELECT MAX(generation) FROM fetch_log
+             WHERE work = ?1 AND direction = ?2 AND source = ?3 AND complete = 1",
+        )?
+        .query_row(params![work, key.direction.as_str(), key.source], |r| {
+            r.get::<_, Option<i64>>(0)
+        })?)
 }
 
 fn generation(
@@ -730,7 +887,7 @@ fn ids_of_work(conn: &Connection, work: i64) -> Result<Vec<ExtId>> {
 
 fn class_ids(conn: &Connection, uf: &UnionFind, root: i64) -> Result<Vec<ExtId>> {
     let mut out = Vec::new();
-    for member in uf.members(root)? {
+    for member in uf.members(root) {
         out.extend(ids_of_work(conn, member)?);
     }
     out.sort();
@@ -745,7 +902,7 @@ fn class_meta(conn: &Connection, uf: &UnionFind, root: i64) -> Result<(WorkMeta,
     let mut meta = WorkMeta::default();
     let mut has_meta = false;
     // Root first, then other members in id order.
-    let mut members = uf.members(root)?;
+    let mut members = uf.members(root);
     members.sort_by_key(|&m| (m != root, m));
     for member in members {
         let row = stmt
@@ -782,9 +939,9 @@ fn version_roots(conn: &Connection, uf: &UnionFind, root: i64) -> Result<Vec<i64
          UNION SELECT work FROM work_versions WHERE version_of = ?1",
     )?;
     let mut roots = Vec::new();
-    for member in uf.members(root)? {
+    for member in uf.members(root) {
         for other in stmt.query_map([member], |r| r.get::<_, i64>(0))? {
-            let other_root = uf.find(other?)?;
+            let other_root = uf.find(other?);
             if other_root != root && !roots.contains(&other_root) {
                 roots.push(other_root);
             }
@@ -810,16 +967,87 @@ fn subject_scope(conn: &Connection, uf: &UnionFind, root: i64) -> Result<(Vec<i6
     roots.extend(version_roots(conn, uf, root)?);
     let mut members = Vec::new();
     for &r in &roots {
-        members.extend(uf.members(r)?);
+        members.extend(uf.members(r));
     }
     Ok((roots, members))
 }
 
+/// `(table, subject column, other column)` for a direction.
+fn edge_columns(direction: Direction) -> (&'static str, &'static str, &'static str) {
+    match direction {
+        Direction::Refs => ("edge_sources", "citing", "cited"),
+        Direction::CitedBy => ("edge_sources", "cited", "citing"),
+        Direction::Related => ("related_works", "work", "related"),
+    }
+}
+
+/// SQL truth value: row `e` is stale for this direction's view. Scoped to
+/// the same base work, direction and source: a complete, untruncated fetch
+/// that started after the row was last seen by that direction (or first
+/// stored) did not return it.
+fn stale_sql(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Refs => {
+            "EXISTS (SELECT 1 FROM fetch_log f WHERE f.work = e.citing AND f.direction = 'refs'
+               AND f.source = e.source AND f.complete = 1 AND f.truncated = 0
+               AND f.started_seq > COALESCE(e.refs_seen_seq, e.first_seen_seq))"
+        }
+        Direction::CitedBy => {
+            "EXISTS (SELECT 1 FROM fetch_log f WHERE f.work = e.cited AND f.direction = 'cited_by'
+               AND f.source = e.source AND f.complete = 1 AND f.truncated = 0
+               AND f.started_seq > COALESCE(e.cited_by_seen_seq, e.first_seen_seq))"
+        }
+        Direction::Related => {
+            "EXISTS (SELECT 1 FROM fetch_log f WHERE f.work = e.work AND f.direction = 'related'
+               AND f.source = e.source AND f.complete = 1 AND f.truncated = 0
+               AND f.started_seq > e.last_seen_seq)"
+        }
+    }
+}
+
+/// Neighbor class roots in first-insertion order, excluding the subject's
+/// scope (resolved self-loops).
+fn neighbor_order(
+    conn: &Connection,
+    uf: &UnionFind,
+    roots: &[i64],
+    members: &[i64],
+    direction: Direction,
+    include_stale: bool,
+) -> Result<Vec<i64>> {
+    let (table, subject_col, other_col) = edge_columns(direction);
+    let filter = if include_stale {
+        String::new()
+    } else {
+        format!("AND NOT {}", stale_sql(direction))
+    };
+    let sql = format!(
+        "SELECT e.{other_col}, MIN(e.rowid) FROM {table} e
+         WHERE e.{subject_col} = ?1 {filter} GROUP BY e.{other_col}"
+    );
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let mut first: HashMap<i64, i64> = HashMap::new();
+    for &m in members {
+        for row in stmt.query_map([m], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))? {
+            let (other, rowid) = row?;
+            let root = uf.find(other);
+            if roots.contains(&root) {
+                continue;
+            }
+            first
+                .entry(root)
+                .and_modify(|r| *r = (*r).min(rowid))
+                .or_insert(rowid);
+        }
+    }
+    let mut ordered: Vec<(i64, i64)> = first.into_iter().map(|(root, row)| (row, root)).collect();
+    ordered.sort_unstable();
+    Ok(ordered.into_iter().map(|(_, root)| root).collect())
+}
+
 struct RawEdge {
-    rowid: i64,
     citing: i64,
     cited: i64,
-    other: i64,
     source: String,
     first_seen: String,
     last_seen: String,
@@ -828,64 +1056,46 @@ struct RawEdge {
     stale: bool,
 }
 
-/// Edge rows touching `members` on the subject side, with staleness: a row
-/// is stale when a complete, untruncated fetch of the same base work,
-/// direction and source started after the row was last seen (that fetch
-/// did not return it).
-fn edge_rows(conn: &Connection, members: &[i64], direction: Direction) -> Result<Vec<RawEdge>> {
-    let (table, subject_col, other_col) = match direction {
-        Direction::Refs => ("edge_sources", "citing", "cited"),
-        Direction::CitedBy => ("edge_sources", "cited", "citing"),
-        Direction::Related => ("related_works", "work", "related"),
-    };
-    let (extra, stale) = if direction == Direction::Related {
-        (
-            "NULL, NULL",
-            "EXISTS (SELECT 1 FROM fetch_log f WHERE f.work = e.work AND f.direction = 'related'
-               AND f.source = e.source AND f.complete = 1 AND f.truncated = 0
-               AND f.started_seq > e.last_seen_seq)",
-        )
+/// Edge rows between the subject's `members` and one neighbor class.
+fn edge_rows_between(
+    conn: &Connection,
+    members: &[i64],
+    others: &[i64],
+    direction: Direction,
+) -> Result<Vec<RawEdge>> {
+    let (table, subject_col, other_col) = edge_columns(direction);
+    let (citing_col, cited_col, extra) = if direction == Direction::Related {
+        ("work", "related", "NULL, NULL")
     } else {
-        (
-            "e.intents, e.is_influential",
-            "EXISTS (SELECT 1 FROM fetch_log f WHERE f.source = e.source AND f.complete = 1
-               AND f.truncated = 0 AND f.started_seq > e.last_seen_seq
-               AND ((f.direction = 'refs' AND f.work = e.citing)
-                 OR (f.direction = 'cited_by' AND f.work = e.cited)))",
-        )
-    };
-    let (citing_col, cited_col) = if direction == Direction::Related {
-        ("work", "related")
-    } else {
-        ("citing", "cited")
+        ("citing", "cited", "e.intents, e.is_influential")
     };
     let sql = format!(
-        "SELECT e.rowid, e.{citing_col}, e.{cited_col}, e.{other_col}, e.source, e.first_seen,
-                e.last_seen, {extra}, {stale}
-         FROM {table} e WHERE e.{subject_col} = ?1"
+        "SELECT e.{citing_col}, e.{cited_col}, e.source, e.first_seen, e.last_seen, {extra}, {stale}
+         FROM {table} e WHERE e.{subject_col} = ?1 AND e.{other_col} = ?2 ORDER BY e.rowid",
+        stale = stale_sql(direction)
     );
     let mut stmt = conn.prepare_cached(&sql)?;
     let mut out = Vec::new();
     for &m in members {
-        let rows = stmt.query_map([m], |r| {
-            let intents: Option<String> = r.get(7)?;
-            Ok(RawEdge {
-                rowid: r.get(0)?,
-                citing: r.get(1)?,
-                cited: r.get(2)?,
-                other: r.get(3)?,
-                source: r.get(4)?,
-                first_seen: r.get(5)?,
-                last_seen: r.get(6)?,
-                intents: intents
-                    .and_then(|s| serde_json::from_str(&s).ok())
-                    .unwrap_or_default(),
-                is_influential: r.get(8)?,
-                stale: r.get(9)?,
-            })
-        })?;
-        for row in rows {
-            out.push(row?);
+        for &o in others {
+            let rows = stmt.query_map(params![m, o], |r| {
+                let intents: Option<String> = r.get(5)?;
+                Ok(RawEdge {
+                    citing: r.get(0)?,
+                    cited: r.get(1)?,
+                    source: r.get(2)?,
+                    first_seen: r.get(3)?,
+                    last_seen: r.get(4)?,
+                    intents: intents
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_default(),
+                    is_influential: r.get(6)?,
+                    stale: r.get(7)?,
+                })
+            })?;
+            for row in rows {
+                out.push(row?);
+            }
         }
     }
     Ok(out)
@@ -901,7 +1111,7 @@ fn fnv_hex(s: &str) -> String {
     format!("{hash:016x}")
 }
 
-/// Writes inside one transaction, with union-find loaded in that
+/// Writes inside one transaction, with resolution loaded in that
 /// transaction and kept current as it merges.
 struct Writer<'t> {
     tx: &'t Transaction<'t>,
@@ -918,46 +1128,29 @@ impl<'t> Writer<'t> {
         })
     }
 
-    fn bump_seq(&mut self) -> Result<i64> {
-        bump_seq(self.tx)
-    }
-
-    /// An undone merge links the two classes: undo is a decision, so the
-    /// same evidence must not silently redo it.
-    fn undone_between(&self, a: i64, b: i64) -> Result<bool> {
-        let mut stmt = self
-            .tx
-            .prepare_cached("SELECT winner, loser FROM merge_log WHERE undone_at IS NOT NULL")?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for (winner, loser) in rows {
-            let (w, l) = (self.uf.find(winner)?, self.uf.find(loser)?);
-            if (w == a && l == b) || (w == b && l == a) {
-                return Ok(true);
-            }
+    /// Base work of `id`, minting a work for it when unknown. Every
+    /// external id gets its own base work (as in the spec); co-reported ids
+    /// are joined by logged merges, so any join can be undone.
+    fn base(&mut self, id: &ExtId, source: &str) -> Result<i64> {
+        if let Some(base) = base_of(self.tx, id)? {
+            return Ok(base);
         }
-        Ok(false)
-    }
-
-    fn new_work(&mut self) -> Result<i64> {
         self.tx
             .execute("INSERT INTO works(created_at) VALUES (?1)", [now_rfc3339()])?;
-        Ok(self.tx.last_insert_rowid())
-    }
-
-    fn insert_id(&mut self, id: &ExtId, work: i64, source: &str) -> Result<()> {
+        let work = self.tx.last_insert_rowid();
         self.tx.execute(
             "INSERT INTO work_ids(scheme, value, work_id, source, seen_at) VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(scheme, value) DO NOTHING",
             params![id.scheme.as_str(), id.value, work, source, now_rfc3339()],
         )?;
-        Ok(())
+        // Read the mapping back rather than trusting the insert.
+        base_of(self.tx, id)?
+            .ok_or_else(|| Error::Corrupt(format!("{} has no work after insert", id.key())))
     }
 
-    fn strong_ids(&self, root: i64) -> Result<StrongIds> {
+    fn class_strong_ids(&self, root: i64) -> Result<StrongIds> {
         let mut out = StrongIds::default();
-        for member in self.uf.members(root)? {
+        for member in self.uf.members(root) {
             for id in ids_of_work(self.tx, member)? {
                 out.push(&id);
             }
@@ -965,44 +1158,144 @@ impl<'t> Writer<'t> {
         Ok(out)
     }
 
-    /// Resolve one record to the base work of its primary id: mint a work
-    /// for wholly unknown records, attach new ids, and merge roots the
-    /// record shows to be the same work unless a strong id vetoes it. An
-    /// arXiv id reported next to a publisher DOI is a separate version, not
-    /// a merge.
+    /// The most recent row for this evidence pair was undone by a user.
+    fn undone_pair(&self, a: i64, b: i64) -> Result<bool> {
+        let reason: Option<Option<String>> = self
+            .tx
+            .prepare_cached(
+                "SELECT CASE WHEN undone_at IS NULL THEN NULL ELSE undo_reason END FROM merge_log
+                 WHERE (base_a = ?1 AND base_b = ?2) OR (base_a = ?2 AND base_b = ?1)
+                 ORDER BY id DESC LIMIT 1",
+            )?
+            .query_row(params![a, b], |r| r.get(0))
+            .optional()?;
+        Ok(matches!(reason, Some(Some(r)) if r == "user"))
+    }
+
+    /// Join the classes of evidence works `a` and `b` with a logged merge,
+    /// unless they are already one class or a veto applies: contradicting
+    /// DOI/arXiv/PMID, a class that would hold both an arXiv id and a
+    /// publisher DOI (versions are never merged), or (when `sticky`) a user
+    /// undo of this same evidence pair. The roots are computed here, inside
+    /// the merge transaction.
+    fn join(
+        &mut self,
+        a: i64,
+        b: i64,
+        reason: &str,
+        evidence: &str,
+        sticky: bool,
+    ) -> Result<Option<i64>> {
+        let (ra, rb) = (self.uf.find(a), self.uf.find(b));
+        if ra == rb {
+            return Ok(None);
+        }
+        let (ia, ib) = (self.class_strong_ids(ra)?, self.class_strong_ids(rb)?);
+        if ia.conflicts(&ib) || ia.mixes_versions(&ib) || (sticky && self.undone_pair(a, b)?) {
+            self.conflicts += 1;
+            return Ok(None);
+        }
+        let seq = bump_seq(self.tx)?;
+        self.tx.execute(
+            "INSERT INTO merge_log(winner, loser, base_a, base_b, reason, evidence, at, seq)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                ra.min(rb),
+                ra.max(rb),
+                a,
+                b,
+                reason,
+                evidence,
+                now_rfc3339(),
+                seq
+            ],
+        )?;
+        let id = self.tx.last_insert_rowid();
+        self.uf.link(a, b);
+        Ok(Some(id))
+    }
+
+    /// Undo active merges that directly join `a` and `b` because a later
+    /// record shows them to be two versions of one paper. Not sticky.
+    fn split_versions(&mut self, a: i64, b: i64) -> Result<()> {
+        let changed = self.tx.execute(
+            "UPDATE merge_log SET undone_at = ?3, undone_seq = ?4, undo_reason = 'version_split'
+             WHERE undone_at IS NULL AND ((base_a = ?1 AND base_b = ?2) OR (base_a = ?2 AND base_b = ?1))",
+            params![a, b, now_rfc3339(), bump_seq(self.tx)?],
+        )?;
+        if changed > 0 {
+            self.uf = UnionFind::load(self.tx)?;
+        }
+        Ok(())
+    }
+
+    /// Resolve one record to the base work of its primary id. Every id gets
+    /// a base work; the record's ids are joined to the primary by logged
+    /// merges. When the record carries both an arXiv id and a publisher DOI
+    /// (Semantic Scholar folds versions), the arXiv ids form the preprint
+    /// and everything else the published version; the two are linked in
+    /// `work_versions`, and an earlier direct merge between them is split,
+    /// so the result does not depend on arrival order.
     fn observe(&mut self, record: &WorkRecord, source: &str) -> Result<i64> {
         let mut ids = record.ids.clone();
         if !ids.contains(&record.primary) {
             ids.push(record.primary.clone());
         }
         let has_doi = ids.iter().any(|i| i.scheme == Scheme::Doi);
-        let (preprint, main): (Vec<ExtId>, Vec<ExtId>) = if has_doi {
-            ids.into_iter().partition(|i| i.scheme == Scheme::Arxiv)
-        } else {
-            (Vec::new(), ids)
-        };
-        let (primary_group, other_group) = if preprint.contains(&record.primary) {
-            (preprint, main)
-        } else {
-            (main, preprint)
-        };
-        let primary = self.resolve_group(&primary_group, &record.primary, source)?;
-        if !other_group.is_empty() {
-            let other_primary = other_group[0].clone();
-            let other = self.resolve_group(&other_group, &other_primary, source)?;
-            let (pre, publ) = if record.primary.scheme == Scheme::Arxiv {
-                (primary, other)
-            } else {
-                (other, primary)
-            };
-            if self.uf.find(pre)? != self.uf.find(publ)? {
-                self.tx.execute(
-                    "INSERT OR IGNORE INTO work_versions(work, version_of, kind, source)
-                     VALUES (?1, ?2, 'preprint', ?3)",
-                    params![pre, publ, source],
-                )?;
-            }
+        let has_arxiv = ids.iter().any(|i| i.scheme == Scheme::Arxiv);
+        let evidence = serde_json::to_string(&ids.iter().map(ExtId::key).collect::<Vec<_>>())
+            .map_err(|e| Error::Corrupt(e.to_string()))?;
+        let evidence = format!("{source}:{evidence}");
+
+        let mut bases = Vec::with_capacity(ids.len());
+        for id in &ids {
+            bases.push((id.clone(), self.base(id, source)?));
         }
+        let groups: Vec<Vec<(ExtId, i64)>> = if has_doi && has_arxiv {
+            let (pre, publ): (Vec<_>, Vec<_>) = bases
+                .into_iter()
+                .partition(|(i, _)| i.scheme == Scheme::Arxiv);
+            for &(_, p) in &pre {
+                for &(_, q) in &publ {
+                    self.split_versions(p, q)?;
+                }
+            }
+            vec![pre, publ]
+        } else {
+            vec![bases]
+        };
+
+        let mut anchors = Vec::new();
+        for group in &groups {
+            let anchor = group
+                .iter()
+                .find(|(i, _)| *i == record.primary)
+                .or_else(|| group.first())
+                .map(|&(_, b)| b);
+            let Some(anchor) = anchor else { continue };
+            for &(_, base) in group {
+                if base != anchor {
+                    self.join(anchor, base, "strong_id", &evidence, true)?;
+                }
+            }
+            anchors.push(anchor);
+        }
+        if let [pre, publ] = anchors[..]
+            && self.uf.find(pre) != self.uf.find(publ)
+        {
+            self.tx.execute(
+                "INSERT OR IGNORE INTO work_versions(work, version_of, kind, source)
+                 VALUES (?1, ?2, 'preprint', ?3)",
+                params![pre, publ, source],
+            )?;
+        }
+
+        let primary = base_of(self.tx, &record.primary)?.ok_or_else(|| {
+            Error::Corrupt(format!(
+                "{} has no work after resolution",
+                record.primary.key()
+            ))
+        })?;
         if let Some(meta) = &record.meta {
             let authors = (!meta.authors.is_empty())
                 .then(|| serde_json::to_string(&meta.authors))
@@ -1027,106 +1320,33 @@ impl<'t> Writer<'t> {
         Ok(primary)
     }
 
-    fn resolve_group(&mut self, ids: &[ExtId], primary: &ExtId, source: &str) -> Result<i64> {
-        // Primary first so its root anchors the group.
-        let mut ordered: Vec<&ExtId> = Vec::with_capacity(ids.len());
-        if ids.contains(primary) {
-            ordered.push(primary);
-        }
-        ordered.extend(ids.iter().filter(|i| *i != primary));
-
-        let mut known = Vec::new();
-        let mut unknown = Vec::new();
-        for id in ordered {
-            match base_of(self.tx, id)? {
-                Some(base) => known.push(base),
-                None => unknown.push(id.clone()),
-            }
-        }
-        let Some(&first) = known.first() else {
-            let work = self.new_work()?;
-            for id in &unknown {
-                self.insert_id(id, work, source)?;
-            }
-            // Read the mapping back rather than trusting the insert.
-            return base_of(self.tx, primary)?.ok_or_else(|| {
-                Error::Corrupt(format!("{} has no work after insert", primary.key()))
-            });
-        };
-
-        let mut anchor = self.uf.find(first)?;
-        let evidence = serde_json::to_string(&ids.iter().map(ExtId::key).collect::<Vec<_>>())
-            .map_err(|e| Error::Corrupt(e.to_string()))?;
-        for &base in &known[1..] {
-            let root = self.uf.find(base)?;
-            if root == anchor {
-                continue;
-            }
-            if self.strong_ids(anchor)?.conflicts(&self.strong_ids(root)?)
-                || self.undone_between(anchor, root)?
-            {
-                self.conflicts += 1;
-                continue;
-            }
-            let (winner, loser) = (anchor.min(root), anchor.max(root));
-            let seq = self.bump_seq()?;
-            self.tx.execute(
-                "INSERT INTO merge_log(winner, loser, reason, evidence, at, seq)
-                 VALUES (?1, ?2, 'strong_id', ?3, ?4, ?5)",
-                params![
-                    winner,
-                    loser,
-                    format!("{source}:{evidence}"),
-                    now_rfc3339(),
-                    seq
-                ],
-            )?;
-            self.uf.link(winner, loser)?;
-            anchor = winner;
-        }
-
-        // New ids attach to the primary's base when known, else the anchor.
-        let target = base_of(self.tx, primary)?.unwrap_or(anchor);
-        let mut held = self.strong_ids(anchor)?;
-        for id in &unknown {
-            if id.scheme.is_strong() && held.rejects(id) {
-                self.conflicts += 1;
-                if id == primary {
-                    // The record's own key contradicts the class: it is a
-                    // different work.
-                    let work = self.new_work()?;
-                    self.insert_id(id, work, source)?;
-                }
-                continue;
-            }
-            self.insert_id(id, target, source)?;
-            held.push(id);
-        }
-        base_of(self.tx, primary)?.ok_or_else(|| {
-            Error::Corrupt(format!("{} has no work after resolution", primary.key()))
-        })
-    }
-
     fn upsert_edge(
         &mut self,
         citing: i64,
         cited: i64,
         key: &FetchKey,
         row: &PageRow,
-        seq: i64,
+        stamp: i64,
         now: &str,
     ) -> Result<()> {
         let intents = (!row.intents.is_empty())
             .then(|| serde_json::to_string(&row.intents))
             .transpose()
             .map_err(|e| Error::Corrupt(e.to_string()))?;
+        let (refs, cited_by) = match key.direction {
+            Direction::Refs => (Some(stamp), None),
+            _ => (None, Some(stamp)),
+        };
         self.tx.execute(
-            "INSERT INTO edge_sources(citing, cited, source, first_seen, last_seen, last_seen_seq,
-                                      intents, is_influential)
-             VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7)
+            "INSERT INTO edge_sources(citing, cited, source, first_seen, last_seen, first_seen_seq,
+                                      refs_seen_seq, cited_by_seen_seq, intents, is_influential)
+             VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(citing, cited, source) DO UPDATE SET
                last_seen = excluded.last_seen,
-               last_seen_seq = MAX(last_seen_seq, excluded.last_seen_seq),
+               refs_seen_seq = MAX(COALESCE(refs_seen_seq, excluded.refs_seen_seq),
+                                   COALESCE(excluded.refs_seen_seq, refs_seen_seq)),
+               cited_by_seen_seq = MAX(COALESCE(cited_by_seen_seq, excluded.cited_by_seen_seq),
+                                       COALESCE(excluded.cited_by_seen_seq, cited_by_seen_seq)),
                intents = COALESCE(excluded.intents, intents),
                is_influential = COALESCE(excluded.is_influential, is_influential)",
             params![
@@ -1134,7 +1354,9 @@ impl<'t> Writer<'t> {
                 cited,
                 key.source,
                 now,
-                seq,
+                stamp,
+                refs,
+                cited_by,
                 intents,
                 row.is_influential
             ],

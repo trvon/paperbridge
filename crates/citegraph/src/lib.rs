@@ -18,7 +18,7 @@ mod uf;
 pub use ids::{ExtId, Scheme, StrongIds};
 pub use store::{
     CommitOutcome, Direction, EdgeSource, FetchKey, FetchState, MergeInfo, Neighbor, NeighborPage,
-    NeighborQuery, Page, PageRow, Store, WorkMeta, WorkRecord,
+    NeighborQuery, Page, PageRow, RateGrant, RateLimit, Store, WorkMeta, WorkRecord,
 };
 
 /// Schema version this build writes (`PRAGMA user_version`).

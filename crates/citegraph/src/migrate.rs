@@ -35,22 +35,29 @@ CREATE TABLE work_ids(
 ) WITHOUT ROWID;
 CREATE INDEX work_ids_by_work ON work_ids(work_id);
 
+-- Append-only. `base_a`/`base_b` are the evidence works (the works the
+-- co-reported ids map to); a class is a connected component over active
+-- rows (undone_at IS NULL). Rows only join two different classes, so active
+-- rows form a forest. `winner`/`loser` record the two class roots at merge
+-- time, for audit. `seq`/`undone_seq` order merges against review decisions.
 CREATE TABLE merge_log(
   id INTEGER PRIMARY KEY,
   winner INTEGER NOT NULL REFERENCES works(work_id),
   loser INTEGER NOT NULL REFERENCES works(work_id),
+  base_a INTEGER NOT NULL REFERENCES works(work_id),
+  base_b INTEGER NOT NULL REFERENCES works(work_id),
   reason TEXT NOT NULL,
   evidence TEXT,
   at TEXT NOT NULL,
-  -- meta.seq at merge and undo: orders merges against review decisions
-  -- (stage 3) without relying on wall-clock resolution.
   seq INTEGER NOT NULL,
   undone_at TEXT,
   undone_seq INTEGER,
-  CHECK (winner <> loser)
+  -- 'user' (sticky: the same evidence does not redo it) or 'version_split'
+  undo_reason TEXT,
+  CHECK (winner <> loser),
+  CHECK (base_a <> base_b)
 );
--- A work has at most one active parent: the merge relation is a forest.
-CREATE UNIQUE INDEX merge_log_active_loser ON merge_log(loser) WHERE undone_at IS NULL;
+CREATE INDEX merge_log_bases ON merge_log(base_a, base_b);
 
 CREATE TABLE work_versions(
   work INTEGER NOT NULL REFERENCES works(work_id),
@@ -61,18 +68,23 @@ CREATE TABLE work_versions(
   CHECK (work <> version_of)
 ) WITHOUT ROWID;
 
+-- Seen stamps are the started_seq of the fetch generation that saw the
+-- row, per direction, so staleness is scoped to (work, direction, source)
+-- and a late or replayed commit cannot make a row look newer.
 CREATE TABLE edge_sources(
   citing INTEGER NOT NULL REFERENCES works(work_id),
   cited INTEGER NOT NULL REFERENCES works(work_id),
   source TEXT NOT NULL,
   first_seen TEXT NOT NULL,
   last_seen TEXT NOT NULL,
-  last_seen_seq INTEGER NOT NULL,
+  first_seen_seq INTEGER NOT NULL,
+  refs_seen_seq INTEGER,
+  cited_by_seen_seq INTEGER,
   intents TEXT,
   is_influential INTEGER,
   PRIMARY KEY(citing, cited, source)
 );
-CREATE INDEX edge_sources_by_cited ON edge_sources(cited);
+CREATE INDEX edge_sources_by_cited ON edge_sources(cited, citing);
 
 CREATE TABLE related_works(
   work INTEGER NOT NULL REFERENCES works(work_id),
@@ -80,6 +92,7 @@ CREATE TABLE related_works(
   source TEXT NOT NULL,
   first_seen TEXT NOT NULL,
   last_seen TEXT NOT NULL,
+  first_seen_seq INTEGER NOT NULL,
   last_seen_seq INTEGER NOT NULL,
   PRIMARY KEY(work, related, source)
 );
@@ -119,6 +132,19 @@ CREATE TABLE fetch_log(
   truncated INTEGER NOT NULL DEFAULT 0,
   complete INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(work, direction, source, generation)
+) WITHOUT ROWID;
+
+-- Shared by every process using the store (CLI and MCP server).
+CREATE TABLE source_rate(
+  source TEXT PRIMARY KEY,
+  tokens REAL NOT NULL,
+  updated_ms INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE source_usage(
+  day TEXT NOT NULL,
+  source TEXT NOT NULL,
+  requests INTEGER NOT NULL,
+  PRIMARY KEY(day, source)
 ) WITHOUT ROWID;
 "#;
 

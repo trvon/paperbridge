@@ -9,6 +9,11 @@ pub(crate) fn now_rfc3339() -> String {
     format_millis(i128::try_from(millis).unwrap_or(0))
 }
 
+/// UTC calendar day (`YYYY-MM-DD`) of a Unix millisecond instant.
+pub(crate) fn utc_day(millis: i64) -> String {
+    format_millis(i128::from(millis))[..10].to_string()
+}
+
 /// Days-from-civil inverse (Howard Hinnant), proleptic Gregorian, UTC.
 fn format_millis(millis: i128) -> String {
     let secs = millis.div_euclid(1000);

@@ -315,6 +315,14 @@ impl StrongIds {
             })
     }
 
+    /// Joining the two sides would put an arXiv id and a publisher DOI in
+    /// one class. Preprint and published versions are never merged.
+    pub fn mixes_versions(&self, other: &Self) -> bool {
+        let all_arxiv = !self.arxiv.is_empty() || !other.arxiv.is_empty();
+        let all_doi = !self.doi.is_empty() || !other.doi.is_empty();
+        all_arxiv && all_doi
+    }
+
     /// Adding `id` to this set would contradict an existing value.
     pub fn rejects(&self, id: &ExtId) -> bool {
         let existing = self.values(id.scheme);
