@@ -602,8 +602,10 @@ impl IdentityKeys {
     }
 
     fn compatible(&self, other: &Self) -> bool {
-        let conflict =
-            |a: &Option<String>, b: &Option<String>| matches!((a, b), (Some(a), Some(b)) if a != b);
+        // Strong-id veto shared with the citation store (`citegraph::ids`).
+        let conflict = |a: &Option<String>, b: &Option<String>| {
+            citegraph::ids::scheme_conflict(a.as_deref(), b.as_deref())
+        };
         if conflict(&self.doi, &other.doi)
             || conflict(&self.arxiv, &other.arxiv)
             || conflict(&self.pmid, &other.pmid)

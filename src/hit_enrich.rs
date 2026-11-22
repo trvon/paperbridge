@@ -271,94 +271,36 @@ fn normalize(raw: &str) -> String {
         .join(" ")
 }
 
-/// Lowercase `raw` and strip DOI wrappers: `doi:`, and `http(s)://`,
-/// `www.`/`dx.` + `doi.org/` resolver prefixes. Does not validate.
+// Identifier normalizers live in `citegraph::ids` so the citation store and
+// search/dedupe share one definition.
+
+/// Lowercase and percent-decode `raw`, then strip DOI wrappers: `doi:`, and
+/// `http(s)://`, `www.`/`dx.` + `doi.org/` resolver prefixes. Does not validate.
 pub(crate) fn strip_doi_prefix(raw: &str) -> String {
-    let lowered = raw.trim().to_lowercase();
-    let rest = strip_scheme(&lowered);
-    let rest = rest
-        .strip_prefix("www.")
-        .or_else(|| rest.strip_prefix("dx."))
-        .unwrap_or(rest);
-    let stripped = rest
-        .strip_prefix("doi.org/")
-        .or_else(|| lowered.strip_prefix("doi:"))
-        .unwrap_or(lowered.as_str());
-    stripped.trim().to_string()
+    citegraph::ids::strip_doi_prefix(raw)
 }
 
-/// Canonical DOI: lowercase `10.<digits>/<suffix>` with wrappers removed and
-/// no whitespace. `None` when the input is not a DOI.
+/// Canonical DOI: lowercase `10.<digits>/<suffix>`, percent-decoded, with
+/// wrappers and trailing prose punctuation removed and no whitespace.
+/// `None` when the input is not a DOI.
 pub(crate) fn normalize_doi_str(raw: &str) -> Option<String> {
-    let n = strip_doi_prefix(raw);
-    let (prefix, suffix) = n.strip_prefix("10.")?.split_once('/')?;
-    (!prefix.is_empty()
-        && prefix.bytes().all(|b| b.is_ascii_digit())
-        && !suffix.is_empty()
-        && !n.chars().any(char::is_whitespace))
-    .then_some(n)
+    citegraph::ids::normalize_doi(raw)
 }
 
-/// Lowercase `raw` and strip arXiv wrappers: `arxiv:`, and
-/// `http(s)://(www.|export.)arxiv.org/(abs|pdf)/` plus a trailing `.pdf`.
-/// Keeps any version suffix. Does not validate.
+/// Lowercase `raw` and strip arXiv wrappers; keeps any version suffix.
 pub(crate) fn strip_arxiv_prefix(raw: &str) -> String {
-    let lowered = raw.trim().to_lowercase();
-    let rest = strip_scheme(&lowered);
-    let rest = rest
-        .strip_prefix("www.")
-        .or_else(|| rest.strip_prefix("export."))
-        .unwrap_or(rest);
-    let id = rest
-        .strip_prefix("arxiv.org/abs/")
-        .or_else(|| rest.strip_prefix("arxiv.org/pdf/"))
-        .or_else(|| lowered.strip_prefix("arxiv:"))
-        .unwrap_or(lowered.as_str())
-        .trim();
-    id.strip_suffix(".pdf").unwrap_or(id).to_string()
+    citegraph::ids::strip_arxiv_prefix(raw)
 }
 
 /// Canonical version-less arXiv id (`2401.12345` or `hep-th/9901001`).
 /// `None` when the input is not an arXiv id.
 pub(crate) fn normalize_arxiv_str(raw: &str) -> Option<String> {
-    let id = strip_arxiv_prefix(raw);
-    if id.is_empty() {
-        return None;
-    }
-    let base = strip_arxiv_version(&id);
-    let modern = base.split_once('.').is_some_and(|(date, number)| {
-        date.len() == 4
-            && (4..=5).contains(&number.len())
-            && date
-                .bytes()
-                .chain(number.bytes())
-                .all(|b| b.is_ascii_digit())
-    });
-    let legacy = base.split_once('/').is_some_and(|(archive, number)| {
-        !archive.is_empty()
-            && archive
-                .bytes()
-                .all(|b| b.is_ascii_alphabetic() || b == b'-' || b == b'.')
-            && number.len() == 7
-            && number.bytes().all(|b| b.is_ascii_digit())
-    });
-    (modern || legacy).then(|| base.to_string())
+    citegraph::ids::normalize_arxiv(raw)
 }
 
 /// Strip a trailing arXiv version (`v<digits>`), if present.
 pub(crate) fn strip_arxiv_version(id: &str) -> &str {
-    id.rfind('v')
-        .and_then(|idx| {
-            let ver = &id[idx + 1..];
-            (!ver.is_empty() && ver.bytes().all(|b| b.is_ascii_digit())).then_some(&id[..idx])
-        })
-        .unwrap_or(id)
-}
-
-fn strip_scheme(s: &str) -> &str {
-    s.strip_prefix("https://")
-        .or_else(|| s.strip_prefix("http://"))
-        .unwrap_or(s)
+    citegraph::ids::strip_arxiv_version(id)
 }
 
 /// 64-bit FNV-1a, truncated to 48 bits of hex. Fixed across Rust releases,
@@ -736,7 +678,8 @@ mod tests {
         use proptest::prelude::*;
 
         fn doi_core() -> impl Strategy<Value = String> {
-            ("[0-9]{4,5}", "[a-z0-9][a-z0-9._;()/:-]{0,20}")
+            // Trailing prose punctuation is stripped, so cores end alphanumeric.
+            ("[0-9]{4,5}", "[a-z0-9]([a-z0-9._;()/:-]{0,19}[a-z0-9])?")
                 .prop_map(|(prefix, suffix)| format!("10.{prefix}/{suffix}"))
         }
 
