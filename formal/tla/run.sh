@@ -8,7 +8,9 @@
 # Env:
 #   TLA2TOOLS_JAR   use this jar instead of downloading (hash still checked)
 #   TLA_CACHE_DIR   download cache (default: $XDG_CACHE_HOME/paperbridge/tla)
-#   TLC_WORKERS     TLC -workers value (default: 1)
+#   TLC_WORKERS     TLC -workers for the main config (default: 1); bug and
+#                   witness configs always use 1 so the first violation
+#                   reported is deterministic
 set -euo pipefail
 
 TLA_VERSION="v1.7.4"
@@ -58,11 +60,12 @@ failures=0
 
 # run_tlc <cfg> <expected invariant or "">
 run_tlc() {
-  local cfg="$1" expect="$2" log rc=0 start end
+  local cfg="$1" expect="$2" log rc=0 start end workers=1
+  [[ -z "$expect" ]] && workers="${TLC_WORKERS:-1}"
   log="$workdir/${cfg%.cfg}.log"
   start=$(date +%s)
   (cd "$here" && java -XX:+UseParallelGC -cp "$jar" tlc2.TLC \
-      -workers "${TLC_WORKERS:-1}" -metadir "$workdir/meta-${cfg%.cfg}" \
+      -workers "$workers" -metadir "$workdir/meta-${cfg%.cfg}" \
       -config "$cfg" "$spec") >"$log" 2>&1 || rc=$?
   end=$(date +%s)
   local stats

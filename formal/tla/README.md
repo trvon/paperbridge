@@ -20,7 +20,7 @@ checks its SHA-256. Environment:
 |---|---|
 | `TLA2TOOLS_JAR` | use this jar (hash still checked) |
 | `TLA_CACHE_DIR` | download cache directory |
-| `TLC_WORKERS` | TLC `-workers` (default `1`; CI uses `auto`) |
+| `TLC_WORKERS` | TLC `-workers` for the main config (default `1`; CI uses `auto`); bug and witness configs always run with `1` so the reported invariant is deterministic |
 
 The script exits non-zero unless the main config passes with TLC's
 "No error has been found" and every bug/witness config fails with its
@@ -96,8 +96,7 @@ Each must be rejected. `run.sh` checks the invariant named.
 ## Results
 
 TLC 2.19 (tla2tools v1.7.4), Java 25, Apple M4 Max, `run.sh`. Bug and
-witness rows are `-workers 1`; with several workers TLC explores more
-states before stopping, so counts vary. For bug rows, depth is the
+witness rows are always `-workers 1`. For bug rows, depth is the
 counterexample length (BFS, so shortest).
 
 | Config | Result | Generated | Distinct | Depth | Wall |
@@ -129,6 +128,14 @@ counterexample length (BFS, so shortest).
   `candidate` / `needs_decision`. Both bound the state space.
 - The snapshot is recorded only in the stale-snapshot variant; the design's
   commit never reads it.
+- The design motivates re-resolving inside the transaction with "a merge
+  may land during the await". With base-work storage that case is
+  harmless; what breaks a pre-await snapshot is a concurrent mint of the
+  same ID and an `UndoMerge` during the await.
+- No seeded bug needs `Crash`/`Restart`: `_BugSplitCommit` already
+  violates `CursorImpliesEdges` in the half-committed state that readers
+  can see. Crash is kept so the main config covers restart from the
+  committed cursor.
 - Not modeled: multiple directions/sources, generations, staleness,
   versions, the strong-ID veto, more than one review.
 
