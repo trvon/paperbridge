@@ -225,7 +225,14 @@ TLC 2.19 (tla2tools v1.7.4), Java 25, Apple M4 Max.
 | `_WitnessSplit` | `NeverSplit` | 207 | 94 | 5 | 2 s |
 | `_WitnessSplitBlocked` | `NeverSplitBlocked` | 971 | 429 | 7 | 2 s |
 
-Full suite (`TLA_FULL=1`, `TLC_WORKERS=10`): 5 min 35 s wall. CI: see the PR checks for runner times.
+Full suite (`TLA_FULL=1`, `TLC_WORKERS=10`): 5 min 35 s wall.
+
+CI (`ubuntu-latest`, `TLC_WORKERS=auto`), pull-request set: job 2 min 50 s;
+main 39 s, `_Gen` 37 s, `_GenNoGuard` 29 s, `_SplitVeto` 6 s, each bug or
+witness 1-3 s. `_Split` and `_Undo2` (94 s and 99 s on the M4 Max) run
+only in the nightly workflow; it can be dispatched only once
+`formal-full.yml` is on the default branch, so its runner time is not yet
+measured.
 
 ## Obligations on the Rust store
 
