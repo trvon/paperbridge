@@ -47,6 +47,41 @@
 
 * Bump `quick-xml` to 0.41 (RUSTSEC-2026-0194 / 0195)
 
+## [2.4.0](https://github.com/trvon/paperbridge/compare/v2.3.0...v2.4.0) (2026-11-23)
+
+
+### Features
+
+* **citations:** read-through refs, cited-by and related over citegraph ([18261bd](https://github.com/trvon/paperbridge/commit/18261bd53e5a363624f992b66cf8e92db36e2a94))
+* **citations:** send the configured OpenAlex API key ([6e3f530](https://github.com/trvon/paperbridge/commit/6e3f53013fcf58ffd3405012f95f9940655cd8f5))
+* **citegraph:** add SQLite citation store crate and shared ID normalizer ([b757b31](https://github.com/trvon/paperbridge/commit/b757b31324620fa4bb31ddf78599918e93ff9cc6))
+* **citegraph:** SQLite citation store and read-through citation commands (stage 2) ([ec53bea](https://github.com/trvon/paperbridge/commit/ec53bead2a7258526ef98618a9289f9372140342))
+* **cli,mcp:** add papers refs|cited-by|related and get_citations ([66af5a0](https://github.com/trvon/paperbridge/commit/66af5a0b668388486ffa9fb9cfe5269f5d1065ea))
+* **notices:** retraction/correction notices on resolve_doi and open_paper ([f898efe](https://github.com/trvon/paperbridge/commit/f898efefd58d181fb5c3cc5e86a16995760a6ed0))
+
+
+### Bug Fixes
+
+* **citations:** expose the source-reported total as an estimate ([f97f904](https://github.com/trvon/paperbridge/commit/f97f904ee042b8dd95e01c12c8818ed1f2fb3e18))
+* **citations:** expose the source-reported total as an estimate ([a7e5300](https://github.com/trvon/paperbridge/commit/a7e53008cfbce28a3da3e7ba2e6f0b062d0a66d0))
+* **citations:** read across versions, fit the MCP budget, order merges ([764ad5c](https://github.com/trvon/paperbridge/commit/764ad5c22162dd7a0af92e13bb59f77cf8ca6e0b))
+* **citations:** shared rate/daily budgets, counted retries, distinct paging ([e417f7f](https://github.com/trvon/paperbridge/commit/e417f7f61ac1157df50e8c9c02f6cce0081123ec))
+* **citegraph:** class-level undo veto; redo lifts its separation ([66bbe62](https://github.com/trvon/paperbridge/commit/66bbe62a664a7d95f7e635050a73fbf3e837b725))
+* **citegraph:** per-id works, recomputed classes, generation-stamped staleness ([f0867cc](https://github.com/trvon/paperbridge/commit/f0867cc0bba79351da4859096b39bd0e5a7597e8))
+* **citegraph:** undo only the outermost merge of a class ([c9db93b](https://github.com/trvon/paperbridge/commit/c9db93bfdf8ab9872bcf03bd49b3fea41625e445))
+* **citegraph:** version split only for the outermost merge (rule 12) ([56d1db1](https://github.com/trvon/paperbridge/commit/56d1db164e27814ba3dd0b2894a3e6713b23b5d7))
+* **crossref:** retry DOI resolution with the legacy form on 404 ([b552bef](https://github.com/trvon/paperbridge/commit/b552bef9f44ea42f0f15ddce814034a74652ed1d))
+* **deps:** bump url to 2.5.9 and ignore chrono unmaintained advisory ([504fada](https://github.com/trvon/paperbridge/commit/504fadaad9b72a4c75bb3bbd3a20e5e4ad3b116c))
+* **ids:** keep every DOI the old normalizer accepted; legacy lookup forms ([2c7b3b8](https://github.com/trvon/paperbridge/commit/2c7b3b8b4fcb17e906b28f11284915be4125d055))
+* **notices:** bound OpenAlex check, report coverage, harden parsing ([95d20be](https://github.com/trvon/paperbridge/commit/95d20be4db339430d10930c30193c154b718c437))
+* **notices:** route OpenAlex check via send_once, keep retractions under cap ([f9a61a8](https://github.com/trvon/paperbridge/commit/f9a61a8aaeeba9cb3d58a5c2e1744bf3464a71f9))
+* updating skill file ([d043e4a](https://github.com/trvon/paperbridge/commit/d043e4a3dfbba195bb5db834f64b2f402e9549bc))
+
+
+### Performance Improvements
+
+* **citegraph:** O(class) joins with explicit class member lists ([6d5b65c](https://github.com/trvon/paperbridge/commit/6d5b65cac044b63b0335a5099dd2e7f8c0e1a291))
+
 ## [2.3.0](https://github.com/trvon/paperbridge/compare/v2.2.1...v2.3.0) (2026-11-13)
 
 
