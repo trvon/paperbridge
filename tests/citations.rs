@@ -159,7 +159,8 @@ async fn cited_by_resumes_from_committed_cursor() {
     assert_eq!(first.hits.len(), 2);
     assert!(first.has_more && first.truncated);
     assert_eq!(first.next_offset, Some(2));
-    assert_eq!(first.count_kind, CountKind::Unknown);
+    assert_eq!(first.count_kind, CountKind::Estimate);
+    assert_eq!(first.total_count, Some(5));
     assert_eq!(first.coverage[0].total_reported, Some(5));
     assert_eq!(first.hits[0].why[0], "cites subject");
 
@@ -635,4 +636,47 @@ async fn openalex_api_key_is_sent_and_redacted() {
     assert_eq!(out.hits.len(), 2);
     let json = serde_json::to_string(&out).unwrap();
     assert!(!json.contains("oa-secret-key"));
+}
+
+/// Red test for the cited-by total gap found in live testing (2026-11-22):
+/// OpenAlex reported 106,581 citing works for 10.1038/nature14539, but the
+/// envelope said `total_count: null`, `count_kind: "unknown"`; the number was
+/// only visible under `coverage`. A partial fetch whose source reports a total
+/// must surface it as an estimate so agents can decide how far to page.
+#[tokio::test]
+async fn partial_cited_by_exposes_upstream_total_as_estimate() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    mount_seed(&server, 1).await;
+    Mock::given(method("GET"))
+        .and(path("/oa/works"))
+        .and(query_param("filter", "cites:W1"))
+        .and(query_param("cursor", "*"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "meta": {"count": 106_581, "next_cursor": "c2"},
+            "results": [work(10, None), work(11, None)],
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let svc = service(&server, &dir, false, CallBudget::default());
+
+    let page = svc
+        .get_citations(req("doi:10.5555/seed", CitationDirection::CitedBy, 2, 0))
+        .await
+        .unwrap();
+    assert!(page.truncated && page.has_more);
+    assert_eq!(page.coverage[0].total_reported, Some(106_581));
+
+    let wire = serde_json::to_value(&page).unwrap();
+    assert_eq!(
+        wire["total_count"],
+        json!(106_581),
+        "partial fetch should surface the source-reported total"
+    );
+    assert_eq!(
+        wire["count_kind"],
+        json!("estimate"),
+        "an unverified upstream total must be labelled an estimate, not exact"
+    );
 }

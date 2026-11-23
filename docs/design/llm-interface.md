@@ -82,7 +82,8 @@ All list and search returns (library items, collections, papers) use:
 Rules:
 
 - `count_kind` is `candidate_window` for merged paper searches; this total is not the global index count. A fixed source prefix avoids pagination-induced reranking, but upstream changes can still reorder results between calls.
-- Library `total_count` is nullable: `count_kind=unknown` when not proven, `exact` only when exhaustion proves the count. `has_more` uses a fetched sentinel, never an invented extra row.
+- Library `total_count` is nullable: `count_kind=unknown` when not proven, `exact` only when exhaustion proves the count.
+- Citation lists (`get_citations`, `papers refs|cited-by|related`) use `count_kind=estimate` when the fetch is partial but a source reported a total: `total_count` is the largest reported total, never below the rows already shown. The exact count can end up smaller (merges, self-loops, unresolved rows). With no reported total it stays `unknown` and `null`. `has_more` uses a fetched sentinel, never an invented extra row.
 - Do not return a bare JSON array for primary agent surfaces.
 - `limit == 0` is rejected or clamped with an actionable error (do not mean “all”).
 - `diagnostics` may be omitted for pure local library calls that cannot fail
