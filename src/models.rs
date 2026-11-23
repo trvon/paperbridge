@@ -586,6 +586,10 @@ pub enum CountKind {
     Exact,
     Unknown,
     CandidateWindow,
+    /// A total reported by an upstream source but not yet proven by fetching
+    /// everything. Merges, self-loops and unresolved rows can make the final
+    /// exact count smaller.
+    Estimate,
 }
 
 /// Paginated list envelope for library item search.

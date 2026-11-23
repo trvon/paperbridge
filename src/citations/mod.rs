@@ -1189,15 +1189,21 @@ fn build_result(
     // not page fullness, decides whether more may exist.
     let has_more = shown_end < total || more_upstream;
     let hits_len = u32::try_from(hits.len()).unwrap_or(u32::MAX);
+    // A partial fetch still knows what its sources reported; expose the
+    // largest such total as an estimate, never below what has been shown.
+    let reported = coverage.iter().filter_map(|c| c.total_reported).max();
+    let (total_count, count_kind) = if all_complete {
+        (Some(total as u64), CountKind::Exact)
+    } else if let Some(r) = reported {
+        (Some(r.max(shown_end as u64)), CountKind::Estimate)
+    } else {
+        (None, CountKind::Unknown)
+    };
     CitationsResult {
         hit_id: subject_hit,
         direction,
-        total_count: all_complete.then(|| u32::try_from(total).unwrap_or(u32::MAX)),
-        count_kind: if all_complete {
-            CountKind::Exact
-        } else {
-            CountKind::Unknown
-        },
+        total_count: total_count.map(|t| u32::try_from(t).unwrap_or(u32::MAX)),
+        count_kind,
         offset,
         limit,
         has_more,
