@@ -1,6 +1,6 @@
 ---
 name: paperbridge
-description: Use when a task involves Zotero (search, collections, items, PDFs, full-text), DOI/Crossref resolution, searching the YAMS research workspace or external paper sources, or retrieving locally cached papers from the Paperseed corpus. Provides both a CLI (`paperbridge ...`) and an MCP server (`paperbridge serve`). Prefer MCP tools when available; fall back to CLI invocation otherwise.
+description: Use when a task involves Zotero (search, collections, items, PDFs, full-text), DOI/Crossref resolution and retraction-notice checks, searching the YAMS research workspace or external paper sources, walking citation graphs (references, cited-by, related works), resolving institutional access or fetching paywalled PDFs through a signed-in Chrome profile, or retrieving locally cached papers from the Paperseed corpus. Provides both a CLI (`paperbridge ...`) and an MCP server (`paperbridge serve`). Prefer MCP tools when available; fall back to CLI invocation otherwise.
 ---
 
 # paperbridge
@@ -17,11 +17,12 @@ for downstream agents.
 ## When to use
 
 - Search a Zotero library or browse collections, tags, attachments.
-- Resolve a DOI to structured metadata (title, authors, year, journal, abstract).
+- Resolve a DOI to structured metadata (title, authors, year, journal, abstract) and check retraction, correction, or expression-of-concern notices before citing.
 - Search the local YAMS research workspace and external indexes: arXiv, Crossref, OpenAlex, Europe PMC, DBLP,
   OpenReview, PubMed, HuggingFace Papers, Semantic Scholar, CORE, NASA ADS, ScholarAPI, and OpenLibrary (books).
+- Walk citation graphs: fetch references (`refs`), citing papers (`cited-by`), citation contexts, and related works (`related`).
 - Look up technical books by title or ISBN (`978-...`), retrieve table of contents (`--want toc`), and slice chapters (`--chapter <n>`).
-- Retrieve full-text or structured content from a Zotero attachment or a cached paper.
+- Retrieve full-text or structured content from a Zotero attachment or a cached paper, or fetch paywalled PDFs via institutional access and a user's signed-in Chrome profile.
 - Validate, create, update, or delete Zotero items and collections.
 - Import or query the local Paperseed corpus (`paperseed_enabled = true`).
 
@@ -30,9 +31,9 @@ for downstream agents.
 - **MCP (preferred in agent contexts):** use the registered `paperbridge` MCP
   server tools directly — they mirror the CLI commands below.
 - **CLI:** `paperbridge <domain> <action>`. Structured commands print readable
-  text by default; add the global `--json` flag for machine-readable JSON.
-  Runtime errors also use JSON with `--json` and always stay on stderr, so
-  stdout remains safe for automation.
+  text by default; pass the global `--json` flag (`paperbridge --json <domain> <action> ...`)
+  for machine-readable JSON. Runtime errors also use JSON with `--json` and
+  always stay on stderr, so stdout remains safe for automation.
 
 ## First-time setup
 
@@ -118,11 +119,11 @@ Check them before citing a paper. `search_papers` hits do not carry notices.
 ### Follow citations — references, cited-by, related
 
 ```bash
-paperbridge papers refs doi:10.1038/nature12373 --json
-paperbridge papers cited-by arxiv:1706.03762 --limit 25 --json
-paperbridge papers cited-by arxiv:1706.03762 --offset 25 --json   # continues the stored cursor
-paperbridge papers refs doi:10.1038/nature12373 --include contexts --json
-paperbridge papers related doi:10.1038/nature12373 --json
+paperbridge --json papers refs doi:10.1038/nature12373
+paperbridge --json papers cited-by arxiv:1706.03762 --limit 25
+paperbridge --json papers cited-by arxiv:1706.03762 --offset 25   # continues the stored cursor
+paperbridge --json papers refs doi:10.1038/nature12373 --include contexts
+paperbridge --json papers related doi:10.1038/nature12373
 ```
 
 MCP: `get_citations { hit_id, direction: "refs" | "cited_by" | "related",
@@ -243,8 +244,9 @@ paperbridge library read --item-key ABCD1234
 paperbridge library read-search -q "sparse attention" --result-index 0 --search-limit 5
 ```
 
-**Agent spine:** `search_items` / `search_papers` → `open_paper` →
-`query_paper` / `resolve_doi`. Use Vox `prepare_*` tools only for read-aloud.
+**Agent spine:** `search_items` / `search_papers` → `open_paper` (or
+`fetch_paper` for paywalled institutional PDFs) → `query_paper` / `resolve_doi`
+/ `get_citations`. Use Vox `prepare_*` tools only for read-aloud.
 
 MCP tools:
 
