@@ -54,6 +54,11 @@ the command when a script or agent needs the stable JSON envelope:
 paperbridge --json library query -q "machine learning" --limit 3
 ```
 
+With `--json`, a failure prints `{ "error", "reason", "try" }` on stderr, exits
+non-zero, and leaves stdout empty. MCP results are always JSON. Shell
+completions, `papers skill`, BibTeX export and `config snippet` keep their
+native formats; `paperseed corpus export` defaults to BibTeX.
+
 1. Prepare read-aloud chunks:
 
 ```bash
